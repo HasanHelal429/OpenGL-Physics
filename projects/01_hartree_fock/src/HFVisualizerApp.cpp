@@ -1,19 +1,15 @@
 #include "HFVisualizerApp.hpp"
 
+#include "RadialFieldSampler.hpp"
+
 #include <imgui.h>
-#include <implot.h>
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <numbers>
 
 namespace hf {
 
 namespace {
-constexpr double kPi = std::numbers::pi;
-constexpr double kRMinVisual = 0.02;
-constexpr double kRMaxVisual = 6.0;
 
 const char* StateLabel(ScfWorker::State state) {
     switch (state) {
@@ -27,39 +23,52 @@ const char* StateLabel(ScfWorker::State state) {
     return "?";
 }
 
-// Filters (r, y) pairs to the visualization window, matching the Python
-// scf_movie.py mask -- core shells sit at r~1/Z, valence at r~few Bohr, so a
-// linear/unfiltered axis would squash the core peak into invisible width.
-void MaskedSeries(const std::vector<double>& r, const std::vector<double>& y, std::vector<double>& xOut,
-                   std::vector<double>& yOut) {
-    xOut.clear();
-    yOut.clear();
-    for (size_t i = 0; i < r.size(); ++i) {
-        if (r[i] > kRMinVisual && r[i] < kRMaxVisual) {
-            xOut.push_back(r[i]);
-            yOut.push_back(y[i]);
-        }
-    }
-}
+// Consolas ships with Windows by default; loaded by absolute path rather
+// than a vendored asset (this whole toolchain is already Windows/MinGW-
+// specific -- see cpp_toolchain_setup notes). Swap for a vendored .ttf
+// under assets/fonts/ later if portability off this machine matters.
+const char* kFontPath = "C:\\Windows\\Fonts\\consola.ttf";
 
 } // namespace
 
 HFVisualizerApp::Config HFVisualizerApp::MakeConfig() {
     Config config;
     config.title = "Atomic SCF Solver (Hartree + Slater/X-alpha / LDA)";
-    config.width = 1400;
-    config.height = 900;
+    config.width = 1500;
+    config.height = 950;
     return config;
 }
 
-HFVisualizerApp::HFVisualizerApp() : fw::Application(MakeConfig()) {}
+HFVisualizerApp::HFVisualizerApp()
+    : fw::Application(MakeConfig()),
+      m_font(fw::Font::FromFile(kFontPath, 22.0f)),
+      m_textRenderer(),
+      m_densityView(),
+      m_spectrumView(m_font, m_textRenderer),
+      m_convergenceChart(m_font, m_textRenderer) {}
 
-void HFVisualizerApp::OnStart() {
-    ImPlot::CreateContext();
-}
+HFVisualizerApp::ViewportRects HFVisualizerApp::ComputeLayout() const {
+    ViewportRects vp{};
+    const int chartsHeight = static_cast<int>(static_cast<float>(m_height) * 0.35f);
+    const int threeDHeight = m_height - chartsHeight;
 
-void HFVisualizerApp::OnShutdown() {
-    ImPlot::DestroyContext();
+    vp.threeDX = 0;
+    vp.threeDY = chartsHeight;
+    vp.threeDW = m_width;
+    vp.threeDH = threeDHeight;
+
+    const int halfWidth = m_width / 2;
+    vp.spectrumX = 0;
+    vp.spectrumY = 0;
+    vp.spectrumW = halfWidth;
+    vp.spectrumH = chartsHeight;
+
+    vp.convergenceX = halfWidth;
+    vp.convergenceY = 0;
+    vp.convergenceW = m_width - halfWidth;
+    vp.convergenceH = chartsHeight;
+
+    return vp;
 }
 
 void HFVisualizerApp::StartRun() {
@@ -67,16 +76,44 @@ void HFVisualizerApp::StartRun() {
     params.Z = m_Z;
     params.method = m_method;
     params.alpha = static_cast<double>(m_alpha);
-    m_energyHistory.clear();
+
     m_lastRenderedIteration = 0;
+    m_isoThreshold = -1.0;
+    m_spectrumView.Reset();
+    m_convergenceChart.Reset();
     m_worker.Start(params);
 }
 
+void HFVisualizerApp::OnRender() {
+    const ViewportRects vp = ComputeLayout();
+
+    if (auto snapshot = m_worker.LatestSnapshot()) {
+        if (snapshot->iteration > m_lastRenderedIteration) {
+            m_lastRenderedIteration = snapshot->iteration;
+
+            if (m_isoThreshold < 0.0) {
+                m_isoThreshold = SuggestIsosurfaceThreshold(snapshot->r, snapshot->rho);
+            }
+            m_densityView.UpdateField(snapshot->r, snapshot->rho, m_isoThreshold);
+            m_spectrumView.UpdateEnergies(snapshot->orbitalEnergies);
+            m_convergenceChart.AddPoint(snapshot->iteration, snapshot->eTotal);
+        }
+    }
+
+    m_densityView.Render(vp.threeDX, vp.threeDY, vp.threeDW, vp.threeDH);
+
+    m_spectrumView.SetRegion(vp.spectrumX, vp.spectrumY, vp.spectrumW, vp.spectrumH);
+    m_spectrumView.Render();
+
+    m_convergenceChart.SetRegion(vp.convergenceX, vp.convergenceY, vp.convergenceW, vp.convergenceH);
+    m_convergenceChart.Render();
+
+    glViewport(0, 0, m_width, m_height);
+}
+
 void HFVisualizerApp::OnImGui() {
-    ImGui::Begin("Atomic SCF Solver", nullptr, ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("Controls", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
     DrawControls();
-    ImGui::Separator();
-    DrawPlots();
     ImGui::End();
 }
 
@@ -93,6 +130,22 @@ void HFVisualizerApp::DrawControls() {
     ImGui::BeginDisabled(m_method == Method::Lda);
     ImGui::SliderFloat("alpha", &m_alpha, 0.5f, 1.2f, "%.3f");
     ImGui::EndDisabled();
+
+    ImGui::Separator();
+
+    int modeIdx = (m_densityView.Mode() == DensityViewMode::ParticleCloud) ? 0 : 1;
+    if (ImGui::RadioButton("Particle cloud", modeIdx == 0)) m_densityView.SetMode(DensityViewMode::ParticleCloud);
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Isosurface", modeIdx == 1)) m_densityView.SetMode(DensityViewMode::Isosurface);
+
+    ImGui::BeginDisabled(m_densityView.Mode() != DensityViewMode::Isosurface);
+    float logThreshold = std::log10(std::max(m_isoThreshold, 1e-12));
+    if (ImGui::SliderFloat("iso threshold (log10 rho)", &logThreshold, -8.0f, 2.0f, "%.2f")) {
+        m_isoThreshold = std::pow(10.0, static_cast<double>(logThreshold));
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Separator();
 
     const ScfWorker::State state = m_worker.GetState();
     const bool running = (state == ScfWorker::State::Running);
@@ -120,114 +173,43 @@ void HFVisualizerApp::DrawControls() {
     }
 }
 
-void HFVisualizerApp::DrawPlots() {
-    auto snapshot = m_worker.LatestSnapshot();
-    if (snapshot && snapshot->iteration > m_lastRenderedIteration) {
-        m_energyHistory.push_back(snapshot->eTotal);
-        m_lastRenderedIteration = snapshot->iteration;
-    }
+void HFVisualizerApp::OnMouseButton(int button, int action, int mods) {
+    (void)mods;
+    if (button != GLFW_MOUSE_BUTTON_LEFT) return;
 
-    const ImVec2 plotSize(-1.0f, 280.0f);
-    const float columnWidth = ImGui::GetContentRegionAvail().x * 0.5f;
-
-    ImGui::Columns(2, "hf_plot_columns", false);
-    ImGui::SetColumnWidth(0, columnWidth);
-
-    // Panel 1: electron density 4*pi*r^2*rho(r).
-    if (ImPlot::BeginPlot("Electron density", plotSize)) {
-        ImPlot::SetupAxis(ImAxis_X1, "r (Bohr)");
-        ImPlot::SetupAxis(ImAxis_Y1, "4*pi*r^2*rho(r)");
-        ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
-        ImPlot::SetupAxisLimits(ImAxis_X1, kRMinVisual, kRMaxVisual, ImPlotCond_Once);
-        if (snapshot) {
-            std::vector<double> xs, density(snapshot->r.size());
-            for (size_t i = 0; i < snapshot->r.size(); ++i) {
-                density[i] = 4.0 * kPi * snapshot->r[i] * snapshot->r[i] * snapshot->rho[i];
-            }
-            std::vector<double> xMasked, yMasked;
-            MaskedSeries(snapshot->r, density, xMasked, yMasked);
-            if (!xMasked.empty()) ImPlot::PlotLine("density", xMasked.data(), yMasked.data(), static_cast<int>(xMasked.size()));
+    if (action == GLFW_PRESS) {
+        if (ImGui::GetIO().WantCaptureMouse) return;
+        double x = 0.0, y = 0.0;
+        glfwGetCursorPos(m_window, &x, &y);
+        const ViewportRects vp = ComputeLayout();
+        // GLFW cursor coords are window-space, top-left origin, y-down;
+        // vp.threeDH is exactly the height of that same region measured
+        // from the window's top, so this comparison lines up directly.
+        if (y < static_cast<double>(vp.threeDH)) {
+            m_orbiting = true;
+            m_lastMouseX = x;
+            m_lastMouseY = y;
         }
-        ImPlot::EndPlot();
+    } else if (action == GLFW_RELEASE) {
+        m_orbiting = false;
     }
+}
 
-    ImGui::NextColumn();
-
-    // Panel 2: effective potential r*V_eff(r), with a -Z bare-nucleus reference.
-    if (ImPlot::BeginPlot("Effective potential", plotSize)) {
-        ImPlot::SetupAxis(ImAxis_X1, "r (Bohr)");
-        ImPlot::SetupAxis(ImAxis_Y1, "r * V_eff(r)");
-        ImPlot::SetupAxisScale(ImAxis_X1, ImPlotScale_Log10);
-        ImPlot::SetupAxisLimits(ImAxis_X1, kRMinVisual, kRMaxVisual, ImPlotCond_Once);
-        if (snapshot) {
-            std::vector<double> rV(snapshot->r.size());
-            for (size_t i = 0; i < snapshot->r.size(); ++i) rV[i] = snapshot->r[i] * snapshot->V[i];
-            std::vector<double> xMasked, yMasked;
-            MaskedSeries(snapshot->r, rV, xMasked, yMasked);
-            if (!xMasked.empty()) ImPlot::PlotLine("r*V_eff", xMasked.data(), yMasked.data(), static_cast<int>(xMasked.size()));
-
-            const double refX[2] = {kRMinVisual, kRMaxVisual};
-            const double refY[2] = {static_cast<double>(-m_Z), static_cast<double>(-m_Z)};
-            ImPlot::PlotLine("-Z (bare nucleus)", refX, refY, 2);
-        }
-        ImPlot::EndPlot();
+void HFVisualizerApp::OnMouseMove(double x, double y) {
+    if (m_orbiting) {
+        const float dx = static_cast<float>(x - m_lastMouseX);
+        const float dy = static_cast<float>(y - m_lastMouseY);
+        m_densityView.GetCamera().Orbit(dx, dy);
     }
+    m_lastMouseX = x;
+    m_lastMouseY = y;
+}
 
-    ImGui::NextColumn();
-
-    // Panel 3: occupied orbital energy levels, grouped by angular momentum l.
-    if (ImPlot::BeginPlot("Orbital energy levels", plotSize)) {
-        ImPlot::SetupAxis(ImAxis_X1, "shell (l)");
-        ImPlot::SetupAxis(ImAxis_Y1, "orbital energy (Ha, symlog)");
-        ImPlot::SetupAxisScale(ImAxis_Y1, ImPlotScale_SymLog);
-        static const double ticks[4] = {0, 1, 2, 3};
-        static const char* tickLabels[4] = {"s", "p", "d", "f"};
-        ImPlot::SetupAxisTicks(ImAxis_X1, ticks, 4, tickLabels);
-        ImPlot::SetupAxisLimits(ImAxis_X1, -0.5, 3.5, ImPlotCond_Once);
-        if (snapshot) {
-            std::vector<double> xs[4], ys[4];
-            for (const auto& [nl, eps] : snapshot->orbitalEnergies) {
-                const int l = nl.second;
-                if (l >= 0 && l < 4) {
-                    xs[l].push_back(static_cast<double>(l));
-                    ys[l].push_back(eps);
-                }
-            }
-            static const char* names[4] = {"s levels", "p levels", "d levels", "f levels"};
-            for (int l = 0; l < 4; ++l) {
-                if (!xs[l].empty()) {
-                    ImPlotSpec spec;
-                    spec.Marker = ImPlotMarker_Square;
-                    spec.MarkerSize = 8.0f;
-                    ImPlot::PlotScatter(names[l], xs[l].data(), ys[l].data(), static_cast<int>(xs[l].size()), spec);
-                }
-            }
-        }
-        ImPlot::EndPlot();
+void HFVisualizerApp::OnScroll(double xoffset, double yoffset) {
+    (void)xoffset;
+    if (!ImGui::GetIO().WantCaptureMouse) {
+        m_densityView.GetCamera().Zoom(static_cast<float>(yoffset));
     }
-
-    ImGui::NextColumn();
-
-    // Panel 4: total-energy convergence trace.
-    if (ImPlot::BeginPlot("Total energy convergence", plotSize)) {
-        ImPlot::SetupAxis(ImAxis_X1, "SCF iteration");
-        ImPlot::SetupAxis(ImAxis_Y1, "E_total (Ha)");
-        if (!m_energyHistory.empty()) {
-            std::vector<double> iters(m_energyHistory.size());
-            for (size_t i = 0; i < iters.size(); ++i) iters[i] = static_cast<double>(i + 1);
-            ImPlot::PlotLine("E_total", iters.data(), m_energyHistory.data(), static_cast<int>(iters.size()));
-
-            ImPlotSpec markerSpec;
-            markerSpec.Marker = ImPlotMarker_Circle;
-            markerSpec.MarkerSize = 6.0f;
-            const double lastIter = iters.back();
-            const double lastEnergy = m_energyHistory.back();
-            ImPlot::PlotScatter("current", &lastIter, &lastEnergy, 1, markerSpec);
-        }
-        ImPlot::EndPlot();
-    }
-
-    ImGui::Columns(1);
 }
 
 } // namespace hf
