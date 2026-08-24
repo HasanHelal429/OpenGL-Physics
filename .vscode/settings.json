@@ -1,0 +1,8 @@
+{
+    "cmake.useCMakePresets": "always",
+    "cmake.configureOnOpen": true,
+    "files.associations": {
+        "*.vert": "glsl",
+        "*.frag": "glsl"
+    }
+}

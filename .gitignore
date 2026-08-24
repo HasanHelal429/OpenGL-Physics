@@ -1,0 +1,24 @@
+# Build output
+/build/
+/out/
+CMakeUserPresets.json
+
+# vcpkg
+vcpkg_installed/
+
+# Compiled artifacts
+*.o
+*.obj
+*.exe
+*.dll
+*.lib
+*.a
+*.pdb
+*.ilk
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude Code local state
+/.claude/
