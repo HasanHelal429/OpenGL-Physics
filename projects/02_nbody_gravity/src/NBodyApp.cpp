@@ -73,34 +73,85 @@ void NBodyApp::LoadScenario() {
     m_driftChart.Reset();
 }
 
+void NBodyApp::OnUpdate(double dt) {
+    (void)dt;
+    m_didFixedUpdateThisFrame = false;
+}
+
 void NBodyApp::OnFixedUpdate(double fixedDt) {
-    (void)fixedDt;
     if (!m_running && !m_stepOnce) return;
 
-    const int steps = m_stepOnce ? 1 : m_substeps;
+    // Application::Run()'s fixed-timestep loop decides how many times to
+    // call OnFixedUpdate this frame from the *previous* frame's measured
+    // debt, before it has any idea these calls are slow -- at large N a
+    // single physics step can itself take longer than fixedDt, and a naive
+    // wall-clock "skip if too soon" gate doesn't help, because a call that
+    // always does real (slow) work always makes enough real time pass to
+    // satisfy such a gate; only counting calls actually caps them. So this
+    // hard-caps real physics work to once per *rendered* frame (the flag is
+    // reset in OnUpdate, which Application::Run() calls exactly once before
+    // the catch-up loop) -- any further catch-up iterations this frame
+    // become a single bool check, and leftover simulated-time debt simply
+    // isn't repaid this frame, rather than the loop hammering through its
+    // full nominal catch-up count (and the CPU) before a single frame ever
+    // renders. An explicit single-step (paused, "Step" button) always runs
+    // regardless.
+    if (!m_stepOnce) {
+        if (m_didFixedUpdateThisFrame) return;
+        m_didFixedUpdateThisFrame = true;
+    }
+
+    const int maxSteps = m_stepOnce ? 1 : m_substeps;
     m_stepOnce = false;
 
+    // "Substeps" lets a cheap (small-N) simulation advance faster than one
+    // step per rendered frame. At large N a single step can itself exceed
+    // fixedDt, and Application::Run()'s fixed-timestep loop has no cap on
+    // how many (now-expensive) OnFixedUpdate calls it fires back-to-back to
+    // catch up -- multiplying that by a fixed substep count compounds into
+    // multi-second per-frame stalls well before rendering ever runs. So
+    // this always completes at least one step, then bails out of the
+    // substep loop once this call has already spent roughly its fixedDt
+    // budget, leaving any remaining substeps for later ticks instead of
+    // trying to force them all in now. That keeps each OnFixedUpdate call's
+    // cost close to fixedDt regardless of N, which is what keeps the
+    // catch-up loop from spiraling.
     const auto t0 = std::chrono::steady_clock::now();
-    for (int i = 0; i < steps; ++i) {
+    int steps = 0;
+    for (; steps < maxSteps; ++steps) {
         m_system.Step(m_dt, m_G, m_softening, m_solver, m_theta);
         m_simTime += m_dt;
         ++m_stepCount;
+
+        const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        if (elapsedMs > fixedDt * 1000.0) {
+            ++steps;
+            break;
+        }
     }
     const auto t1 = std::chrono::steady_clock::now();
     m_lastStepMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / static_cast<double>(steps);
 
+    // The O(N^2) energy diagnostic runs on a background thread (see
+    // DiagnosticsWorker) so it never stalls the physics/render loop, no
+    // matter how large N gets. RequestCompute is a cheap O(N) state copy
+    // that silently no-ops if the previous computation hasn't finished yet.
     ++m_diagnosticsTickCounter;
     if (m_trackDiagnostics && m_diagnosticsTickCounter >= kDiagnosticsEveryNTicks) {
         m_diagnosticsTickCounter = 0;
-        const double e = m_system.TotalEnergy(m_G, m_softening);
-        const glm::dvec3 L = m_system.AngularMomentum();
+        m_diagnosticsWorker.RequestCompute(m_simTime, m_system.Positions(), m_system.Velocities(), m_system.Masses(),
+                                            m_G, m_softening);
+    }
+
+    DiagnosticsWorker::Result diag;
+    if (m_diagnosticsWorker.PollResult(diag)) {
         const double L0mag = glm::length(m_angularMomentum0);
-        const double Ldeviation = glm::length(L - m_angularMomentum0);
+        const double Ldeviation = glm::length(diag.angularMomentum - m_angularMomentum0);
 
-        m_lastEnergyDriftPct = (m_energy0 != 0.0) ? 100.0 * (e - m_energy0) / std::abs(m_energy0) : 0.0;
-        m_lastLDriftPct = (L0mag > 1e-12) ? 100.0 * Ldeviation / L0mag : 100.0 * glm::length(L);
+        m_lastEnergyDriftPct = (m_energy0 != 0.0) ? 100.0 * (diag.energy - m_energy0) / std::abs(m_energy0) : 0.0;
+        m_lastLDriftPct = (L0mag > 1e-12) ? 100.0 * Ldeviation / L0mag : 100.0 * glm::length(diag.angularMomentum);
 
-        m_driftChart.AddPoint(m_simTime, m_lastEnergyDriftPct, m_lastLDriftPct);
+        m_driftChart.AddPoint(diag.simTime, m_lastEnergyDriftPct, m_lastLDriftPct);
     }
 }
 
@@ -136,7 +187,7 @@ void NBodyApp::UpdateParticleInstances() {
 
     const float baseSize = static_cast<float>(std::clamp(0.6 / std::sqrt(std::max<double>(1.0, static_cast<double>(n))), 0.006, 0.08));
 
-    std::vector<fw::ParticleInstance> instances(n);
+    m_particleScratch.resize(n);
     for (size_t i = 0; i < n; ++i) {
         const float t = static_cast<float>(std::clamp(glm::length(vel[i]) / maxSpeed, 0.0, 1.0));
         glm::vec3 color;
@@ -146,13 +197,12 @@ void NBodyApp::UpdateParticleInstances() {
             color = glm::mix(glm::vec3(1.0f, 1.0f, 1.0f), glm::vec3(1.0f, 0.55f, 0.15f), (t - 0.5f) * 2.0f);
         }
 
-        fw::ParticleInstance inst;
+        fw::ParticleInstance& inst = m_particleScratch[i];
         inst.position = glm::vec3(pos[i]);
         inst.color = glm::vec4(color, 0.9f);
         inst.size = baseSize * static_cast<float>(std::cbrt(mass[i] / maxMass) * 0.6 + 0.4);
-        instances[i] = inst;
     }
-    m_particles.SetParticles(instances);
+    m_particles.SetParticles(m_particleScratch);
 }
 
 void NBodyApp::OnRender() {
@@ -240,12 +290,13 @@ void NBodyApp::DrawControls() {
     ImGui::SameLine();
     if (ImGui::Button("Reset")) LoadScenario();
 
-    ImGui::Checkbox("Track energy/L drift (O(N^2), throttled)", &m_trackDiagnostics);
+    ImGui::Checkbox("Track energy/L drift (O(N^2), background thread)", &m_trackDiagnostics);
 
     ImGui::Separator();
     ImGui::Text("N = %zu   sim t = %.4f   steps = %ld", m_system.Count(), m_simTime, m_stepCount);
     ImGui::Text("Solver step: %.3f ms/step", m_lastStepMs);
-    ImGui::Text("Energy drift: %+.3f%%   |L| drift: %.3f%%", m_lastEnergyDriftPct, m_lastLDriftPct);
+    ImGui::Text("Energy drift: %+.3f%%   |L| drift: %.3f%%  %s", m_lastEnergyDriftPct, m_lastLDriftPct,
+                m_diagnosticsWorker.Busy() ? "(computing...)" : "");
     ImGui::Text("FPS: %.1f", static_cast<double>(ImGui::GetIO().Framerate));
 }
 

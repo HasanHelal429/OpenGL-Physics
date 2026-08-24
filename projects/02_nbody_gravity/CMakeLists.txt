@@ -6,6 +6,7 @@ add_executable(02_nbody_gravity
     src/Octree.cpp
     src/Scenarios.cpp
     src/DriftChart.cpp
+    src/DiagnosticsWorker.cpp
     src/NBodyApp.cpp
 )
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DiagnosticsWorker.hpp"
 #include "DriftChart.hpp"
 #include "NBodySystem.hpp"
 #include "Scenarios.hpp"
@@ -23,6 +24,7 @@ public:
 
 protected:
     void OnStart() override;
+    void OnUpdate(double dt) override;
     void OnFixedUpdate(double fixedDt) override;
     void OnRender() override;
     void OnImGui() override;
@@ -50,6 +52,8 @@ private:
     DriftChart m_driftChart;
 
     NBodySystem m_system;
+    DiagnosticsWorker m_diagnosticsWorker;
+    std::vector<fw::ParticleInstance> m_particleScratch; // reused across frames to avoid a per-frame heap alloc
 
     ScenarioType m_scenarioType = ScenarioType::RotatingDisk;
     ScenarioParams m_scenarioParams;
@@ -63,6 +67,7 @@ private:
 
     bool m_running = true;
     bool m_stepOnce = false;
+    bool m_didFixedUpdateThisFrame = false;
     bool m_trackDiagnostics = true;
     int m_diagnosticsTickCounter = 0;
 
