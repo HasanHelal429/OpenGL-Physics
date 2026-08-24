@@ -5,12 +5,20 @@
 
 namespace nbody {
 
-enum class SolverType { Direct, BarnesHut };
+enum class SolverType { Direct, BarnesHut, AdaptiveFmm };
+
+// Dispatches to whichever solver's ComputeAccel* function matches `solver`.
+// Exposed standalone (not just through NBodySystem) so the benchmark panel
+// can run any solver against an arbitrary snapshot without needing a full
+// NBodySystem instance.
+void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
+                   double softening, double theta, std::vector<glm::dvec3>& accelOut);
 
 // Softened-gravity N-body system: SoA position/velocity/mass state plus a
 // kick-drift-kick (leapfrog) symplectic integrator. Force evaluation is
-// swappable per step (Direct O(N^2) or Barnes-Hut O(N log N), see
-// Octree.hpp) so the two can be compared live rather than only offline.
+// swappable per step (Direct O(N^2), Barnes-Hut O(N log N), or adaptive
+// FMM O(N) -- see Octree.hpp/AdaptiveFmm.hpp) so they can be compared live
+// rather than only offline.
 class NBodySystem {
 public:
     void SetParticles(std::vector<glm::dvec3> positions, std::vector<glm::dvec3> velocities,

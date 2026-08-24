@@ -1,5 +1,6 @@
 #include "NBodySystem.hpp"
 
+#include "AdaptiveFmm.hpp"
 #include "Octree.hpp"
 
 #include <cmath>
@@ -32,6 +33,15 @@ void ComputeAccelDirect(const std::vector<glm::dvec3>& pos, const std::vector<do
 
 } // namespace
 
+void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
+                   double softening, double theta, std::vector<glm::dvec3>& accelOut) {
+    switch (solver) {
+        case SolverType::Direct: ComputeAccelDirect(pos, mass, G, softening, accelOut); return;
+        case SolverType::BarnesHut: ComputeAccelBarnesHut(pos, mass, G, softening, theta, accelOut); return;
+        case SolverType::AdaptiveFmm: ComputeAccelAdaptiveFmm(pos, mass, G, softening, theta, accelOut); return;
+    }
+}
+
 void NBodySystem::SetParticles(std::vector<glm::dvec3> positions, std::vector<glm::dvec3> velocities,
                                 std::vector<double> masses) {
     m_pos = std::move(positions);
@@ -41,11 +51,7 @@ void NBodySystem::SetParticles(std::vector<glm::dvec3> positions, std::vector<gl
 }
 
 void NBodySystem::RecomputeAccel(double G, double softening, SolverType solver, double theta) {
-    if (solver == SolverType::Direct) {
-        ComputeAccelDirect(m_pos, m_mass, G, softening, m_accel);
-    } else {
-        ComputeAccelBarnesHut(m_pos, m_mass, G, softening, theta, m_accel);
-    }
+    ComputeAccel(solver, m_pos, m_mass, G, softening, theta, m_accel);
 }
 
 void NBodySystem::PrimeAccelerations(double G, double softening, SolverType solver, double theta) {
