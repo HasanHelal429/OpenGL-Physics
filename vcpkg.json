@@ -13,6 +13,9 @@
     {
       "name": "imgui",
       "features": ["glfw-binding", "opengl3-binding"]
-    }
+    },
+    "eigen3",
+    "spectra",
+    "implot"
   ]
 }

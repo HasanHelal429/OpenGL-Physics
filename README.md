@@ -21,6 +21,10 @@ framework/          Shared library ("physgl"): Application (window + fixed-
                      timestep loop + input), Shader, Camera.
 projects/            One executable per simulation. Numbered by creation order.
   00_hello_triangle/  Sanity-check project — spinning triangle + ImGui overlay.
+  01_hartree_fock/    Atomic Hartree-Fock-Slater / Kohn-Sham LDA SCF solver, ported
+                       from Physics Simulations/Quantum Mechanics/HF_solver/, with
+                       a live ImPlot view of density/potential/orbital energies/
+                       convergence as the SCF loop runs on a background thread.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so
@@ -41,6 +45,16 @@ cmake --build --preset debug
 
 Use `--preset release` for an optimized build. vcpkg builds dependencies
 from source on first configure, which can take a while.
+
+**For `01_hartree_fock` specifically, use the `release` preset.** Its SCF
+loop leans on Eigen/Spectra, whose header-only template code is dramatically
+slower without optimizations — e.g. Argon's SCF run went from single-digit
+seconds in Release to multiple minutes in Debug during development. Debug is
+fine for setting breakpoints, not for actually running a solve.
+
+Both presets need `C:\msys64\mingw64\bin` on `PATH` (added to the user
+env var during setup) and `VCPKG_ROOT=C:\vcpkg` — a terminal opened before
+that env change won't see them until restarted.
 
 ## Adding a new project
 
