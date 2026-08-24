@@ -41,37 +41,49 @@ struct MultipoleField {
 // 3D generalization of nbody.py's `_multipole_field_scalar`; every term
 // here was independently derived and then checked against that function's
 // exact 2D closed form (setting rz=0, Qxz=Qyz=0 reproduces it termwise).
+//
+// Written in terms of powers of 1/r^2 (one true division) rather than
+// dividing by r3/r5/r7/r9 separately (the original, more directly-
+// transcribed-from-the-formulas version did ~19 divisions here) -- this
+// function runs once per M2L interaction, i.e. it's the traversal's inner
+// loop, and division is far more expensive than multiplication on typical
+// hardware. Values are bit-for-bit equivalent modulo floating-point
+// reassociation.
 MultipoleField EvaluateMultipoleField(double M, const SymMat3& Q, const glm::dvec3& r, double G) {
     const double r2 = glm::dot(r, r);
-    const double rmag = std::sqrt(r2);
-    const double r3 = r2 * rmag;
-    const double r5 = r2 * r3;
-    const double r7 = r2 * r5;
-    const double r9 = r2 * r7;
+    const double invR2 = 1.0 / r2;
+    const double invR = std::sqrt(invR2); // == 1/|r|, avoids a second division
+    const double invR3 = invR2 * invR;
+    const double invR5 = invR3 * invR2;
+    const double invR7 = invR5 * invR2;
+    const double invR9 = invR7 * invR2;
 
     MultipoleField f;
 
     // Monopole.
-    f.accel = -G * M * r / r3;
-    f.hessian.xx = G * M * (r2 - 3.0 * r.x * r.x) / r5;
-    f.hessian.yy = G * M * (r2 - 3.0 * r.y * r.y) / r5;
-    f.hessian.zz = G * M * (r2 - 3.0 * r.z * r.z) / r5;
-    f.hessian.xy = -3.0 * G * M * r.x * r.y / r5;
-    f.hessian.xz = -3.0 * G * M * r.x * r.z / r5;
-    f.hessian.yz = -3.0 * G * M * r.y * r.z / r5;
+    f.accel = -G * M * invR3 * r;
+    f.hessian.xx = G * M * (r2 - 3.0 * r.x * r.x) * invR5;
+    f.hessian.yy = G * M * (r2 - 3.0 * r.y * r.y) * invR5;
+    f.hessian.zz = G * M * (r2 - 3.0 * r.z * r.z) * invR5;
+    f.hessian.xy = -3.0 * G * M * r.x * r.y * invR5;
+    f.hessian.xz = -3.0 * G * M * r.x * r.z * invR5;
+    f.hessian.yz = -3.0 * G * M * r.y * r.z * invR5;
 
     // Quadrupole correction.
     const glm::dvec3 Qr = Q.Apply(r);
     const double Qr2 = glm::dot(r, Qr); // Q_ab * r_a * r_b
 
-    f.accel += G * Qr / r5 - 2.5 * G * Qr2 * r / r7;
+    f.accel += G * invR5 * Qr - (2.5 * G * Qr2 * invR7) * r;
 
-    f.hessian.xx += -G * Q.xx / r5 + 10.0 * G * Qr.x * r.x / r7 + 2.5 * G * Qr2 / r7 - 17.5 * G * Qr2 * r.x * r.x / r9;
-    f.hessian.yy += -G * Q.yy / r5 + 10.0 * G * Qr.y * r.y / r7 + 2.5 * G * Qr2 / r7 - 17.5 * G * Qr2 * r.y * r.y / r9;
-    f.hessian.zz += -G * Q.zz / r5 + 10.0 * G * Qr.z * r.z / r7 + 2.5 * G * Qr2 / r7 - 17.5 * G * Qr2 * r.z * r.z / r9;
-    f.hessian.xy += -G * Q.xy / r5 + 5.0 * G * (Qr.x * r.y + Qr.y * r.x) / r7 - 17.5 * G * Qr2 * r.x * r.y / r9;
-    f.hessian.xz += -G * Q.xz / r5 + 5.0 * G * (Qr.x * r.z + Qr.z * r.x) / r7 - 17.5 * G * Qr2 * r.x * r.z / r9;
-    f.hessian.yz += -G * Q.yz / r5 + 5.0 * G * (Qr.y * r.z + Qr.z * r.y) / r7 - 17.5 * G * Qr2 * r.y * r.z / r9;
+    f.hessian.xx += -G * Q.xx * invR5 + 10.0 * G * Qr.x * r.x * invR7 + 2.5 * G * Qr2 * invR7 -
+                     17.5 * G * Qr2 * r.x * r.x * invR9;
+    f.hessian.yy += -G * Q.yy * invR5 + 10.0 * G * Qr.y * r.y * invR7 + 2.5 * G * Qr2 * invR7 -
+                     17.5 * G * Qr2 * r.y * r.y * invR9;
+    f.hessian.zz += -G * Q.zz * invR5 + 10.0 * G * Qr.z * r.z * invR7 + 2.5 * G * Qr2 * invR7 -
+                     17.5 * G * Qr2 * r.z * r.z * invR9;
+    f.hessian.xy += -G * Q.xy * invR5 + 5.0 * G * (Qr.x * r.y + Qr.y * r.x) * invR7 - 17.5 * G * Qr2 * r.x * r.y * invR9;
+    f.hessian.xz += -G * Q.xz * invR5 + 5.0 * G * (Qr.x * r.z + Qr.z * r.x) * invR7 - 17.5 * G * Qr2 * r.x * r.z * invR9;
+    f.hessian.yz += -G * Q.yz * invR5 + 5.0 * G * (Qr.y * r.z + Qr.z * r.y) * invR7 - 17.5 * G * Qr2 * r.y * r.z * invR9;
 
     return f;
 }
@@ -92,44 +104,29 @@ SymMat3 NodeQuadrupole(const OctreeNode& node) {
     return q;
 }
 
-} // namespace
-
-void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                              double softening, double theta, std::vector<glm::dvec3>& accelOut) {
-    const int n = static_cast<int>(pos.size());
-    accelOut.assign(static_cast<size_t>(n), glm::dvec3(0.0));
-    if (n == 0) return;
-
-    AdaptiveOctree tree(pos, mass);
-    tree.ComputeQuadrupoles();
-    const std::vector<OctreeNode>& nodes = tree.Nodes();
-    const int numNodes = static_cast<int>(nodes.size());
-
-    std::vector<LocalExpansion> local(static_cast<size_t>(numNodes));
-    std::vector<std::pair<int, int>> nearPairs;
-    nearPairs.reserve(static_cast<size_t>(n) * 8);
-
-    const double theta2 = theta * theta;
-    // The opening-angle test alone is scale-invariant, so a pathologically
-    // clustered distribution can recurse the tree down to separations many
-    // orders of magnitude below the softening length, where it's still
-    // "satisfied" in a relative sense -- but the *unsoftened* multipole
-    // field's high-order (1/r^7, 1/r^9) terms are numerically catastrophic
-    // there. An absolute floor tied to the softening length -- below which
-    // softening already regularizes the near-field formula anyway, so
-    // nothing physical is lost by refusing the multipole shortcut -- routes
-    // such pairs to the near-field path instead. (nbody.py found this via
-    // an empirical dist^2 ~ 1e-18 pair producing a ~1e14 spurious
-    // acceleration before this guard existed.)
-    const double minSep2 = (10.0 * softening) * (10.0 * softening);
-
-    // Dual-tree traversal: pairs of nodes from the same tree, one target
-    // (accumulates a local expansion) one source (contributes a multipole
-    // field), splitting whichever side is coarser until well-separated
-    // (M2L) or both leaves (near-field pair).
-    std::vector<std::pair<int, int>> stack;
-    stack.reserve(static_cast<size_t>(numNodes) * 2);
-    stack.emplace_back(0, 0);
+// Runs the dual-tree M2L traversal starting from `seeds`, writing local
+// expansions into `local` and near-field pairs into `nearPairsOut`.
+//
+// Parallelization note: in this traversal, the *target* index `t` of any
+// (t, s) pair reached only ever descends to t's own children (see the
+// branch logic below) -- it never jumps to an unrelated node. So a
+// traversal seeded with `t` confined to one specific subtree (in practice,
+// one of the root's grandchildren -- see ComputeAccelAdaptiveFmm) can only
+// ever write to `local[idx]` for `idx` inside that same subtree, for the
+// lifetime of this call. Two calls seeded with *different*, disjoint
+// subtrees therefore never write the same `local[idx]`, so
+// ComputeAccelAdaptiveFmm runs one of these per subtree in parallel, all
+// sharing the same `local` vector, with no locking needed. The source
+// side `s` still ranges freely across the whole tree (that's what makes
+// this M2L rather than a per-subtree-only approximation), so a single call
+// here still needs the full `nodes` array, just not exclusive access to
+// all of `local`. Each call gets its own `nearPairsOut` purely so multiple
+// threads never contend on one vector's growth -- the caller processes
+// each bucket's near-field pairs directly rather than merging them.
+void TraverseSubtree(const std::vector<OctreeNode>& nodes, double theta2, double minSep2, double G,
+                      const std::vector<std::pair<int, int>>& seeds, std::vector<LocalExpansion>& local,
+                      std::vector<std::pair<int, int>>& nearPairsOut) {
+    std::vector<std::pair<int, int>> stack(seeds);
 
     while (!stack.empty()) {
         const auto [t, s] = stack.back();
@@ -143,7 +140,9 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
             // A self-pair only needs splitting once: (child_i, child_j)
             // for i != j is already handled as an ordinary (t, s) pair by
             // a later iteration, so this just seeds those cross pairs plus
-            // each child's own self-pair.
+            // each child's own self-pair. Self-pairs recur at every level
+            // (not just the root), since this same split can produce new
+            // (child, child) self-pairs.
             if (nodeT.isLeaf) continue;
             for (int ci : nodeT.children) {
                 if (ci == -1) continue;
@@ -180,10 +179,15 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
             // pair's children are split (needed for M2L, since the two
             // directions feed different local expansions) -- but a near-
             // field pair is symmetric, so only recording it once (smaller
-            // particle index first) avoids double-counting the force.
+            // particle index first) avoids double-counting the force. This
+            // still holds with the traversal split across threads: (A,B)
+            // and (B,A) are independent (t,s) pairs that may land in
+            // different threads' subtrees, but each is decided purely by
+            // its own pt/ps values, so exactly one side records it either
+            // way.
             const int pt = nodeT.particles[0];
             const int ps = nodeS.particles[0];
-            if (pt < ps) nearPairs.emplace_back(pt, ps);
+            if (pt < ps) nearPairsOut.emplace_back(pt, ps);
             continue;
         }
 
@@ -204,6 +208,119 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
                 if (cj != -1) stack.emplace_back(t, cj);
             }
         }
+    }
+}
+
+} // namespace
+
+void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
+                              double softening, double theta, std::vector<glm::dvec3>& accelOut) {
+    const int n = static_cast<int>(pos.size());
+    accelOut.assign(static_cast<size_t>(n), glm::dvec3(0.0));
+    if (n == 0) return;
+
+    AdaptiveOctree tree(pos, mass);
+    tree.ComputeQuadrupoles();
+    const std::vector<OctreeNode>& nodes = tree.Nodes();
+    const int numNodes = static_cast<int>(nodes.size());
+
+    std::vector<LocalExpansion> local(static_cast<size_t>(numNodes));
+
+    const double theta2 = theta * theta;
+    // The opening-angle test alone is scale-invariant, so a pathologically
+    // clustered distribution can recurse the tree down to separations many
+    // orders of magnitude below the softening length, where it's still
+    // "satisfied" in a relative sense -- but the *unsoftened* multipole
+    // field's high-order (1/r^7, 1/r^9) terms are numerically catastrophic
+    // there. An absolute floor tied to the softening length -- below which
+    // softening already regularizes the near-field formula anyway, so
+    // nothing physical is lost by refusing the multipole shortcut -- routes
+    // such pairs to the near-field path instead. (nbody.py found this via
+    // an empirical dist^2 ~ 1e-18 pair producing a ~1e14 spurious
+    // acceleration before this guard existed.)
+    const double minSep2 = (10.0 * softening) * (10.0 * softening);
+
+    // Splitting the traversal by the root's immediate children alone caps
+    // parallelism at 8 tasks (an octree root has at most 8 children) --
+    // not enough to keep a many-core machine busy, and vulnerable to load
+    // imbalance if particles aren't spread evenly across octants. Instead,
+    // split two levels down (the root's *grandchildren*, up to 64 tasks):
+    // every node "t" reached from a seed only ever descends to t's own
+    // children (see TraverseSubtree's comment), so as long as each
+    // parallel task's seeds all have `t` confined to one specific
+    // grandchild's subtree, tasks still never write the same `local[idx]`.
+    //
+    // ChildrenOrSelf(x) is x's children, or {x} itself if x is a leaf
+    // (can't split further -- x becomes its own, granularity-1 bucket).
+    auto childrenOrSelf = [&nodes](int x) {
+        std::vector<int> out;
+        if (nodes[static_cast<size_t>(x)].isLeaf) {
+            out.push_back(x);
+        } else {
+            for (int c : nodes[static_cast<size_t>(x)].children) {
+                if (c != -1) out.push_back(c);
+            }
+        }
+        return out;
+    };
+
+    const std::vector<int> level1 = childrenOrSelf(0); // root is never a leaf for N >= 2
+
+    std::vector<std::vector<int>> bucketsOfLevel1(level1.size());
+    std::vector<int> nodeToLevel1Idx(static_cast<size_t>(numNodes), -1);
+    for (size_t i = 0; i < level1.size(); ++i) {
+        bucketsOfLevel1[i] = childrenOrSelf(level1[i]);
+        nodeToLevel1Idx[static_cast<size_t>(level1[i])] = static_cast<int>(i);
+    }
+
+    std::vector<int> targetNodes;
+    std::vector<int> nodeToTargetIdx(static_cast<size_t>(numNodes), -1);
+    for (const std::vector<int>& buckets : bucketsOfLevel1) {
+        for (int g : buckets) {
+            nodeToTargetIdx[static_cast<size_t>(g)] = static_cast<int>(targetNodes.size());
+            targetNodes.push_back(g);
+        }
+    }
+
+    std::vector<std::vector<std::pair<int, int>>> seedsPerTarget(targetNodes.size());
+    auto addSeed = [&](int t, int s) { seedsPerTarget[static_cast<size_t>(nodeToTargetIdx[static_cast<size_t>(t)])].emplace_back(t, s); };
+
+    // The root's self-pair split (single-threaded, O(children^2) --
+    // trivial) generates every (ci, cj) pair among root's children,
+    // exactly as the original single-traversal version's first step did.
+    // Each then needs pushing one level finer to reach grandchild
+    // granularity:
+    //  - a self-pair (ci, ci): split into every (g1, g2) among ci's own
+    //    children -- exactly what TraverseSubtree's own self-pair-split
+    //    logic would have produced one level later, just precomputed here.
+    //  - a cross-pair (ci, cj), ci != cj: only the *target* side needs
+    //    splitting for parallelism's sake (the source side can stay at
+    //    whatever granularity), so this pairs each of ci's children
+    //    against the still-coarse cj. This is a legitimate finer-grained
+    //    M2L opportunity, not an approximation of the original algorithm --
+    //    dual-tree traversal's result doesn't depend on descent order, and
+    //    evaluating the field one level deeper before falling back to an
+    //    L2L shift is if anything marginally more accurate.
+    for (int ci : level1) {
+        const std::vector<int>& bucketsCi = bucketsOfLevel1[static_cast<size_t>(nodeToLevel1Idx[static_cast<size_t>(ci)])];
+        for (int cj : level1) {
+            if (ci == cj) {
+                for (int g1 : bucketsCi) {
+                    for (int g2 : bucketsCi) addSeed(g1, g2);
+                }
+            } else {
+                for (int g : bucketsCi) addSeed(g, cj);
+            }
+        }
+    }
+
+    std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(targetNodes.size());
+
+    const int numTargets = static_cast<int>(targetNodes.size());
+#pragma omp parallel for schedule(dynamic)
+    for (int ti = 0; ti < numTargets; ++ti) {
+        TraverseSubtree(nodes, theta2, minSep2, G, seedsPerTarget[static_cast<size_t>(ti)], local,
+                         nearPairsPerTarget[static_cast<size_t>(ti)]);
     }
 
     // L2L: push each node's accumulated local expansion down to its
@@ -253,13 +370,35 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
     }
 
     // Near-field pairs: exact softened summation, applied symmetrically.
-    for (const auto& [pi, pj] : nearPairs) {
-        const glm::dvec3 d = pos[static_cast<size_t>(pj)] - pos[static_cast<size_t>(pi)];
-        const double dist2 = glm::dot(d, d) + eps2;
-        const double invDist = 1.0 / std::sqrt(dist2);
-        const double invDist3 = invDist * invDist * invDist;
-        accelOut[static_cast<size_t>(pi)] += G * mass[static_cast<size_t>(pj)] * invDist3 * d;
-        accelOut[static_cast<size_t>(pj)] -= G * mass[static_cast<size_t>(pi)] * invDist3 * d;
+    // Processed straight out of each target bucket's own vector rather
+    // than first merging into one flat list -- avoids a copy that alone
+    // cost several ms once the pair count gets large (see below).
+    //
+    // This can be a genuinely large fraction of the total cost: once a
+    // scenario's softening (chosen to avoid close-encounter integration
+    // blowup, see Scenarios.cpp) is large relative to the tree's actual
+    // leaf spacing at that N, most interactions route through minSep2's
+    // near-field fallback rather than the multipole shortcut -- the same
+    // "not getting real O(N) leverage" regime nbody.py documented for
+    // dense collapse snapshots. Tried parallelizing this loop across
+    // buckets too (accelOut writes need to be atomic rather than merely
+    // bucket-disjoint, since a pair's particles can belong to a different
+    // bucket than the one iterating it -- the source side ranges freely,
+    // see TraverseSubtree): measured slower than sequential, not faster --
+    // this loop's accesses are effectively random within accelOut/pos/mass
+    // (near-field pairs, unlike tree nodes, have no spatial locality by
+    // construction), so it's memory-latency-bound already at one thread,
+    // and six atomics per pair added synchronization cost without buying
+    // back enough real parallelism. Left sequential on that evidence.
+    for (const std::vector<std::pair<int, int>>& bucket : nearPairsPerTarget) {
+        for (const auto& [pi, pj] : bucket) {
+            const glm::dvec3 d = pos[static_cast<size_t>(pj)] - pos[static_cast<size_t>(pi)];
+            const double dist2 = glm::dot(d, d) + eps2;
+            const double invDist = 1.0 / std::sqrt(dist2);
+            const double invDist3 = invDist * invDist * invDist;
+            accelOut[static_cast<size_t>(pi)] += G * mass[static_cast<size_t>(pj)] * invDist3 * d;
+            accelOut[static_cast<size_t>(pj)] -= G * mass[static_cast<size_t>(pi)] * invDist3 * d;
+        }
     }
 }
 
