@@ -16,6 +16,6 @@
     },
     "eigen3",
     "spectra",
-    "implot"
+    "stb"
   ]
 }

@@ -16,6 +16,9 @@ vcpkg_installed/
 *.pdb
 *.ilk
 
+# ImGui runtime state (window layout), written next to wherever an app runs from
+imgui.ini
+
 # OS
 Thumbs.db
 .DS_Store
