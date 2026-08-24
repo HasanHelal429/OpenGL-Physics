@@ -11,13 +11,34 @@
 
 namespace nbody {
 
-// Real-time N-body gravity: direct O(N^2) and Barnes-Hut O(N log N) solvers
-// on a shared leapfrog integrator, live-tunable scenario/physics
-// parameters, an OpenGL particle-cloud view (colored by speed), and a live
-// energy/angular-momentum conservation chart. The C++/OpenGL take on
-// Physics Simulations' Orbital_Dynamics/N_Body_Gravity notebooks, redesigned
-// around real-time interactivity (drag sliders, watch it respond) rather
-// than a port of the offline-notebook/FMM structure.
+// One solver's result from RunBenchmark: average wall-clock cost of one
+// force evaluation over several repetitions at the live particle set, plus
+// (when a Direct reference was affordable to compute) accuracy relative to
+// it -- speed alone doesn't say whether a solver's approximation is even
+// reasonable at the current theta/softening.
+struct SolverBenchmark {
+    bool ran = false;
+    double msPerCall = 0.0;
+    double meanRelError = -1.0; // -1 = no Direct reference available to compare against
+    double maxRelError = -1.0;
+};
+
+struct BenchmarkResults {
+    int n = 0;
+    SolverBenchmark direct;    // skipped above a particle-count cap -- see RunBenchmark
+    SolverBenchmark barnesHut;
+    SolverBenchmark fmm;
+};
+
+// Real-time N-body gravity: direct O(N^2), Barnes-Hut O(N log N), and
+// adaptive FMM O(N) solvers on a shared leapfrog integrator, live-tunable
+// scenario/physics parameters, an OpenGL particle-cloud view (colored by
+// speed), a live energy/angular-momentum conservation chart, and an
+// in-app benchmark comparing the solvers' speed and accuracy at the
+// current live particle set. The C++/OpenGL take on Physics Simulations'
+// Orbital_Dynamics/N_Body_Gravity notebooks, redesigned around real-time
+// interactivity (drag sliders, watch it respond) rather than a port of
+// the offline-notebook structure.
 class NBodyApp : public fw::Application {
 public:
     NBodyApp();
@@ -41,7 +62,9 @@ private:
 
     void LoadScenario();
     void DrawControls();
+    void DrawBenchmarkResults();
     void UpdateParticleInstances();
+    void RunBenchmark();
 
     static Config MakeConfig();
 
@@ -78,6 +101,8 @@ private:
     double m_lastEnergyDriftPct = 0.0;
     double m_lastLDriftPct = 0.0;
     double m_lastStepMs = 0.0;
+
+    BenchmarkResults m_benchmark;
 
     bool m_orbiting = false;
     double m_lastMouseX = 0.0;

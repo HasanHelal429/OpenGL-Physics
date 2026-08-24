@@ -4,6 +4,7 @@ add_executable(02_nbody_gravity
     src/main.cpp
     src/NBodySystem.cpp
     src/Octree.cpp
+    src/AdaptiveFmm.cpp
     src/Scenarios.cpp
     src/DriftChart.cpp
     src/DiagnosticsWorker.cpp

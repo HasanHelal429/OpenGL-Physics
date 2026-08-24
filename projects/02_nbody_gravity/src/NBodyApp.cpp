@@ -256,15 +256,19 @@ void NBodyApp::DrawControls() {
 
     ImGui::Separator();
 
-    int solverIdx = (m_solver == SolverType::Direct) ? 0 : 1;
-    if (ImGui::RadioButton("Direct O(N^2)", solverIdx == 0)) m_solver = SolverType::Direct;
+    if (ImGui::RadioButton("Direct O(N^2)", m_solver == SolverType::Direct)) m_solver = SolverType::Direct;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Barnes-Hut O(N logN)", solverIdx == 1)) m_solver = SolverType::BarnesHut;
+    if (ImGui::RadioButton("Barnes-Hut O(N logN)", m_solver == SolverType::BarnesHut)) m_solver = SolverType::BarnesHut;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Adaptive FMM O(N)", m_solver == SolverType::AdaptiveFmm)) m_solver = SolverType::AdaptiveFmm;
 
-    ImGui::BeginDisabled(m_solver != SolverType::BarnesHut);
+    ImGui::BeginDisabled(m_solver == SolverType::Direct);
     float theta = static_cast<float>(m_theta);
     if (ImGui::SliderFloat("theta (opening angle)", &theta, 0.1f, 1.5f, "%.2f")) m_theta = static_cast<double>(theta);
     ImGui::EndDisabled();
+
+    if (ImGui::Button("Benchmark solvers at current N")) RunBenchmark();
+    DrawBenchmarkResults();
 
     ImGui::Separator();
 
@@ -298,6 +302,87 @@ void NBodyApp::DrawControls() {
     ImGui::Text("Energy drift: %+.3f%%   |L| drift: %.3f%%  %s", m_lastEnergyDriftPct, m_lastLDriftPct,
                 m_diagnosticsWorker.Busy() ? "(computing...)" : "");
     ImGui::Text("FPS: %.1f", static_cast<double>(ImGui::GetIO().Framerate));
+}
+
+void NBodyApp::DrawBenchmarkResults() {
+    if (m_benchmark.n == 0) return;
+
+    auto drawRow = [](const char* name, const SolverBenchmark& b) {
+        if (!b.ran) {
+            ImGui::Text("%-14s skipped (N too large for a Direct reference)", name);
+        } else if (b.meanRelError >= 0.0) {
+            ImGui::Text("%-14s %8.3f ms/call   mean err %.2e   max err %.2e", name, b.msPerCall, b.meanRelError,
+                        b.maxRelError);
+        } else {
+            ImGui::Text("%-14s %8.3f ms/call   (accuracy reference)", name, b.msPerCall);
+        }
+    };
+
+    ImGui::Text("Benchmark @ N=%d, theta=%.2f, softening=%.4f:", m_benchmark.n, m_theta, m_softening);
+    drawRow("Direct", m_benchmark.direct);
+    drawRow("Barnes-Hut", m_benchmark.barnesHut);
+    drawRow("Adaptive FMM", m_benchmark.fmm);
+}
+
+void NBodyApp::RunBenchmark() {
+    // A one-off, explicitly user-triggered blocking call (like Load
+    // Scenario's baseline energy calc) -- not something that runs every
+    // frame, so a brief stall while it measures each solver is fine.
+    const std::vector<glm::dvec3>& pos = m_system.Positions();
+    const std::vector<double>& mass = m_system.Masses();
+    const int n = static_cast<int>(pos.size());
+
+    m_benchmark = BenchmarkResults{};
+    m_benchmark.n = n;
+    if (n == 0) return;
+
+    constexpr int kReps = 5;
+    // Direct is O(N^2); above this it's both too slow to benchmark
+    // interactively and not something you'd actually run live at this N,
+    // so it's skipped as an accuracy reference (speed-only rows still run).
+    constexpr int kDirectMaxN = 6000;
+
+    std::vector<glm::dvec3> accelDirect;
+    bool haveDirect = false;
+
+    if (n <= kDirectMaxN) {
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < kReps; ++r) {
+            ComputeAccel(SolverType::Direct, pos, mass, m_G, m_softening, m_theta, accelDirect);
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        m_benchmark.direct.ran = true;
+        m_benchmark.direct.msPerCall = std::chrono::duration<double, std::milli>(t1 - t0).count() / kReps;
+        haveDirect = true;
+    }
+
+    auto benchOne = [&](SolverType solver, SolverBenchmark& out) {
+        std::vector<glm::dvec3> accel;
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < kReps; ++r) {
+            ComputeAccel(solver, pos, mass, m_G, m_softening, m_theta, accel);
+        }
+        const auto t1 = std::chrono::steady_clock::now();
+        out.ran = true;
+        out.msPerCall = std::chrono::duration<double, std::milli>(t1 - t0).count() / kReps;
+
+        if (haveDirect) {
+            double sumRel = 0.0, maxRel = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const double refMag = glm::length(accelDirect[static_cast<size_t>(i)]);
+                const double errMag =
+                    glm::length(accel[static_cast<size_t>(i)] - accelDirect[static_cast<size_t>(i)]);
+                const double rel = errMag / std::max(refMag, 1e-12);
+                sumRel += rel;
+                maxRel = std::max(maxRel, rel);
+            }
+            out.meanRelError = sumRel / n;
+            out.maxRelError = maxRel;
+        }
+    };
+
+    benchOne(SolverType::BarnesHut, m_benchmark.barnesHut);
+    benchOne(SolverType::AdaptiveFmm, m_benchmark.fmm);
 }
 
 void NBodyApp::OnMouseButton(int button, int action, int mods) {
