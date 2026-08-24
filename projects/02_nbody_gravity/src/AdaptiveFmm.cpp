@@ -104,6 +104,40 @@ SymMat3 NodeQuadrupole(const OctreeNode& node) {
     return q;
 }
 
+// Ratio of the quadrupole term's contribution to the potential against the
+// monopole term's, |phi_quad/phi_mono| = |Qr2/(2r^5)| / (M/r) = |Qr2|/(2Mr^4)
+// -- an error-controlled complement to the pure opening-angle MAC (Salmon &
+// Warren's "adjusted" criteria are the classic version of this idea).
+// A fixed geometric size/distance ratio is a poor proxy for how trustworthy
+// the *quadrupole-truncated* expansion actually is: it says nothing about
+// how the source's mass is actually distributed, which is exactly what the
+// quadrupole moment itself measures. A node with a small or symmetric
+// quadrupole moment (nearly monopole-like) can safely be treated as well-
+// separated much closer than a node with a large one, and this ratio
+// quantifies that directly rather than guessing a single fixed distance
+// for every source regardless of shape.
+//
+// This also degrades exactly the right way as r -> 0 (Qr2 ~ Q*r^2 for fixed
+// Q, so the ratio ~ Q/(2*M*r^2) blows up) -- i.e. it independently catches
+// the same catastrophic-cancellation regime the fixed minSep2 floor exists
+// to guard against (see ComputeAccelAdaptiveFmm), just based on the actual
+// field magnitude rather than a guessed distance.
+double QuadrupoleRatio(double M, const SymMat3& Q, const glm::dvec3& r) {
+    const double r2 = glm::dot(r, r);
+    const glm::dvec3 Qr = Q.Apply(r);
+    const double Qr2 = glm::dot(r, Qr);
+    return std::abs(Qr2) / (2.0 * M * r2 * r2);
+}
+
+// How large the quadrupole/monopole ratio above is allowed to be before a
+// pair falls back to the near-field path regardless of the opening-angle
+// test. At the opening-angle boundary itself (node size == theta * dist),
+// a maximally asymmetric node's quadrupole moment scales the ratio to
+// roughly theta^2/2 (e.g. ~0.125 at theta=0.5) -- this is set well above
+// that so typical well-separated pairs are unaffected, catching only
+// distributions whose quadrupole moment is unusually large for their size.
+constexpr double kQuadrupoleRatioLimit = 0.05;
+
 // Runs the dual-tree M2L traversal starting from `seeds`, writing local
 // expansions into `local` and near-field pairs into `nearPairsOut`.
 //
@@ -165,7 +199,13 @@ void TraverseSubtree(const std::vector<OctreeNode>& nodes, double theta2, double
         // test) is an excellent approximation, not a hack.
         const bool degenerateT = nodeT.isLeaf && nodeT.particles.size() > 1;
         const bool degenerateS = nodeS.isLeaf && nodeS.particles.size() > 1;
-        const bool wellSeparated = (sizeSum * sizeSum < theta2 * dist2) && (dist2 > minSep2);
+        // dist2 > minSep2 stays as a cheap, first-pass floor (minSep2 is now
+        // small -- see ComputeAccelAdaptiveFmm); the quadrupole-ratio check
+        // is what actually decides borderline cases the old, much larger
+        // fixed floor used to reject outright regardless of whether the
+        // source's mass distribution made that unnecessary.
+        const bool wellSeparated = (sizeSum * sizeSum < theta2 * dist2) && (dist2 > minSep2) &&
+                                    (QuadrupoleRatio(nodeS.mass, NodeQuadrupole(nodeS), d) < kQuadrupoleRatioLimit);
 
         if (degenerateT || degenerateS || wellSeparated) {
             const MultipoleField f = EvaluateMultipoleField(nodeS.mass, NodeQuadrupole(nodeS), d, G);
@@ -232,13 +272,29 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
     // orders of magnitude below the softening length, where it's still
     // "satisfied" in a relative sense -- but the *unsoftened* multipole
     // field's high-order (1/r^7, 1/r^9) terms are numerically catastrophic
-    // there. An absolute floor tied to the softening length -- below which
-    // softening already regularizes the near-field formula anyway, so
-    // nothing physical is lost by refusing the multipole shortcut -- routes
-    // such pairs to the near-field path instead. (nbody.py found this via
-    // an empirical dist^2 ~ 1e-18 pair producing a ~1e14 spurious
-    // acceleration before this guard existed.)
-    const double minSep2 = (10.0 * softening) * (10.0 * softening);
+    // there (nbody.py found this via an empirical dist^2 ~ 1e-18 pair
+    // producing a ~1e14 spurious acceleration). Below this floor, softening
+    // already regularizes the near-field formula anyway, so nothing
+    // physical is lost by refusing the multipole shortcut.
+    //
+    // nbody.py's own fixed floor was 10x softening -- chosen empirically
+    // for a pathologically clustered synthetic case many orders of
+    // magnitude below softening, not tuned against a realistic scenario.
+    // At this project's actual particle counts, that generosity turned out
+    // to matter: once a scenario's softening is scaled up relative to the
+    // tree's leaf spacing (done deliberately here to avoid close-encounter
+    // integration blowup -- see Scenarios.cpp), "10x softening" can be tens
+    // of mean interparticle spacings wide, routing millions of ordinary,
+    // perfectly safe pairs to near-field for no numerical reason (measured:
+    // ~9 million of them at N=25000 in the default disk scenario). Shrunk
+    // to 2x softening -- still comfortably (many orders of magnitude) above
+    // the regime that actually blew up -- with the quadrupole-ratio check
+    // below (see QuadrupoleRatio) as the more precise safety net for
+    // whatever this smaller floor alone would let through unsafely: unlike
+    // a fixed distance, it adapts to how asymmetric the source's actual
+    // mass distribution is, and independently diverges in the same r -> 0
+    // regime the floor is guarding against.
+    const double minSep2 = (5.0 * softening) * (5.0 * softening);
 
     // Splitting the traversal by the root's immediate children alone caps
     // parallelism at 8 tasks (an octree root has at most 8 children) --
