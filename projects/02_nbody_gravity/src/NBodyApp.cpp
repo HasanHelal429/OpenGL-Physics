@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <utility>
 
 namespace nbody {
 
@@ -22,6 +24,32 @@ constexpr int kDiagnosticsEveryNTicks = 6;
 
 constexpr ScenarioType kScenarios[] = {ScenarioType::TwoBodyKepler, ScenarioType::LagrangeTriangle,
                                         ScenarioType::Cluster, ScenarioType::RotatingDisk};
+
+// Least-squares fit of b in t = a*n^b, i.e. of log(t) = log(a) + b*log(n) --
+// the standard way to read a scaling exponent off empirical (N, time) data
+// (this is exactly what N_Body_Gravity_Plan.md's own Python benchmarks did:
+// "pairwise ~N^1.86, Barnes-Hut ~N^1.25", etc.). Returns 0 if there aren't
+// at least two valid (positive N and time) points to fit.
+double FitPowerLawExponent(const std::vector<std::pair<double, double>>& nAndTime) {
+    double sumX = 0.0, sumY = 0.0, sumXY = 0.0, sumXX = 0.0;
+    int count = 0;
+    for (const auto& [n, t] : nAndTime) {
+        if (n <= 0.0 || t <= 0.0) continue;
+        const double x = std::log(n);
+        const double y = std::log(t);
+        sumX += x;
+        sumY += y;
+        sumXY += x * y;
+        sumXX += x * x;
+        ++count;
+    }
+    if (count < 2) return 0.0;
+    const double meanX = sumX / count;
+    const double meanY = sumY / count;
+    const double num = sumXY - count * meanX * meanY;
+    const double den = sumXX - count * meanX * meanX;
+    return den != 0.0 ? num / den : 0.0;
+}
 
 } // namespace
 
@@ -227,6 +255,14 @@ void NBodyApp::OnImGui() {
     ImGui::Begin("N-Body Gravity Controls", nullptr, ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize);
     DrawControls();
     ImGui::End();
+
+    if (m_scalingStarted) {
+        m_scalingPoints = m_scalingWorker.LatestPoints();
+        ImGui::SetNextWindowSize(ImVec2(900, 700), ImGuiCond_FirstUseEver);
+        ImGui::Begin("Scaling Study", nullptr, ImGuiWindowFlags_NoCollapse);
+        DrawScalingResults();
+        ImGui::End();
+    }
 }
 
 void NBodyApp::DrawControls() {
@@ -269,6 +305,17 @@ void NBodyApp::DrawControls() {
 
     if (ImGui::Button("Benchmark solvers at current N")) RunBenchmark();
     DrawBenchmarkResults();
+
+    ImGui::BeginDisabled(m_scalingWorker.Busy());
+    if (ImGui::Button("Run scaling study (N=500..60000, background)")) {
+        m_scalingStarted = true;
+        m_scalingWorker.Start(ScenarioType::Cluster, 0.0, 1);
+    }
+    ImGui::EndDisabled();
+    if (m_scalingWorker.Busy()) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("running... (see Scaling Study window)");
+    }
 
     ImGui::Separator();
 
@@ -383,6 +430,69 @@ void NBodyApp::RunBenchmark() {
 
     benchOne(SolverType::BarnesHut, m_benchmark.barnesHut);
     benchOne(SolverType::AdaptiveFmm, m_benchmark.fmm);
+}
+
+void NBodyApp::DrawScalingResults() {
+    ImGui::TextWrapped(
+        "Cluster scenario (roughly uniform sphere -- avoids the rotating disk's asymmetric octant "
+        "population), theta=%.2f. G/softening/theta are each scenario's own suggested defaults, not "
+        "the live sliders above.",
+        m_theta);
+    if (m_scalingPoints.empty()) {
+        ImGui::TextDisabled("Waiting for the first N to finish...");
+        return;
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Per-N timing and local scaling exponent (between consecutive rows):");
+    ImGui::Text("%8s %12s %12s %12s %10s %10s", "N", "Direct ms", "BH ms", "FMM ms", "BH exp", "FMM exp");
+    double prevN = -1.0, prevBh = -1.0, prevFmm = -1.0;
+    for (const ScalingSweepPoint& p : m_scalingPoints) {
+        char bhExpBuf[16] = "-";
+        char fmmExpBuf[16] = "-";
+        if (prevN > 0.0) {
+            std::snprintf(bhExpBuf, sizeof(bhExpBuf), "%.2f", std::log(p.bhMs / prevBh) / std::log(p.n / prevN));
+            std::snprintf(fmmExpBuf, sizeof(fmmExpBuf), "%.2f", std::log(p.fmmMs / prevFmm) / std::log(p.n / prevN));
+        }
+        if (p.directMs > 0.0) {
+            ImGui::Text("%8d %12.3f %12.3f %12.3f %10s %10s", p.n, p.directMs, p.bhMs, p.fmmMs, bhExpBuf, fmmExpBuf);
+        } else {
+            ImGui::Text("%8d %12s %12.3f %12.3f %10s %10s", p.n, "skipped", p.bhMs, p.fmmMs, bhExpBuf, fmmExpBuf);
+        }
+        prevN = p.n;
+        prevBh = p.bhMs;
+        prevFmm = p.fmmMs;
+    }
+
+    std::vector<std::pair<double, double>> directData, bhData, fmmData;
+    for (const ScalingSweepPoint& p : m_scalingPoints) {
+        if (p.directMs > 0.0) directData.emplace_back(p.n, p.directMs);
+        bhData.emplace_back(p.n, p.bhMs);
+        fmmData.emplace_back(p.n, p.fmmMs);
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Fitted global exponents b (log-log least squares, time ~ N^b):");
+    ImGui::Text("  Direct:       %.3f   (theoretical O(N^2) -> 2.0)", FitPowerLawExponent(directData));
+    ImGui::Text("  Barnes-Hut:   %.3f   (theoretical O(N log N) -> ~1.0-1.3 over this range)",
+                FitPowerLawExponent(bhData));
+    ImGui::Text("  Adaptive FMM: %.3f   (theoretical O(N) -> 1.0)", FitPowerLawExponent(fmmData));
+
+    ImGui::Separator();
+    ImGui::Text("Where the time actually goes -- phase breakdown (ms/call):");
+    ImGui::Text("%8s | %10s %10s %8s | %10s %10s %10s %10s %10s %10s %12s", "N", "BH build", "BH walk", "BHnodes",
+                "FMMbuild", "FMMquad", "FMMseed", "FMMtrav", "FMMl2l", "FMMl2p", "FMMnear");
+    for (const ScalingSweepPoint& p : m_scalingPoints) {
+        ImGui::Text("%8d | %10.2f %10.2f %8d | %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f", p.n,
+                    p.bhStats.buildMs, p.bhStats.walkMs, p.bhStats.nodeCount, p.fmmStats.buildMs,
+                    p.fmmStats.quadrupoleMs, p.fmmStats.seedMs, p.fmmStats.traverseMs, p.fmmStats.l2lMs,
+                    p.fmmStats.l2pMs, p.fmmStats.nearFieldMs);
+    }
+    ImGui::Text("%8s | %10s %10s %8s | %10s", "N", "", "", "", "FMM near-field pairs / parallel targets used");
+    for (const ScalingSweepPoint& p : m_scalingPoints) {
+        ImGui::Text("%8d | %10s %10s %8s | %zu pairs, %d targets", p.n, "", "", "", p.fmmStats.nearPairCount,
+                    p.fmmStats.numTargets);
+    }
 }
 
 void NBodyApp::OnMouseButton(int button, int action, int mods) {
