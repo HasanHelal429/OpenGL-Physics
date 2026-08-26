@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <omp.h>
 #include <utility>
 #include <vector>
 
@@ -139,6 +140,47 @@ double QuadrupoleRatio(double M, const SymMat3& Q, const glm::dvec3& r) {
 // distributions whose quadrupole moment is unusually large for their size.
 constexpr double kQuadrupoleRatioLimit = 0.05;
 
+// x's children, or {x} itself if x is a leaf (can't split further -- x
+// becomes its own, granularity-1 bucket).
+std::vector<int> ChildrenOrSelf(const std::vector<OctreeNode>& nodes, int x) {
+    std::vector<int> out;
+    if (nodes[static_cast<size_t>(x)].isLeaf) {
+        out.push_back(x);
+    } else {
+        for (int c : nodes[static_cast<size_t>(x)].children) {
+            if (c != -1) out.push_back(c);
+        }
+    }
+    return out;
+}
+
+// Recursively reproduces TraverseSubtree's own self-pair/cross-pair split
+// (see that function) `depth` levels deep in one precomputed pass, instead
+// of one level at a time during the traversal itself -- see
+// ComputeAccelAdaptiveFmm for why. depth=0 stops and records (a, b) as a
+// final (target, source) seed pair.
+void SplitPair(const std::vector<OctreeNode>& nodes, int a, int b, int depth,
+                std::vector<std::pair<int, int>>& out) {
+    if (depth == 0) {
+        out.emplace_back(a, b);
+        return;
+    }
+    const std::vector<int> childrenA = ChildrenOrSelf(nodes, a);
+    if (a == b) {
+        for (int x : childrenA) {
+            for (int y : childrenA) SplitPair(nodes, x, y, depth - 1, out);
+        }
+    } else {
+        for (int x : childrenA) SplitPair(nodes, x, b, depth - 1, out);
+    }
+}
+
+std::vector<std::pair<int, int>> SplitPair(const std::vector<OctreeNode>& nodes, int a, int b, int depth) {
+    std::vector<std::pair<int, int>> out;
+    SplitPair(nodes, a, b, depth, out);
+    return out;
+}
+
 // Runs the dual-tree M2L traversal starting from `seeds`, writing local
 // expansions into `local` and near-field pairs into `nearPairsOut`.
 //
@@ -146,9 +188,10 @@ constexpr double kQuadrupoleRatioLimit = 0.05;
 // (t, s) pair reached only ever descends to t's own children (see the
 // branch logic below) -- it never jumps to an unrelated node. So a
 // traversal seeded with `t` confined to one specific subtree (in practice,
-// one of the root's grandchildren -- see ComputeAccelAdaptiveFmm) can only
-// ever write to `local[idx]` for `idx` inside that same subtree, for the
-// lifetime of this call. Two calls seeded with *different*, disjoint
+// a fixed number of tree levels down from the root -- see
+// ComputeAccelAdaptiveFmm's kSplitDepth) can only ever write to
+// `local[idx]` for `idx` inside that same subtree, for the lifetime of
+// this call. Two calls seeded with *different*, disjoint
 // subtrees therefore never write the same `local[idx]`, so
 // ComputeAccelAdaptiveFmm runs one of these per subtree in parallel, all
 // sharing the same `local` vector, with no locking needed. The source
@@ -304,85 +347,81 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
     // parallelism at 8 tasks (an octree root has at most 8 children) --
     // not enough to keep a many-core machine busy, and vulnerable to load
     // imbalance if particles aren't spread evenly across octants. Instead,
-    // split two levels down (the root's *grandchildren*, up to 64 tasks):
-    // every node "t" reached from a seed only ever descends to t's own
-    // children (see TraverseSubtree's comment), so as long as each
-    // parallel task's seeds all have `t` confined to one specific
-    // grandchild's subtree, tasks still never write the same `local[idx]`.
+    // split kSplitDepth levels down from the root (kSplitDepth=3 reaches
+    // the root's *great-grandchildren*, up to 512 targets): every node "t"
+    // reached from a seed only ever descends to t's own children (see
+    // TraverseSubtree's comment), so as long as each parallel task's seeds
+    // all have `t` confined to one specific subtree at that depth, tasks
+    // still never write the same `local[idx]`.
     //
-    // ChildrenOrSelf(x) is x's children, or {x} itself if x is a leaf
-    // (can't split further -- x becomes its own, granularity-1 bucket).
-    auto childrenOrSelf = [&nodes](int x) {
-        std::vector<int> out;
-        if (nodes[static_cast<size_t>(x)].isLeaf) {
-            out.push_back(x);
-        } else {
-            for (int c : nodes[static_cast<size_t>(x)].children) {
-                if (c != -1) out.push_back(c);
-            }
-        }
-        return out;
-    };
+    // SplitPair recursively reproduces TraverseSubtree's own self-pair/
+    // cross-pair split logic (see that function), just precomputed
+    // kSplitDepth levels deep instead of one at a time during the
+    // traversal itself: a self-pair (a, a) splits into every (child_i,
+    // child_j) among a's children; a cross-pair (a, b) with a != b only
+    // splits the *target* side a (the source side can stay at whatever
+    // granularity -- dual-tree traversal's result doesn't depend on
+    // descent order, and evaluating the field one level deeper before
+    // falling back to an L2L shift is if anything marginally more
+    // accurate). A node with fewer children than expected (or none, i.e.
+    // a leaf) just yields itself as its own bucket -- the recursion
+    // bottoms out early there rather than needing special-casing.
+    //
+    // The scaling study (see ScalingSweepWorker) found the previous fixed
+    // 2-level (grandchild, up to 64-target) split saturating by around
+    // N~4000-8000 -- past that, every further particle adds work to a
+    // fixed 64 buckets with no added parallelism to absorb it, a
+    // structural, noise-free ceiling regardless of how fast any given run
+    // measures. Whether 3 levels actually reduces wall-clock time on a
+    // given machine, though, wasn't reliably measurable here: even a
+    // rebuild at the *old* depth=2 (reproducing the prior code's exact
+    // seed set, verified) swung 27% run-to-run against its own historical
+    // baseline on this shared machine, well past the size of the effect
+    // being measured. Kept at 3 on the strength of the structural argument
+    // (this can't hurt the ceiling and may help on higher-core-count
+    // hardware or well beyond N=60000) rather than a timing number neither
+    // config could be shown to reliably beat.
+    constexpr int kSplitDepth = 3;
 
-    const std::vector<int> level1 = childrenOrSelf(0); // root is never a leaf for N >= 2
-
-    std::vector<std::vector<int>> bucketsOfLevel1(level1.size());
-    std::vector<int> nodeToLevel1Idx(static_cast<size_t>(numNodes), -1);
-    for (size_t i = 0; i < level1.size(); ++i) {
-        bucketsOfLevel1[i] = childrenOrSelf(level1[i]);
-        nodeToLevel1Idx[static_cast<size_t>(level1[i])] = static_cast<int>(i);
-    }
+    const std::vector<std::pair<int, int>> finalPairs = SplitPair(nodes, 0, 0, kSplitDepth);
 
     std::vector<int> targetNodes;
     std::vector<int> nodeToTargetIdx(static_cast<size_t>(numNodes), -1);
-    for (const std::vector<int>& buckets : bucketsOfLevel1) {
-        for (int g : buckets) {
-            nodeToTargetIdx[static_cast<size_t>(g)] = static_cast<int>(targetNodes.size());
-            targetNodes.push_back(g);
+    auto targetIndexOf = [&](int t) -> int {
+        int& idx = nodeToTargetIdx[static_cast<size_t>(t)];
+        if (idx == -1) {
+            idx = static_cast<int>(targetNodes.size());
+            targetNodes.push_back(t);
         }
+        return idx;
+    };
+
+    std::vector<std::vector<std::pair<int, int>>> seedsPerTarget;
+    for (const auto& [t, s] : finalPairs) {
+        const int idx = targetIndexOf(t);
+        if (idx >= static_cast<int>(seedsPerTarget.size())) seedsPerTarget.resize(static_cast<size_t>(idx) + 1);
+        seedsPerTarget[static_cast<size_t>(idx)].emplace_back(t, s);
     }
 
-    std::vector<std::vector<std::pair<int, int>>> seedsPerTarget(targetNodes.size());
-    auto addSeed = [&](int t, int s) { seedsPerTarget[static_cast<size_t>(nodeToTargetIdx[static_cast<size_t>(t)])].emplace_back(t, s); };
-
-    // The root's self-pair split (single-threaded, O(children^2) --
-    // trivial) generates every (ci, cj) pair among root's children,
-    // exactly as the original single-traversal version's first step did.
-    // Each then needs pushing one level finer to reach grandchild
-    // granularity:
-    //  - a self-pair (ci, ci): split into every (g1, g2) among ci's own
-    //    children -- exactly what TraverseSubtree's own self-pair-split
-    //    logic would have produced one level later, just precomputed here.
-    //  - a cross-pair (ci, cj), ci != cj: only the *target* side needs
-    //    splitting for parallelism's sake (the source side can stay at
-    //    whatever granularity), so this pairs each of ci's children
-    //    against the still-coarse cj. This is a legitimate finer-grained
-    //    M2L opportunity, not an approximation of the original algorithm --
-    //    dual-tree traversal's result doesn't depend on descent order, and
-    //    evaluating the field one level deeper before falling back to an
-    //    L2L shift is if anything marginally more accurate.
-    for (int ci : level1) {
-        const std::vector<int>& bucketsCi = bucketsOfLevel1[static_cast<size_t>(nodeToLevel1Idx[static_cast<size_t>(ci)])];
-        for (int cj : level1) {
-            if (ci == cj) {
-                for (int g1 : bucketsCi) {
-                    for (int g2 : bucketsCi) addSeed(g1, g2);
-                }
-            } else {
-                for (int g : bucketsCi) addSeed(g, cj);
-            }
-        }
-    }
-
-    std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(targetNodes.size());
+    // Near-field pairs are bucketed by *thread*, not by traversal target:
+    // unlike `local[]`, they need no disjointness guarantee (they're just
+    // collected data, merged in a separate pass below), so tying their
+    // bucket count to a much finer traversal split -- once needed for
+    // parallelism headroom at large N -- only adds bookkeeping. A thread
+    // processes many targets sequentially under `schedule(dynamic)`, so
+    // accumulating into one vector per thread is race-free and keeps the
+    // near-field summation pass's bucket count independent of however many
+    // traversal targets this run happens to have.
+    const int numThreads = std::max(1, omp_get_max_threads());
+    std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(static_cast<size_t>(numThreads));
 
     const int numTargets = static_cast<int>(targetNodes.size());
     const auto tSeed1 = std::chrono::steady_clock::now();
 
-#pragma omp parallel for schedule(dynamic)
+#pragma omp parallel for schedule(dynamic, 4)
     for (int ti = 0; ti < numTargets; ++ti) {
         TraverseSubtree(nodes, theta2, minSep2, G, seedsPerTarget[static_cast<size_t>(ti)], local,
-                         nearPairsPerTarget[static_cast<size_t>(ti)]);
+                         nearPairsPerTarget[static_cast<size_t>(omp_get_thread_num())]);
     }
     const auto tTraverse1 = std::chrono::steady_clock::now();
 
