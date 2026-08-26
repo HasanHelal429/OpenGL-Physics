@@ -2,6 +2,7 @@
 
 #include "Octree.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <utility>
 #include <vector>
@@ -254,13 +255,16 @@ void TraverseSubtree(const std::vector<OctreeNode>& nodes, double theta2, double
 } // namespace
 
 void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                              double softening, double theta, std::vector<glm::dvec3>& accelOut) {
+                              double softening, double theta, std::vector<glm::dvec3>& accelOut, FmmStats* stats) {
     const int n = static_cast<int>(pos.size());
     accelOut.assign(static_cast<size_t>(n), glm::dvec3(0.0));
     if (n == 0) return;
 
+    const auto tBuild0 = std::chrono::steady_clock::now();
     AdaptiveOctree tree(pos, mass);
+    const auto tBuild1 = std::chrono::steady_clock::now();
     tree.ComputeQuadrupoles();
+    const auto tQuad1 = std::chrono::steady_clock::now();
     const std::vector<OctreeNode>& nodes = tree.Nodes();
     const int numNodes = static_cast<int>(nodes.size());
 
@@ -373,11 +377,14 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
     std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(targetNodes.size());
 
     const int numTargets = static_cast<int>(targetNodes.size());
+    const auto tSeed1 = std::chrono::steady_clock::now();
+
 #pragma omp parallel for schedule(dynamic)
     for (int ti = 0; ti < numTargets; ++ti) {
         TraverseSubtree(nodes, theta2, minSep2, G, seedsPerTarget[static_cast<size_t>(ti)], local,
                          nearPairsPerTarget[static_cast<size_t>(ti)]);
     }
+    const auto tTraverse1 = std::chrono::steady_clock::now();
 
     // L2L: push each node's accumulated local expansion down to its
     // children. A single increasing-node-index sweep is already parent-
@@ -392,6 +399,7 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
         local[static_cast<size_t>(idx)].a0 += local[static_cast<size_t>(p)].a0 - local[static_cast<size_t>(p)].H.Apply(d);
         local[static_cast<size_t>(idx)].H += local[static_cast<size_t>(p)].H;
     }
+    const auto tL2l1 = std::chrono::steady_clock::now();
 
     // L2P: evaluate each leaf's finalized local expansion at its member
     // particle(s). A normal leaf's one particle sits exactly at the node's
@@ -424,6 +432,7 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
             }
         }
     }
+    const auto tL2p1 = std::chrono::steady_clock::now();
 
     // Near-field pairs: exact softened summation, applied symmetrically.
     // Processed straight out of each target bucket's own vector rather
@@ -455,6 +464,23 @@ void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vect
             accelOut[static_cast<size_t>(pi)] += G * mass[static_cast<size_t>(pj)] * invDist3 * d;
             accelOut[static_cast<size_t>(pj)] -= G * mass[static_cast<size_t>(pi)] * invDist3 * d;
         }
+    }
+    const auto tNear1 = std::chrono::steady_clock::now();
+
+    if (stats) {
+        auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
+        stats->buildMs = ms(tBuild0, tBuild1);
+        stats->quadrupoleMs = ms(tBuild1, tQuad1);
+        stats->seedMs = ms(tQuad1, tSeed1);
+        stats->traverseMs = ms(tSeed1, tTraverse1);
+        stats->l2lMs = ms(tTraverse1, tL2l1);
+        stats->l2pMs = ms(tL2l1, tL2p1);
+        stats->nearFieldMs = ms(tL2p1, tNear1);
+        stats->nodeCount = numNodes;
+        stats->numTargets = numTargets;
+        size_t totalNear = 0;
+        for (const auto& bucket : nearPairsPerTarget) totalNear += bucket.size();
+        stats->nearPairCount = totalNear;
     }
 }
 

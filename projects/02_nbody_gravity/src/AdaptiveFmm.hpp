@@ -32,7 +32,27 @@ namespace nbody {
 // far inside the softening length), and degenerate (multi-particle) leaves
 // treated as a single aggregate point mass for all external interactions
 // plus an exact brute-force sum for their own internal ones.
+//
+// Per-call phase timing/size breakdown for a scaling study -- which of
+// tree construction, quadrupole computation, seed setup, the M2L
+// traversal, L2L, L2P, or near-field summation actually dominates at a
+// given N. Left null (the default) costs nothing beyond a handful of
+// chrono::now() calls; only the scaling-study benchmark requests it.
+struct FmmStats {
+    double buildMs = 0.0;
+    double quadrupoleMs = 0.0;
+    double seedMs = 0.0;
+    double traverseMs = 0.0;
+    double l2lMs = 0.0;
+    double l2pMs = 0.0;
+    double nearFieldMs = 0.0;
+    int nodeCount = 0;
+    int numTargets = 0;    // parallel traversal buckets actually used (see ComputeAccelAdaptiveFmm)
+    size_t nearPairCount = 0;
+};
+
 void ComputeAccelAdaptiveFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                              double softening, double theta, std::vector<glm::dvec3>& accelOut);
+                              double softening, double theta, std::vector<glm::dvec3>& accelOut,
+                              FmmStats* stats = nullptr);
 
 } // namespace nbody

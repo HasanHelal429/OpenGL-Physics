@@ -3,6 +3,7 @@
 #include "DiagnosticsWorker.hpp"
 #include "DriftChart.hpp"
 #include "NBodySystem.hpp"
+#include "ScalingSweepWorker.hpp"
 #include "Scenarios.hpp"
 #include "framework/Application.hpp"
 #include "framework/Camera.hpp"
@@ -63,6 +64,7 @@ private:
     void LoadScenario();
     void DrawControls();
     void DrawBenchmarkResults();
+    void DrawScalingResults();
     void UpdateParticleInstances();
     void RunBenchmark();
 
@@ -103,6 +105,10 @@ private:
     double m_lastStepMs = 0.0;
 
     BenchmarkResults m_benchmark;
+
+    ScalingSweepWorker m_scalingWorker;
+    std::vector<ScalingSweepPoint> m_scalingPoints;
+    bool m_scalingStarted = false;
 
     bool m_orbiting = false;
     double m_lastMouseX = 0.0;

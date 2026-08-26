@@ -1,6 +1,7 @@
 #include "Octree.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 
@@ -174,18 +175,28 @@ glm::dvec3 WalkBarnesHut(const AdaptiveOctree& tree, int nodeIdx, int i, double 
 } // namespace
 
 void ComputeAccelBarnesHut(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                            double softening, double theta, std::vector<glm::dvec3>& accelOut) {
+                            double softening, double theta, std::vector<glm::dvec3>& accelOut,
+                            BarnesHutStats* stats) {
     const int n = static_cast<int>(pos.size());
     accelOut.assign(static_cast<size_t>(n), glm::dvec3(0.0));
     if (n == 0) return;
 
+    const auto t0 = std::chrono::steady_clock::now();
     const AdaptiveOctree tree(pos, mass);
+    const auto t1 = std::chrono::steady_clock::now();
     const double eps2 = softening * softening;
     const double theta2 = theta * theta;
 
 #pragma omp parallel for schedule(dynamic, 64)
     for (int i = 0; i < n; ++i) {
         accelOut[static_cast<size_t>(i)] = WalkBarnesHut(tree, 0, i, G, theta2, eps2);
+    }
+    const auto t2 = std::chrono::steady_clock::now();
+
+    if (stats) {
+        stats->buildMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
+        stats->walkMs = std::chrono::duration<double, std::milli>(t2 - t1).count();
+        stats->nodeCount = static_cast<int>(tree.Nodes().size());
     }
 }
 

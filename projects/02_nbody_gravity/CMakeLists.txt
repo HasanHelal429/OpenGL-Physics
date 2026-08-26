@@ -8,6 +8,7 @@ add_executable(02_nbody_gravity
     src/Scenarios.cpp
     src/DriftChart.cpp
     src/DiagnosticsWorker.cpp
+    src/ScalingSweepWorker.cpp
     src/NBodyApp.cpp
 )
 

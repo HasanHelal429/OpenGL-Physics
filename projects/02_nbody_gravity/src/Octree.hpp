@@ -59,6 +59,17 @@ private:
     std::vector<OctreeNode> m_nodes;
 };
 
+// Per-call timing/size breakdown for a scaling study -- how much of a
+// Barnes-Hut call is tree construction vs. the per-particle walk, and how
+// many nodes the tree actually has. Left null (the default) costs nothing
+// beyond a couple of chrono::now() calls; only the scaling-study benchmark
+// requests it.
+struct BarnesHutStats {
+    double buildMs = 0.0;
+    double walkMs = 0.0;
+    int nodeCount = 0;
+};
+
 // Barnes-Hut gravity: walks the adaptive octree once per particle with the
 // standard opening-angle criterion (theta = node_size / distance), treating
 // well-separated nodes as a single point mass at their center of mass.
@@ -68,6 +79,7 @@ private:
 // build each time -- fine at the particle counts this real-time demo
 // targets, unlike a production astrophysics code.
 void ComputeAccelBarnesHut(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                            double softening, double theta, std::vector<glm::dvec3>& accelOut);
+                            double softening, double theta, std::vector<glm::dvec3>& accelOut,
+                            BarnesHutStats* stats = nullptr);
 
 } // namespace nbody
