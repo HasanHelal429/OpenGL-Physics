@@ -166,7 +166,19 @@ void TraverseSubtree(const std::vector<QuadNode>& nodes, const std::vector<Expan
             for (int ci : nodeT.children) {
                 if (ci != -1) stack.emplace_back(ci, s);
             }
-        } else if (nodeT.halfSize >= nodeS.halfSize) {
+        } else if (nodeT.halfSize > nodeS.halfSize || (nodeT.halfSize == nodeS.halfSize && t < s)) {
+            // Splitting on a halfSize *tie* must be decided by node identity
+            // (t<s), not by which node happens to be labeled "t" -- the
+            // dual-tree walk explores both (A,B) and (B,A) as separate
+            // stack entries (from the t==s self-pair's own child-pair
+            // expansion), and if the tie-break instead always preferred
+            // "whichever node is currently first", the two directions can
+            // refine at different rates and reach *different* accept/
+            // reject decisions for what is mathematically the same pair --
+            // confirmed via manual trace to be exactly the source of a
+            // real double-counting bug (one direction accepts a coarse
+            // M2L pair while the mirror direction keeps splitting past it
+            // and finds a near-field sub-pair, adding both).
             for (int ci : nodeT.children) {
                 if (ci != -1) stack.emplace_back(ci, s);
             }

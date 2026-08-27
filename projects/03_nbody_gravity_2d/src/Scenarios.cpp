@@ -162,7 +162,19 @@ ScenarioResult MakeRotatingDisk(const ScenarioParams& params) {
     const double vScale = std::sqrt(G * totalMass);
     const double tDyn = R / vScale;
     r.suggestedDt = tDyn / 1000.0;
-    r.suggestedTheta = 0.5;
+    // Tighter than the other scenarios' 0.5: this one's partial-collapse
+    // dynamics (f<1) pass through a genuinely dense, transient core, and a
+    // 2D collapse concentrates mass into a smaller *area* than the 3D
+    // project's analogous scenario concentrates into a *volume* -- a
+    // locally denser passage that stresses Barnes-Hut's monopole
+    // approximation harder per unit theta. Confirmed empirically: Direct
+    // conserves energy throughout the collapse to ~1e-3%, but Barnes-Hut
+    // at theta=0.5 spikes to +8.6% transiently (self-correcting somewhat
+    // afterward, but visibly wrong in the meantime -- particles flung out
+    // by the spurious energy don't necessarily come back even once the
+    // *aggregate* drift recovers). 0.2 keeps the same peak transient drift
+    // under ~1%, in line with the other scenarios' own behavior at 0.5.
+    r.suggestedTheta = 0.2;
     r.cameraExtent = 1.75f;
     return r;
 }
