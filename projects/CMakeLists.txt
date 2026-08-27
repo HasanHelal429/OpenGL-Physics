@@ -1,3 +1,4 @@
 add_subdirectory(00_hello_triangle)
 add_subdirectory(01_hartree_fock)
 add_subdirectory(02_nbody_gravity)
+add_subdirectory(03_nbody_gravity_2d)
