@@ -18,14 +18,20 @@ namespace nbody2d {
 // perspective projection's [1][1] term and divides by view-space depth,
 // but with every particle at the same depth (kEyeDistance below) that
 // just becomes a constant scale factor, so it still renders correctly-
-// scaled, constant-size points under this orthographic setup.
+// scaled, constant-size points under this orthographic setup. That factor
+// is 1/kEyeDistance on top of the size the shader would otherwise produce
+// for an orthographic projection -- kEyeDistance=5 (the original value)
+// made every point 5x smaller than intended, small enough that most
+// particle counts rendered as sub-pixel points that never rasterized a
+// fragment at all. 1.0 cancels that extra shrink exactly (still safely
+// inside the projection's [0.01, 100] near/far range for target z=0).
 struct Camera2D {
     glm::vec2 center{0.0f};    // world-space center of view
     float halfHeight = 2.0f;   // world-space half-height of view -- the zoom level
     float minHalfHeight = 0.05f;
     float maxHalfHeight = 500.0f;
 
-    static constexpr float kEyeDistance = 5.0f;
+    static constexpr float kEyeDistance = 1.0f;
 
     glm::mat4 ViewMatrix() const {
         const glm::vec3 eye(center.x, center.y, kEyeDistance);

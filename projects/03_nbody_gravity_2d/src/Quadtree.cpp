@@ -13,6 +13,18 @@ namespace {
 // for the 3D project; only bites for near-duplicate positions.
 constexpr int kMaxDepth = 40;
 
+// Leaf bucket size: a leaf holds up to this many particles before
+// splitting (instead of splitting as soon as a 2nd particle would land in
+// it). Standard FMM/tree-code practice (often called "ncrit") -- a
+// single-particle-per-leaf tree makes every leaf-vs-anything interaction
+// its own M2L call (cost ~O(p^2), independent of how many particles it
+// represents) or its own near-field pair, multiplying both the node count
+// and the interaction-list size for no benefit once real particle counts
+// get large. Confirmed empirically to be the dominant remaining cost in
+// ComplexFmmTree's traversal after fixing the tie-break bug and the
+// blind fixed-depth parallel pre-split.
+constexpr int kMaxLeafParticles = 16;
+
 int Quadrant(const glm::dvec2& center, const glm::dvec2& p) {
     int q = 0;
     if (p.x >= center.x) q |= 1;
@@ -60,7 +72,7 @@ void AdaptiveQuadtree::Insert(int nodeIdx, int p, int depth) {
     m_nodes[idx].mass = newMass;
 
     if (m_nodes[idx].isLeaf) {
-        if (m_nodes[idx].particles.empty() || depth >= kMaxDepth) {
+        if (m_nodes[idx].particles.size() < static_cast<size_t>(kMaxLeafParticles) || depth >= kMaxDepth) {
             m_nodes[idx].particles.push_back(p);
             return;
         }
