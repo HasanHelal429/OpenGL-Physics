@@ -297,6 +297,9 @@ void NBodyApp::DrawControls() {
     if (ImGui::RadioButton("Barnes-Hut O(N logN)", m_solver == SolverType::BarnesHut)) m_solver = SolverType::BarnesHut;
     ImGui::SameLine();
     if (ImGui::RadioButton("Adaptive FMM O(N)", m_solver == SolverType::AdaptiveFmm)) m_solver = SolverType::AdaptiveFmm;
+    ImGui::SameLine();
+    if (ImGui::RadioButton("Adaptive FMM (Spherical) O(N)", m_solver == SolverType::SphericalFmm))
+        m_solver = SolverType::SphericalFmm;
 
     ImGui::BeginDisabled(m_solver == SolverType::Direct);
     float theta = static_cast<float>(m_theta);
@@ -369,6 +372,7 @@ void NBodyApp::DrawBenchmarkResults() {
     drawRow("Direct", m_benchmark.direct);
     drawRow("Barnes-Hut", m_benchmark.barnesHut);
     drawRow("Adaptive FMM", m_benchmark.fmm);
+    drawRow("FMM (Spherical)", m_benchmark.sphericalFmm);
 }
 
 void NBodyApp::RunBenchmark() {
@@ -430,6 +434,7 @@ void NBodyApp::RunBenchmark() {
 
     benchOne(SolverType::BarnesHut, m_benchmark.barnesHut);
     benchOne(SolverType::AdaptiveFmm, m_benchmark.fmm);
+    benchOne(SolverType::SphericalFmm, m_benchmark.sphericalFmm);
 }
 
 void NBodyApp::DrawScalingResults() {

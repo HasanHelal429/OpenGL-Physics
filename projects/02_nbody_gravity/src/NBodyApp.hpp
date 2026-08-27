@@ -29,6 +29,7 @@ struct BenchmarkResults {
     SolverBenchmark direct;    // skipped above a particle-count cap -- see RunBenchmark
     SolverBenchmark barnesHut;
     SolverBenchmark fmm;
+    SolverBenchmark sphericalFmm;
 };
 
 // Real-time N-body gravity: direct O(N^2), Barnes-Hut O(N log N), and

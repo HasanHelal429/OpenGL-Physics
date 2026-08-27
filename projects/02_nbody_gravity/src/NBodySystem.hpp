@@ -5,7 +5,7 @@
 
 namespace nbody {
 
-enum class SolverType { Direct, BarnesHut, AdaptiveFmm };
+enum class SolverType { Direct, BarnesHut, AdaptiveFmm, SphericalFmm };
 
 // Dispatches to whichever solver's ComputeAccel* function matches `solver`.
 // Exposed standalone (not just through NBodySystem) so the benchmark panel
