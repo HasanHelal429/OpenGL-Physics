@@ -24,42 +24,6 @@ using fmm::Expansion;
 // project was compared against.
 constexpr int kOrder = 10;
 
-// x's children, or {x} itself if x is a leaf -- identical in spirit to the
-// 3D project's ChildrenOrSelf/SplitPair, duplicated (not shared) since the
-// two projects' tree/node types differ.
-std::vector<int> ChildrenOrSelf(const std::vector<QuadNode>& nodes, int x) {
-    std::vector<int> out;
-    if (nodes[static_cast<size_t>(x)].isLeaf) {
-        out.push_back(x);
-    } else {
-        for (int c : nodes[static_cast<size_t>(x)].children) {
-            if (c != -1) out.push_back(c);
-        }
-    }
-    return out;
-}
-
-void SplitPair(const std::vector<QuadNode>& nodes, int a, int b, int depth, std::vector<std::pair<int, int>>& out) {
-    if (depth == 0) {
-        out.emplace_back(a, b);
-        return;
-    }
-    const std::vector<int> childrenA = ChildrenOrSelf(nodes, a);
-    if (a == b) {
-        for (int x : childrenA) {
-            for (int y : childrenA) SplitPair(nodes, x, y, depth - 1, out);
-        }
-    } else {
-        for (int x : childrenA) SplitPair(nodes, x, b, depth - 1, out);
-    }
-}
-
-std::vector<std::pair<int, int>> SplitPair(const std::vector<QuadNode>& nodes, int a, int b, int depth) {
-    std::vector<std::pair<int, int>> out;
-    SplitPair(nodes, a, b, depth, out);
-    return out;
-}
-
 // Bottom-up pass (decreasing node index = children-before-parents, same
 // invariant the 3D project's BuildMultipoles relies on) building each
 // node's own multipole expansion about its own com, plus `maxRadius`: the
@@ -99,94 +63,117 @@ void BuildMultipoles(const AdaptiveQuadtree& tree, std::vector<Expansion>& multi
     }
 }
 
-// Dual-tree M2L traversal -- same stack-based (t,s) walk shape as the 3D
-// project's TraverseSubtree.
+// Resolves a single (t,s) pair: accepts it via M2L (updating local[t]),
+// records a near-field pair, or appends the sub-pairs it splits into to
+// `out` (which may safely be the same container the caller is iterating
+// or popping from, e.g. `out` == the DFS stack in TraverseSubtree below --
+// this function only ever appends). Shared by the parallel per-group DFS
+// walk (TraverseSubtree) and the serial BFS ramp-up in
+// ComputeAccelComplexFmm, so both apply the exact same accept/split rules.
+void ProcessPair(int t, int s, const std::vector<QuadNode>& nodes, const std::vector<Expansion>& multipole,
+                  const std::vector<double>& maxRadius, double theta2, double minSep2, std::vector<Expansion>& local,
+                  std::vector<std::pair<int, int>>& nearPairsOut, std::vector<std::pair<int, int>>& out) {
+    const QuadNode& nodeT = nodes[static_cast<size_t>(t)];
+    const QuadNode& nodeS = nodes[static_cast<size_t>(s)];
+    if (nodeT.mass <= 0.0 || nodeS.mass <= 0.0) return;
+
+    if (t == s) {
+        if (nodeT.isLeaf) return;
+        for (int ci : nodeT.children) {
+            if (ci == -1) continue;
+            for (int cj : nodeT.children) {
+                if (cj == -1) continue;
+                out.emplace_back(ci, cj);
+            }
+        }
+        return;
+    }
+
+    const glm::dvec2 d = nodeT.com - nodeS.com;
+    const double dist2 = glm::dot(d, d);
+
+    // MAC requires *both* the box-geometry opening-angle floor
+    // (sizeSum, never zero even for a one-particle leaf) and the
+    // tighter exact-radius bound (reach, which *is* exactly zero for a
+    // single-particle leaf) -- the 3D project's spherical FMM shipped
+    // with only the reach-based bound, which made its criterion
+    // vacuously true for leaf-vs-leaf pairs (maxRadius=0 on both
+    // sides) regardless of theta or distance, and had to be fixed
+    // after the fact. Both are required here from the start.
+    const double sizeSum = 2.0 * nodeT.halfSize + 2.0 * nodeS.halfSize;
+    const double reach = maxRadius[static_cast<size_t>(t)] + maxRadius[static_cast<size_t>(s)];
+    const bool wellSeparated =
+        (dist2 > minSep2) && (sizeSum * sizeSum < theta2 * dist2) && (reach * reach < theta2 * dist2);
+
+    if (wellSeparated) {
+        local[static_cast<size_t>(t)] += fmm::M2L(multipole[static_cast<size_t>(s)], fmm::ToComplex(nodeT.com), kOrder);
+        return;
+    }
+
+    // Neither side can split further (both are leaves, whether because
+    // their bucket wasn't yet full or the near-duplicate-position depth
+    // cap was hit) and they're not well separated -- exact softened
+    // summation over every particle pair between the two leaves (each
+    // leaf may hold several, per Quadtree.cpp's bucket size; a leaf-vs-
+    // leaf pair is only ever visited from one of its two (t,s)/(s,t)
+    // directions -- see the tie-break comment below -- so processing it
+    // from the lower-indexed side avoids counting it twice, matching in
+    // spirit the single-particle version's `pt<ps` check).
+    if (nodeT.isLeaf && nodeS.isLeaf) {
+        if (t < s) {
+            for (int pt : nodeT.particles) {
+                for (int ps : nodeS.particles) nearPairsOut.emplace_back(pt, ps);
+            }
+        }
+        return;
+    }
+
+    if (nodeT.isLeaf) {
+        for (int cj : nodeS.children) {
+            if (cj != -1) out.emplace_back(t, cj);
+        }
+    } else if (nodeS.isLeaf) {
+        for (int ci : nodeT.children) {
+            if (ci != -1) out.emplace_back(ci, s);
+        }
+    } else if (nodeT.halfSize > nodeS.halfSize || (nodeT.halfSize == nodeS.halfSize && t < s)) {
+        // Splitting on a halfSize *tie* must be decided by node identity
+        // (t<s), not by which node happens to be labeled "t" -- the
+        // dual-tree walk explores both (A,B) and (B,A) as separate
+        // pairs (from the t==s self-pair's own child-pair expansion),
+        // and if the tie-break instead always preferred "whichever node
+        // is currently first", the two directions can refine at
+        // different rates and reach *different* accept/reject decisions
+        // for what is mathematically the same pair -- confirmed via
+        // manual trace to be exactly the source of a real double-counting
+        // bug (one direction accepts a coarse M2L pair while the mirror
+        // direction keeps splitting past it and finds a near-field
+        // sub-pair, adding both).
+        for (int ci : nodeT.children) {
+            if (ci != -1) out.emplace_back(ci, s);
+        }
+    } else {
+        for (int cj : nodeS.children) {
+            if (cj != -1) out.emplace_back(t, cj);
+        }
+    }
+}
+
+// Dual-tree M2L traversal: pops (t,s) pairs from `stack` (consumed in
+// place) and resolves each via ProcessPair, which may push further
+// sub-pairs back onto the same stack -- runs to completion. Used to fully
+// resolve one parallel group's share of the leftover pairs from the BFS
+// ramp-up below (see ComputeAccelComplexFmm) -- each group only ever
+// touches descendants of its own "t", so different groups' local[] writes
+// never overlap.
 void TraverseSubtree(const std::vector<QuadNode>& nodes, const std::vector<Expansion>& multipole,
                       const std::vector<double>& maxRadius, double theta2, double minSep2,
-                      const std::vector<std::pair<int, int>>& seeds, std::vector<Expansion>& local,
+                      std::vector<std::pair<int, int>>& stack, std::vector<Expansion>& local,
                       std::vector<std::pair<int, int>>& nearPairsOut) {
-    std::vector<std::pair<int, int>> stack(seeds);
-
     while (!stack.empty()) {
         const auto [t, s] = stack.back();
         stack.pop_back();
-
-        const QuadNode& nodeT = nodes[static_cast<size_t>(t)];
-        const QuadNode& nodeS = nodes[static_cast<size_t>(s)];
-        if (nodeT.mass <= 0.0 || nodeS.mass <= 0.0) continue;
-
-        if (t == s) {
-            if (nodeT.isLeaf) continue;
-            for (int ci : nodeT.children) {
-                if (ci == -1) continue;
-                for (int cj : nodeT.children) {
-                    if (cj == -1) continue;
-                    stack.emplace_back(ci, cj);
-                }
-            }
-            continue;
-        }
-
-        const glm::dvec2 d = nodeT.com - nodeS.com;
-        const double dist2 = glm::dot(d, d);
-
-        const bool degenerateT = nodeT.isLeaf && nodeT.particles.size() > 1;
-        const bool degenerateS = nodeS.isLeaf && nodeS.particles.size() > 1;
-
-        // MAC requires *both* the box-geometry opening-angle floor
-        // (sizeSum, never zero even for a one-particle leaf) and the
-        // tighter exact-radius bound (reach, which *is* exactly zero for a
-        // single-particle leaf) -- the 3D project's spherical FMM shipped
-        // with only the reach-based bound, which made its criterion
-        // vacuously true for leaf-vs-leaf pairs (maxRadius=0 on both
-        // sides) regardless of theta or distance, and had to be fixed
-        // after the fact. Both are required here from the start.
-        const double sizeSum = 2.0 * nodeT.halfSize + 2.0 * nodeS.halfSize;
-        const double reach = maxRadius[static_cast<size_t>(t)] + maxRadius[static_cast<size_t>(s)];
-        const bool wellSeparated =
-            (dist2 > minSep2) && (sizeSum * sizeSum < theta2 * dist2) && (reach * reach < theta2 * dist2);
-
-        if (degenerateT || degenerateS || wellSeparated) {
-            local[static_cast<size_t>(t)] += fmm::M2L(multipole[static_cast<size_t>(s)], fmm::ToComplex(nodeT.com), kOrder);
-            continue;
-        }
-
-        if (nodeT.isLeaf && nodeS.isLeaf) {
-            const int pt = nodeT.particles[0];
-            const int ps = nodeS.particles[0];
-            if (pt < ps) nearPairsOut.emplace_back(pt, ps);
-            continue;
-        }
-
-        if (nodeT.isLeaf) {
-            for (int cj : nodeS.children) {
-                if (cj != -1) stack.emplace_back(t, cj);
-            }
-        } else if (nodeS.isLeaf) {
-            for (int ci : nodeT.children) {
-                if (ci != -1) stack.emplace_back(ci, s);
-            }
-        } else if (nodeT.halfSize > nodeS.halfSize || (nodeT.halfSize == nodeS.halfSize && t < s)) {
-            // Splitting on a halfSize *tie* must be decided by node identity
-            // (t<s), not by which node happens to be labeled "t" -- the
-            // dual-tree walk explores both (A,B) and (B,A) as separate
-            // stack entries (from the t==s self-pair's own child-pair
-            // expansion), and if the tie-break instead always preferred
-            // "whichever node is currently first", the two directions can
-            // refine at different rates and reach *different* accept/
-            // reject decisions for what is mathematically the same pair --
-            // confirmed via manual trace to be exactly the source of a
-            // real double-counting bug (one direction accepts a coarse
-            // M2L pair while the mirror direction keeps splitting past it
-            // and finds a near-field sub-pair, adding both).
-            for (int ci : nodeT.children) {
-                if (ci != -1) stack.emplace_back(ci, s);
-            }
-        } else {
-            for (int cj : nodeS.children) {
-                if (cj != -1) stack.emplace_back(t, cj);
-            }
-        }
+        ProcessPair(t, s, nodes, multipole, maxRadius, theta2, minSep2, local, nearPairsOut, stack);
     }
 }
 
@@ -235,9 +222,48 @@ void ComputeAccelComplexFmm(const std::vector<glm::dvec2>& pos, const std::vecto
     // section for the empirical trail.
     const double minSep2 = (5.0 * softening) * (5.0 * softening);
 
-    constexpr int kSplitDepth = 4; // one level deeper than the 3D project's 3, since a quadtree node has only 4 children (vs. 8) -- keeps a comparable target-bucket count (4^4=256 vs 8^3=512)
-    const std::vector<std::pair<int, int>> finalPairs = SplitPair(nodes, 0, 0, kSplitDepth);
+    const int numThreads = std::max(1, omp_get_max_threads());
+    std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(static_cast<size_t>(numThreads));
 
+    // Phase 1 (serial): a MAC-first, breadth-first ramp-up from
+    // (root,root), accepting pairs at the coarsest level the MAC allows
+    // before ever splitting further. This replaces an earlier design that
+    // blindly pre-split every pair down to a fixed depth (purely to
+    // generate enough independent seeds for the parallel phase below)
+    // *before* checking whether the MAC would already accept a much
+    // coarser (and far cheaper -- M2L's cost is O(p^2) per call,
+    // independent of how many particles either side represents) pair.
+    // That forced far more, far smaller M2L calls than necessary and was
+    // confirmed empirically to dominate the solver's wall-clock time.
+    //
+    // Breadth-first (not the depth-first stack TraverseSubtree uses)
+    // matters here: this ramp-up stops once the *current level's* pair
+    // count reaches a threshold, handing that level to phase 2 as seeds.
+    // A depth-first stack's size reflects how many sibling branches are
+    // still open, not how much total work remains, so it stays small
+    // (bounded by tree depth) even when there's enormous work left to do
+    // -- confirmed empirically to never reach any reasonable threshold,
+    // running the entire traversal serially. A breadth-first frontier's
+    // size actually tracks the width of the remaining problem, growing
+    // geometrically with each split, so it reaches the threshold quickly
+    // whenever there's enough work to justify parallelizing -- and for
+    // small trees, may drain to empty first without ever reaching it,
+    // which is correct (nothing left to parallelize).
+    std::vector<std::pair<int, int>> frontier{{0, 0}};
+    std::vector<std::pair<int, int>> nearPairsSerial;
+    const size_t targetSeedCount = static_cast<size_t>(numThreads) * 8;
+    while (!frontier.empty() && frontier.size() < targetSeedCount) {
+        std::vector<std::pair<int, int>> next;
+        for (const auto& [t, s] : frontier) {
+            ProcessPair(t, s, nodes, multipole, maxRadius, theta2, minSep2, local, nearPairsSerial, next);
+        }
+        frontier = std::move(next);
+    }
+
+    // Phase 2 (parallel): group the leftover pairs by their "t" side --
+    // each group only ever touches descendants of its own "t", so
+    // different groups' local[] writes never overlap -- and fully resolve
+    // each group's own subtree on its own thread.
     std::vector<int> targetNodes;
     std::vector<int> nodeToTargetIdx(static_cast<size_t>(numNodes), -1);
     auto targetIndexOf = [&](int t) -> int {
@@ -250,14 +276,11 @@ void ComputeAccelComplexFmm(const std::vector<glm::dvec2>& pos, const std::vecto
     };
 
     std::vector<std::vector<std::pair<int, int>>> seedsPerTarget;
-    for (const auto& [t, s] : finalPairs) {
+    for (const auto& [t, s] : frontier) {
         const int idx = targetIndexOf(t);
         if (idx >= static_cast<int>(seedsPerTarget.size())) seedsPerTarget.resize(static_cast<size_t>(idx) + 1);
         seedsPerTarget[static_cast<size_t>(idx)].emplace_back(t, s);
     }
-
-    const int numThreads = std::max(1, omp_get_max_threads());
-    std::vector<std::vector<std::pair<int, int>>> nearPairsPerTarget(static_cast<size_t>(numThreads));
 
     const int numTargets = static_cast<int>(targetNodes.size());
     const auto tSeed1 = std::chrono::steady_clock::now();
@@ -267,6 +290,7 @@ void ComputeAccelComplexFmm(const std::vector<glm::dvec2>& pos, const std::vecto
         TraverseSubtree(nodes, multipole, maxRadius, theta2, minSep2, seedsPerTarget[static_cast<size_t>(ti)], local,
                          nearPairsPerTarget[static_cast<size_t>(omp_get_thread_num())]);
     }
+    nearPairsPerTarget[0].insert(nearPairsPerTarget[0].end(), nearPairsSerial.begin(), nearPairsSerial.end());
     const auto tTraverse1 = std::chrono::steady_clock::now();
 
     // L2L: push each node's accumulated local expansion down to its
@@ -281,8 +305,9 @@ void ComputeAccelComplexFmm(const std::vector<glm::dvec2>& pos, const std::vecto
     const auto tL2l1 = std::chrono::steady_clock::now();
 
     // L2P: evaluate each leaf's finalized local expansion at its member
-    // particle(s), plus an exact brute-force sum for a degenerate leaf's
-    // own mutual interactions.
+    // particle(s), plus an exact brute-force sum for a bucket's own
+    // mutual (intra-leaf) interactions -- the M2L/near-field interaction
+    // list above only ever covers particles in *other* nodes.
     const double eps2 = softening * softening;
 #pragma omp parallel for schedule(dynamic, 64)
     for (int idx = 0; idx < numNodes; ++idx) {

@@ -7,12 +7,14 @@
 namespace nbody2d {
 
 // One node of an adaptive quadtree: top-down point insertion, one leaf per
-// particle unless a depth cap is hit (a "degenerate" leaf then holds more
-// than one). The 2D analogue of 02_nbody_gravity/src/Octree.hpp's
-// OctreeNode/AdaptiveOctree -- same structure with 4 children instead of
-// 8, no Cartesian quadrupole moment (this project's higher-accuracy solver
-// carries complex Laurent-series moments instead, computed separately in
-// ComplexFmmTree.cpp via a side array, not stored on the node itself).
+// up to kMaxLeafParticles (see Quadtree.cpp) particles, splitting once
+// that bucket fills (or holding more regardless, past a depth cap that
+// only bites for near-duplicate positions). The 2D analogue of
+// 02_nbody_gravity/src/Octree.hpp's OctreeNode/AdaptiveOctree -- same
+// structure with 4 children instead of 8, no Cartesian quadrupole moment
+// (this project's higher-accuracy solver carries complex Laurent-series
+// moments instead, computed separately in ComplexFmmTree.cpp via a side
+// array, not stored on the node itself).
 struct QuadNode {
     glm::dvec2 center{0.0}; // geometric box center (used only to pick quadrants during insertion)
     double halfSize = 0.0;
@@ -21,7 +23,7 @@ struct QuadNode {
     std::array<int, 4> children{-1, -1, -1, -1};
     int parent = -1;
     bool isLeaf = true;
-    std::vector<int> particles; // meaningful only while isLeaf; almost always size 0 or 1
+    std::vector<int> particles; // meaningful only while isLeaf
 };
 
 // Flat, index-addressed adaptive quadtree over the given particle
