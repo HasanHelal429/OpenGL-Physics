@@ -1,0 +1,53 @@
+#pragma once
+
+#include <glm/glm.hpp>
+#include <vector>
+
+namespace nbody2d {
+
+enum class SolverType { Direct, BarnesHut, ComplexFmm };
+
+// Dispatches to whichever solver's ComputeAccel* function matches `solver`.
+// Exposed standalone (not just through NBodySystem) so the benchmark panel
+// can run any solver against an arbitrary snapshot without needing a full
+// NBodySystem instance.
+void ComputeAccel(SolverType solver, const std::vector<glm::dvec2>& pos, const std::vector<double>& mass, double G,
+                   double softening, double theta, std::vector<glm::dvec2>& accelOut);
+
+// Softened-gravity 2D N-body system: SoA position/velocity/mass state plus
+// a kick-drift-kick (leapfrog) symplectic integrator. Force evaluation is
+// swappable per step (Direct O(N^2), Barnes-Hut O(N log N), or the complex
+// FMM O(N) -- see Quadtree.hpp/ComplexFmmTree.hpp).
+class NBodySystem {
+public:
+    void SetParticles(std::vector<glm::dvec2> positions, std::vector<glm::dvec2> velocities,
+                       std::vector<double> masses);
+
+    // Must be called once after SetParticles (and again if G/softening/
+    // solver change while paused) so the first leapfrog half-kick has a
+    // valid acceleration to use.
+    void PrimeAccelerations(double G, double softening, SolverType solver, double theta);
+
+    void Step(double dt, double G, double softening, SolverType solver, double theta);
+
+    // O(N^2) diagnostics -- not cheap at large N; call sparingly.
+    double TotalEnergy(double G, double softening) const;
+    // Angular momentum in 2D is a scalar (the z-component of r x v out of
+    // the plane), not a vector -- the one physics-API difference from the
+    // 3D project's NBodySystem.
+    double AngularMomentum() const; // about the system's center of mass
+    glm::dvec2 CenterOfMass() const;
+
+    size_t Count() const { return m_pos.size(); }
+    const std::vector<glm::dvec2>& Positions() const { return m_pos; }
+    const std::vector<glm::dvec2>& Velocities() const { return m_vel; }
+    const std::vector<double>& Masses() const { return m_mass; }
+
+private:
+    void RecomputeAccel(double G, double softening, SolverType solver, double theta);
+
+    std::vector<glm::dvec2> m_pos, m_vel, m_accel;
+    std::vector<double> m_mass;
+};
+
+} // namespace nbody2d
