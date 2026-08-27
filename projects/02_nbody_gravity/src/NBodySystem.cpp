@@ -2,6 +2,7 @@
 
 #include "AdaptiveFmm.hpp"
 #include "Octree.hpp"
+#include "SphericalFmm.hpp"
 
 #include <cmath>
 
@@ -39,6 +40,7 @@ void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const s
         case SolverType::Direct: ComputeAccelDirect(pos, mass, G, softening, accelOut); return;
         case SolverType::BarnesHut: ComputeAccelBarnesHut(pos, mass, G, softening, theta, accelOut); return;
         case SolverType::AdaptiveFmm: ComputeAccelAdaptiveFmm(pos, mass, G, softening, theta, accelOut); return;
+        case SolverType::SphericalFmm: ComputeAccelSphericalFmm(pos, mass, G, softening, theta, accelOut); return;
     }
 }
 
