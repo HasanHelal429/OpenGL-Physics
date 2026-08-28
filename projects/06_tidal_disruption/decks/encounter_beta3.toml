@@ -1,0 +1,39 @@
+title = "Tidal disruption -- n=1.5 star, M_bh=1000 M_star, beta=3 (deep encounter)"
+
+# Star: the settled equilibrium from star_verify_n1.5 (see README.md),
+# boosted onto a parabolic orbit by tools/make_orbit_ic.py.
+#   M_bh=1000 M_star -> tidal radius r_t = R_star*(M_bh/M_star)^(1/3) = 10
+#   beta=3 -> pericenter r_p = r_t/beta = 3.333 (well inside r_t: deep,
+#             clearly disruptive encounter, not a marginal grazing one)
+#   start_factor=3 -> starts at r_0=3*r_t=30, still approaching
+[star]
+ic_file = "ic/star_n1.5_encounter_beta3.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[blackhole]
+enabled = true
+type = "point"
+mass = 1000.0
+
+[time]
+# dt << pericenter dynamical time sqrt(r_p^3/(G*M_bh)) = 0.192 (verified by
+# integrating the point-mass orbit alone: reaches r_p to 6 significant
+# figures, energy conserved to 1e-12, see tools/make_orbit_ic.py's
+# docstring derivation). Kepler two-body time-of-flight: infall to
+# pericenter at t=2.82, back out to r_0 at t=5.65 (symmetric) -- frames*
+# substeps_per_frame*dt=15 runs well past that, into stream formation.
+dt = 0.002
+substeps_per_frame = 25
+frames = 300

@@ -27,6 +27,11 @@ try:
 except ImportError:
     sys.exit("make_movie: needs numpy + matplotlib")
 
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
+
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
@@ -43,22 +48,36 @@ def main():
     if not pos_frames:
         sys.exit("no pos_mass_*.npy frames found")
 
+    deck_path = os.path.join(d, "deck.toml")
+    bh_enabled = False
+    if tomllib is not None and os.path.exists(deck_path):
+        with open(deck_path, "rb") as f:
+            deck = tomllib.load(f)
+        bh_enabled = bool(deck.get("blackhole", {}).get("enabled", False))
+
     # Fixed axis limits and color scale across the whole run, so the star's
     # apparent size/brightness changes reflect real dynamics, not rescaling.
+    # Tight bounding box (not a radial percentile) so the frame is used
+    # efficiently; still necessarily wide when the star starts far from a
+    # black hole it later swings close to, which is real orbital geometry,
+    # not something a fixed 2D view can hide.
     all_pos = np.stack([np.load(f) for f in pos_frames])
     all_rho = np.stack([np.load(f)[:, 0] for f in rho_frames])
-    r_max = float(np.percentile(np.linalg.norm(all_pos[..., :3], axis=-1), 99.5)) * 1.15
+    half_extent = float(np.max(np.abs(all_pos[..., :2]))) * 1.08
     rho_min = max(float(all_rho[all_rho > 0].min()), float(all_rho.max()) * 1e-4)
     rho_max = float(all_rho.max())
 
     fig, ax = plt.subplots(figsize=(6, 6), dpi=130)
     fig.patch.set_facecolor("black")
     ax.set_facecolor("black")
-    ax.set_xlim(-r_max, r_max)
-    ax.set_ylim(-r_max, r_max)
+    ax.set_xlim(-half_extent, half_extent)
+    ax.set_ylim(-half_extent, half_extent)
     ax.set_aspect("equal")
     ax.set_axis_off()
     fig.subplots_adjust(0, 0, 1, 1)
+
+    if bh_enabled:
+        ax.scatter([0], [0], marker="*", s=140, c="#fff6d5", edgecolors="none", zorder=5)
 
     pm0 = np.load(pos_frames[0])
     rp0 = np.load(rho_frames[0])

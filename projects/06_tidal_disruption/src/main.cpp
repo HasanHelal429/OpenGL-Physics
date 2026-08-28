@@ -74,6 +74,8 @@ bool SelfTest() {
     constexpr double VISC_A = 1.0, VISC_B = 2.0;
     constexpr double ETA = 1.2, H_INIT = 0.3, H_MIN = 0.2 * H_INIT, H_MAX = 8.0 * H_INIT;
     constexpr int H_ITERS = 3;
+    constexpr int BH_TYPE = 2; // Paczynski-Wiita -- exercises more new code than the point-mass case
+    constexpr double BH_MASS = 500.0, BH_RS = 0.1;
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> posDist(-1.0, 1.0);
@@ -110,6 +112,10 @@ bool SelfTest() {
     }
     std::vector<glm::dvec3> accRef(N, glm::dvec3(0.0));
     for (int i = 0; i < N; ++i) {
+        const double r = glm::length(glm::dvec3(posMass[i]));
+        const double dr = std::max(r - BH_RS, std::sqrt(SOFT2));
+        accRef[i] -= G * BH_MASS / (dr * dr) * (glm::dvec3(posMass[i]) / std::max(r, 1e-8));
+
         for (int j = 0; j < N; ++j) {
             const glm::dvec3 rij = glm::dvec3(posMass[i]) - glm::dvec3(posMass[j]);
             const double r2 = glm::dot(rij, rij);
@@ -172,6 +178,9 @@ bool SelfTest() {
     forces.SetFloat("uSoftening2", static_cast<float>(SOFT2));
     forces.SetFloat("uViscAlpha", static_cast<float>(VISC_A));
     forces.SetFloat("uViscBeta", static_cast<float>(VISC_B));
+    forces.SetInt("uBhType", BH_TYPE);
+    forces.SetFloat("uBhMass", static_cast<float>(BH_MASS));
+    forces.SetFloat("uBhRs", static_cast<float>(BH_RS));
     fw::ComputeShader::BindBuffer(0, bufPosMass);
     fw::ComputeShader::BindBuffer(1, bufVel);
     fw::ComputeShader::BindBuffer(2, bufAcc);

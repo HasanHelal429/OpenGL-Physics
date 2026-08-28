@@ -147,6 +147,19 @@ uniform float uSoftening2;   // softening length squared
 uniform float uViscAlpha;
 uniform float uViscBeta;
 
+// Black hole: a fixed point mass at the origin (M_BH >> M_star, so its
+// recoil from the star's gravity is negligible to leading order in the
+// mass ratio -- not integrated). uBhType: 0 off, 1 Newtonian point mass,
+// 2 Paczynski-Wiita (a = -G*M/(r-r_s)^2, reproduces the true ISCO at 6M and
+// diverges at the Schwarzschild radius r_s -- a pseudo-relativistic
+// stand-in for pericenter precession/plunge without a real metric). Both
+// forms are floored at uSoftening (already sized for the star's own
+// resolution) below r_s so a particle passing through the horizon gets a
+// large but finite kick instead of a NaN.
+uniform int uBhType;
+uniform float uBhMass;
+uniform float uBhRs;
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(uN)) return;
@@ -159,6 +172,16 @@ void main() {
     float ci = rhoPress[i].z;
 
     vec3 a = vec3(0.0);
+
+    if (uBhType == 1) {
+        float r2 = dot(ri, ri);
+        a -= uG * uBhMass * pow(r2 + uSoftening2, -1.5) * ri;
+    } else if (uBhType == 2) {
+        float r = length(ri);
+        float dr = max(r - uBhRs, sqrt(uSoftening2));
+        a -= uG * uBhMass / (dr * dr) * (ri / max(r, 1e-8));
+    }
+
     for (uint j = 0u; j < uint(uN); ++j) {
         vec3 rij = ri - posMass[j].xyz;
         float r2 = dot(rij, rij);
