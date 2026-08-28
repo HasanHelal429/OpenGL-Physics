@@ -880,11 +880,16 @@ TdseSim::RelaxResult TdseSim::Relax(const RelaxOptions& opt) {
                           GL_DYNAMIC_DRAW);
     }
 
-    // Seed: the deck's initial state modulated by a symmetry polynomial + noise.
+    // Seed: warm start if given, else the deck's initial state modulated by a
+    // symmetry polynomial + a little noise.
     std::mt19937 rng(1234);
     std::uniform_real_distribution<float> rnd(-1.0f, 1.0f);
     std::vector<std::vector<std::complex<float>>> cpu(K, std::vector<std::complex<float>>(nn));
     for (int k = 0; k < K; ++k) {
+        if (opt.warmStart && static_cast<int>(opt.warmStart->size()) >= K) {
+            cpu[k] = (*opt.warmStart)[k];
+            continue;
+        }
         for (int j = 0; j < n; ++j) {
             for (int i = 0; i < n; ++i) {
                 const size_t idx = static_cast<size_t>(j) * n + i;
@@ -928,17 +933,22 @@ TdseSim::RelaxResult TdseSim::Relax(const RelaxOptions& opt) {
         CMulBuf(buf, vpropR);
     };
 
+    const int oe = std::max(1, opt.orthoEvery);
     for (int step = 0; step < opt.steps; ++step) {
         for (int k = 0; k < K; ++k) propReal(sb[k]);
-        glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
-        for (int k = 0; k < K; ++k)
-            glGetNamedBufferSubData(sb[k], 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
-                                    cpu[k].data());
-        orthonormalize();
-        for (int k = 0; k < K; ++k)
-            glNamedBufferSubData(sb[k], 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
-                                 cpu[k].data());
-        if (!opt.quiet && (step % 100 == 0 || step == opt.steps - 1)) {
+        if ((step + 1) % oe == 0 || step == opt.steps - 1) {
+            glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+            for (int k = 0; k < K; ++k)
+                glGetNamedBufferSubData(sb[k], 0,
+                                        static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
+                                        cpu[k].data());
+            orthonormalize();
+            for (int k = 0; k < K; ++k)
+                glNamedBufferSubData(sb[k], 0,
+                                     static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
+                                     cpu[k].data());
+        }
+        if (!opt.quiet && (step % 200 == 0 || step == opt.steps - 1)) {
             std::printf("\rrelax %d/%d   ", step + 1, opt.steps);
             std::fflush(stdout);
         }
@@ -1024,12 +1034,78 @@ std::vector<float> TdseSim::PoissonSolve(const std::vector<float>& rho, double c
 
 int TdseSim::RunScf(const fw::Deck& deck, const RelaxOptions& relaxOpt, int electrons,
                     const std::string& outDir) {
-    (void)deck;
-    (void)relaxOpt;
-    (void)electrons;
-    (void)outDir;
-    std::fprintf(stderr, "--scf: not yet implemented (Phase G4)\n");
-    return 3;
+    const int n = m_grid.n;
+    const size_t nn = static_cast<size_t>(n) * n;
+    const int K = std::clamp(relaxOpt.states, 1, 12);
+    const int N = (electrons <= 0 || electrons > K) ? K : electrons;
+    const double coupling = deck.GetDouble("meanfield.coupling", 1.0);
+    const double tol = deck.GetDouble("scf.tol", 2e-3);
+    const int maxIter = deck.GetInt("scf.max_iter", 30);
+    const double mix = deck.GetDouble("scf.mix", 0.35);
+
+    std::vector<float> vH(nn, 0.0f);
+    RelaxResult r;
+
+    for (int it = 0; it < maxIter; ++it) {
+        RelaxOptions ro = relaxOpt;
+        ro.states = K;
+        ro.extraPotential = &vH;
+        ro.warmStart = it == 0 ? nullptr : &r.states;
+        ro.steps = it == 0 ? relaxOpt.steps : std::max(300, relaxOpt.steps / 3);
+        ro.orthoEvery = it == 0 ? 1 : 3;
+        ro.quiet = true;
+        r = Relax(ro);
+
+        std::vector<float> rho(nn, 0.0f);
+        for (int k = 0; k < N; ++k)
+            for (size_t i = 0; i < nn; ++i) rho[i] += std::norm(r.states[k][i]);
+
+        const std::vector<float> vHnew = PoissonSolve(rho, coupling);
+        double resid = 0.0, scale = 1e-9;
+        for (size_t i = 0; i < nn; ++i) {
+            resid = std::max(resid, std::abs(static_cast<double>(vHnew[i]) - vH[i]));
+            scale = std::max(scale, std::abs(static_cast<double>(vHnew[i])));
+        }
+        resid /= scale;
+        for (size_t i = 0; i < nn; ++i)
+            vH[i] = static_cast<float>((1.0 - mix) * vH[i] + mix * vHnew[i]);
+
+        std::printf("scf %2d  E:", it);
+        for (int k = 0; k < K; ++k) std::printf(" %.4f", r.energies[k]);
+        std::printf("   residual %.2e\n", resid);
+        if (it >= 3 && resid < tol) break;
+    }
+
+    // V_total = V_ext + V_H (the SCF-converged Hartree field).
+    std::vector<float> vTot(nn);
+    for (size_t i = 0; i < nn; ++i) vTot[i] = m_vCpu[i] + vH[i];
+
+    fw::SimInfo info;
+    info.title = "Poisson-Schrodinger (self-consistent)";
+    info.gridNx = n;
+    info.gridNy = n;
+    info.lx = m_grid.lx;
+    info.ly = m_grid.ly;
+    info.frameFields = {"psi", "potential", "v_ext", "v_hartree"};
+    info.diagnostics = {"energy", "occupation"};
+    fw::OutputWriter w(outDir, info, deck);
+    for (int k = 0; k < K; ++k) {
+        w.BeginFrame(static_cast<double>(k), static_cast<long>(k));
+        w.WriteField("psi", r.states[k].data(), fw::NpyDtype::C8, n, n);
+        if (k == 0) {
+            w.WriteField("potential", vTot.data(), fw::NpyDtype::F4, n, n);
+            w.WriteField("v_ext", m_vCpu.data(), fw::NpyDtype::F4, n, n);
+            w.WriteField("v_hartree", vH.data(), fw::NpyDtype::F4, n, n);
+        }
+        w.WriteScalar("energy", r.energies[k]);
+        w.WriteScalar("occupation", k < N ? 1.0 : 0.0);
+        w.EndFrame();
+    }
+    w.Finish();
+    std::printf("converged energies:");
+    for (double e : r.energies) std::printf(" %.4f", e);
+    std::printf("\n");
+    return 0;
 }
 
 } // namespace tdse
