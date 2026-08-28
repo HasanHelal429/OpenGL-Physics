@@ -128,6 +128,11 @@ python tools/plot_star.py out/star_relax_n1.5 --index 1.5
 # settle-then-verify: extract a damped run's settled final frame as a new IC,
 # then re-run it undamped (decks/star_verify_n1.5.toml) as the real check
 python tools/extract_ic_from_frame.py out/star_relax_n1.5 --frame 0199 --out ic/star_n1.5_relaxed.bin
+
+# movie: (x,y) scatter colored by density (log scale, fixed across the run)
+# -- mp4 via imageio's bundled ffmpeg (not the system PATH), PNG sequence
+# fallback if that import fails
+python tools/make_movie.py out/star_relax_n1.5
 ```
 
 ## Deck format
