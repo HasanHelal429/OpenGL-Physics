@@ -84,8 +84,10 @@ python tools/plot_diagnostics.py out/tunneling            # -> validation panels
 title = "..."
 [grid]      n = 512   lx = 60.0   ly = 40.0        # n a power of two, <= 2048
 [time]      dt = 0.002   substeps_per_frame = 10   frames = 400
-[initial]   type = "gaussian"    # gaussian | hermite_gauss {nx,ny,omega} | superposition
+[initial]   type = "gaussian"    # gaussian | hermite_gauss {nx,ny,omega} | superposition | file
             x0 = -14  y0 = 0  sigma = 2  kx = 5  ky = 0    # sigma_x / sigma_y also ok
+            # type = "file": path = "psi.bin" -- raw complex64, interleaved re/im
+            #   float32, row-major n*n (np.asarray(psi, np.complex64).tofile); renormalized
 [boundary]  type = "cap"         # or "periodic"
             cap_width = 6  cap_strength = 4
 [[potential]]  type = "barrier"  # free|harmonic|barrier|double_slit|well|coulomb|box
