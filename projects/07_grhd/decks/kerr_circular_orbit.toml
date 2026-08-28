@@ -1,0 +1,32 @@
+title = "GRHD Tier 2 Phase 2a -- Kerr equatorial circular-orbit ring, a=0.7M"
+
+# Every cell starts on its own exact circular geodesic orbit (v_r=0,
+# v_phi from tools/kerr_orbits.py, see tools/make_kerr_orbit_ic.py) --
+# the check is whether v_r stays ~0 under evolution (see tools/plot_kerr_orbit.py),
+# the Kerr-specific analogue of 06_tidal_disruption's/07's "settle then
+# verify it's a genuine equilibrium" methodology.
+geometry = "kerr_equatorial"
+
+[grid]
+n = 400
+r_min = 6.0
+r_max = 20.0
+
+[physics]
+M = 1.0
+a = 0.7
+gamma = 1.333333
+
+[kerr]
+ic_file = "ic/kerr_ring_a07.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+# dt=cfl*dr~0.007; orbital period at r_min~6M is ~90 (coordinate time) for
+# a=0.7M, so substeps_per_frame*frames*dt~560 covers ~6 orbits at the
+# inner (fastest, most demanding) edge.
+cfl = 0.2
+substeps_per_frame = 400
+frames = 200
