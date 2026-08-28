@@ -1,4 +1,4 @@
-# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2b part 1)
+# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2b, part 2 in progress)
 
 This is Tier 2 of the tidal-disruption project (see
 `06_tidal_disruption/README.md`'s tier table): fluid on a fixed
@@ -335,9 +335,18 @@ python tools/plot_kerr_orbit.py out/kerr_circular_orbit
 python tools/make_kerr_orbit_movie.py out/kerr_circular_orbit
 
 # Phase 2b, part 1: Fishbone-Moncrief torus (analytic construction only --
-# no deck/dynamical run yet, see Progress)
+# see Physics/Progress for the dynamical solver's current status)
 python tools/plot_fishbone_moncrief.py --M 1.0 --a 0.9 --gamma 1.333333 \
     --r_in 6.0 --r_center 10.0 --out fishbone_moncrief.png
+
+# Phase 2b, part 2: dynamical 2D torus run -- runs and self-tests pass,
+# but currently blows up around t~46-47 (see Physics above); useful for
+# continuing to debug that, not yet a validated multi-orbit result
+python tools/make_fm_torus_ic.py --M 1.0 --a 0.9 --gamma 1.333333 \
+    --r_in 6.0 --r_center 10.0 --nr 96 --ntheta 64 \
+    --r_min 4.0 --r_max 30.0 --theta_min 0.5 --out ic/fm_torus_a09.bin
+./build/release/projects/07_grhd/07_grhd.exe \
+    --deck decks/kerr_torus.toml --out out/kerr_torus
 ```
 
 ## Deck format
@@ -393,6 +402,27 @@ time.frames * (time.cfl*dr)` to cover several orbital periods at
 `r_min` (the fastest, most dynamically demanding radius) -- the deck's own
 comment shows the estimate used here.
 
+Phase 2b, part 2 (`decks/kerr_torus.toml`, `KerrTorusSim` -- see Physics
+above for the current, not-yet-fully-stable status):
+
+```toml
+geometry = "kerr_torus"
+[grid]      nr = 96  ntheta = 64  r_min = 4.0  r_max = 30.0  theta_min = 0.5  # theta_max fixed at pi-theta_min
+[physics]   M = 1.0  a = 0.9  gamma = 1.333333
+[torus]     ic_file = "ic/fm_torus_a09.bin"          # tools/make_fm_torus_ic.py
+[solver]    cons_to_prim_iters = 40  rho_floor = 1e-8  p_floor = 1e-11
+[time]      cfl = 0.15  substeps_per_frame = 300  frames = 150
+```
+
+`torus.ic_file` is `grid.nr*grid.ntheta` records of
+`(rho, v_r, v_theta, v_phi, P)`, row-major `i*ntheta+j`
+(`tools/make_fm_torus_ic.py`, sampling the validated analytic torus from
+Phase 2b part 1). `theta_min` sets a safety margin away from both poles
+(`theta_max=pi-theta_min`) -- deliberately not attempting genuine polar
+coordinate-singularity handling, since the torus is already known to taper
+to zero well before either pole (see Physics: Phase 2a's domain-choice
+note, which applies here too).
+
 ## Validation
 
 `--selftest` runs all three geometries' GPU-vs-CPU cross-checks (independent
@@ -406,6 +436,8 @@ the GPU shaders implement the documented formulas correctly):
     selftest (schwarzschild): PASS
     selftest (kerr equatorial): max relative error  prim_vs_cpu=2.9e-07  prim_vs_truth=3.1e-07  flux=3.8e-06
     selftest (kerr equatorial): PASS
+    selftest (kerr torus 2D): max relative error  prim_vs_cpu=2.3e-07  prim_vs_truth=2.2e-07  flux=1.4e-06
+    selftest (kerr torus 2D): PASS
 
 `prim_vs_truth` recovers the *original* `(rho,v,P)` the conserved
 variables were built from, not just agreement between two implementations
@@ -603,10 +635,70 @@ is normalized to `rho=1` at `r_center` (same convention as
 
 This is a real, validated equilibrium *solution* -- the piece Phase 2b
 needs before there's anything meaningful to hand the dynamical solver.
-**The dynamical extension itself (a genuine 2D `(r,theta)` grid, 3-component
-velocity primitive recovery, 2D flux divergence, pole boundary conditions)
-is substantially more implementation work than Phase 2a's equatorial
-restriction and has not been started** -- see Progress below.
+
+## Physics: Phase 2b, part 2 (dynamical 2D solver -- built, not yet stable)
+
+`src/kernels_kerr2d.hpp` / `src/KerrTorusSim.cpp` extend Phase 2a's
+equatorial solver to a genuine 2D `(r,theta)` grid: a third velocity
+component `v_theta`, a 5th conserved quantity `L` (kept in its own buffer
+-- a `vec4` only fits `D,Sr,Stheta,tau`), 2D flux divergence (separate
+`FluxesR`/`FluxesTheta` passes, each with their own HLLE bound), and
+source terms on *both* `Sr` and `Stheta` now (neither r nor theta is a
+Killing direction, unlike Phase 2a where only r needed one). Conserved
+variables are "areal", weighted by `sqrt(-g)` (see the bug below for why
+that specific quantity, not `sqrt(gamma)`).
+
+**Found and fixed two real bugs while trying to validate this against the
+Phase 2b part 1 torus** (neither caught by `--selftest`, since GPU and CPU
+reference share the same formulas there -- both needed an actual physics
+check against the analytic solution):
+
+1. **Wrong volume-element weighting: `sqrt(gamma)` instead of `sqrt(-g)`.**
+   The conservative GRHD formulation (Gammie, McKinney & Toth 2003,
+   "HARM") weights conserved variables/fluxes/sources by `sqrt(-g)`, the
+   *full 4-metric* determinant -- not `sqrt(gamma)=sqrt(g_rr*g_thth*g_phiphi)`,
+   the 3-metric one, which an earlier version of this code used
+   (`sqrt(-g)=alpha*sqrt(gamma)`, the standard ADM identity -- they differ
+   by exactly the lapse). This was invisible in Phase 2a because
+   `sqrt(-g)` happens to equal `r^2` exactly *at the equator* for Kerr
+   (`sqrt(-g)=Sigma*sin(theta)`, and `Sigma=r^2`, `sin(pi/2)=1` there) --
+   the same value Phase 2a's shorthand already used, for the right
+   reason without the general formula ever being spelled out. Off the
+   equator the two quantities genuinely diverge, and using the wrong one
+   broke both mass conservation and the flux/source balance. Caught by a
+   from-scratch divergence-theorem residual check
+   (`d(F_r)/dr + d(F_theta)/dtheta` should equal the source term, for the
+   *already-validated* analytic torus's own `rho`/`P`/`v_phi` fields) --
+   not by any shape-level or `--selftest` check, both of which stayed
+   green throughout. Fixing it brought short-time (`t<1`) mass
+   conservation from a clearly-wrong result to `~5e-8` relative.
+2. **Floor cells need to be actively re-floored every step, not just
+   seeded once.** The region between the horizon and the torus's inner
+   edge (`r_in`) starts at a tiny floor density/pressure at rest (see
+   `tools/make_fm_torus_ic.py`), but flux exchange with the real torus
+   material slowly perturbs these near-vacuum cells' conserved
+   quantities, and dividing by their tiny `D` to recover a velocity
+   amplifies that perturbation into a large, spurious velocity -- the
+   same class of bug as `06_tidal_disruption`'s zero-density SPH fix.
+   Traced by locating *where* `max|v_theta|` was largest (the innermost
+   radial cells at near-floor density, not the torus material itself,
+   which stayed small and well-behaved) rather than treating the whole
+   grid as equally suspect. Fixed in `ConsToPrim`: whenever recovered
+   `rho` falls below a floor, primitives are reset to vacuum-at-rest and
+   the reset is written back to the conserved buffers (not just the
+   displayed primitives), so it actually persists to the next step.
+
+**Both fixes are real and confirmed necessary** (mass conservation and
+short-time behavior measurably improved), **but full multi-orbit
+stability has not yet been achieved.** A further, CFL-independent
+instability remains, localized to the domain's innermost radial/innermost
+polar corner (`r~r_min`, `theta~theta_min`) -- confirmed CFL-independent
+by rerunning at 1/3 the timestep with no change in either the onset time
+(`t~46-47`, about a quarter of one orbital period at `r_center`) or its
+location; the effective local CFL numbers there are a modest `~0.1`, well
+under the stability limit, ruling out a plain resolution/timestep issue.
+This is an open item for a future session -- see Progress below for
+exactly what's confirmed-working vs. still open.
 
 ## Progress
 
@@ -616,5 +708,6 @@ restriction and has not been started** -- see Progress below.
 - [x] Phase 1: fixed Schwarzschild metric (Schwarzschild coordinates, not the originally planned Kerr-Schild -- see Physics above for why), conserved variables/flux/momentum source term derived from first principles and cross-checked three ways, validated against the analytic Bondi accretion solution per the table above; found and fixed a real outer-boundary instability and a wrong sonic-point formula along the way
 - [x] Phase 2a: Kerr restricted to the equatorial plane (an exact invariant submanifold, keeping the grid 1D-in-r), conserved variables/flux/source rederived for frame dragging and cross-checked against an independently-derived circular-orbit solution; validated per the table above; caught two further mistakes (a shift sign error, a missing factor in the specific-energy formula) before they reached code
 - [x] Phase 2b, part 1: Fishbone-Moncrief equilibrium torus analytic construction (`tools/fishbone_moncrief.py`), rederived from the Euler equation after a commonly-quoted shortcut failed its own consistency check; validated per the table above (curl-free acceleration field, zero radial force at the geodesic/pressure-maximum radius, correct torus shape); caught two further mistakes (a wrong potential shortcut/Euler-equation sign, a `u_t_of_l` transcription bug) before trusting it
-- [ ] Phase 2b, part 2: extend the dynamical solver to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, pole boundary conditions) and confirm the torus above holds steady under evolution -- not started, substantially more implementation work than Phase 2a's equatorial restriction
+- [x] Phase 2b, part 2 (partial): dynamical solver extended to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, source terms on both `Sr`/`Stheta`) -- GPU compute shaders, validated against an independent CPU reference (`--selftest`); found and fixed two real bugs (wrong volume-element weighting `sqrt(gamma)` vs. the correct `sqrt(-g)`; floor cells not being re-enforced every step) that measurably improved short-time mass conservation and stability
+- [ ] Phase 2b, part 2 (remaining): a further, CFL-independent instability localized to the inner-r/inner-theta domain corner still causes eventual blowup (~t=46-47, about a quarter-orbit at r_center) -- not yet resolved; full multi-orbit torus stability is the remaining bar for "Phase 2b done"
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff

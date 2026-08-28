@@ -1,0 +1,35 @@
+title = "GRHD Tier 2 Phase 2b -- Kerr Fishbone-Moncrief torus, a=0.9M"
+
+# Full 2D (r,theta) equilibrium: the Fishbone-Moncrief torus
+# (tools/fishbone_moncrief.py, sampled onto this grid by
+# tools/make_fm_torus_ic.py), r_in=6M, r_center=10M -- the check is
+# whether it holds together under evolution (see tools/plot_torus.py),
+# the Phase 2b analogue of Phase 2a's "does a circular orbit stay
+# circular" test, now for a genuinely 2D equilibrium.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 64
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a09.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+# dt=cfl*min(dr, r_min*dtheta)~0.020; orbital period at r_center=10M is
+# ~204M for a=0.9M -- substeps_per_frame*frames*dt~903M covers ~4.4
+# orbits at r_center.
+cfl = 0.15
+substeps_per_frame = 300
+frames = 150

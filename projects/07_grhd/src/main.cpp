@@ -1,8 +1,10 @@
 #include "GrhdSim.hpp"
 #include "KerrEquatorialSim.hpp"
+#include "KerrTorusSim.hpp"
 #include "SchwarzschildSim.hpp"
 #include "kernels.hpp"
 #include "kernels_kerr.hpp"
+#include "kernels_kerr2d.hpp"
 #include "kernels_schwarzschild.hpp"
 
 #include "framework/ComputeShader.hpp"
@@ -612,6 +614,327 @@ bool SelfTestKerrEquatorial() {
     return ok;
 }
 
+// CPU (double-precision) reference for kernels_kerr2d.hpp's full-2D
+// (r,theta) primitive recovery and HLLE fluxes -- cross-checks only, not a
+// physics validation (that is decks/kerr_torus.toml + tools/plot_torus.py,
+// checked against the analytic Fishbone-Moncrief torus; see README.md).
+// Deliberately mirrors kernels_kerr2d.hpp's structure line-for-line so the
+// two are provably the same computation, continuing this project's
+// running practice (see feedback_gr_derivation_methodology) of never
+// trusting a second, independent transcription of curved-spacetime
+// formulas without a direct comparison.
+struct Metric2DRef { double gtt, gtphi, grr, gthth, gphiphi; };
+Metric2DRef Metric2DAt(double r, double theta, double M, double a) {
+    const double s = std::sin(theta), c = std::cos(theta);
+    const double sin2 = s * s, cos2 = c * c;
+    const double Sigma = r * r + a * a * cos2;
+    const double Delta = r * r - 2.0 * M * r + a * a;
+    const double A = (r * r + a * a) * (r * r + a * a) - a * a * Delta * sin2;
+    Metric2DRef m;
+    m.gtt = -(1.0 - 2.0 * M * r / Sigma);
+    m.gtphi = -2.0 * M * a * r * sin2 / Sigma;
+    m.grr = Sigma / Delta;
+    m.gthth = Sigma;
+    m.gphiphi = A * sin2 / Sigma;
+    return m;
+}
+double SqrtNegG2D(double r, double theta, double M, double a) {
+    const Metric2DRef m = Metric2DAt(r, theta, M, a);
+    return m.gthth * std::sin(theta); // sqrt(-g) = Sigma*sin(theta), NOT sqrt(gamma) -- see kernels_kerr2d.hpp
+}
+void Zamo2DRef(double r, double theta, double M, double a, double& alpha, double& betaPhiUp, double& gammaRr,
+               double& gammaThth, double& gammaPhiphi, double& gTphi) {
+    const Metric2DRef m = Metric2DAt(r, theta, M, a);
+    const double Delta = r * r - 2.0 * M * r + a * a;
+    const double sin2 = std::sin(theta) * std::sin(theta);
+    const double A = (r * r + a * a) * (r * r + a * a) - a * a * Delta * sin2;
+    alpha = std::sqrt(m.gthth * Delta / A);
+    betaPhiUp = m.gtphi / m.gphiphi;
+    gammaRr = m.grr;
+    gammaThth = m.gthth;
+    gammaPhiphi = m.gphiphi;
+    gTphi = m.gtphi;
+}
+void Kinematics2DRef(const glm::dvec4& prim, double P, double r, double theta, double M, double a, double gamma,
+                      double& W, double& h, double& ut, double& ur, double& uth, double& uPhiContra,
+                      double& urCov, double& uthCov, double& uPhiCov, double& E) {
+    const double rho = prim.x, vr = prim.y, vth = prim.z, vphi = prim.w;
+    double alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi;
+    Zamo2DRef(r, theta, M, a, alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi);
+    W = 1.0 / std::sqrt(std::clamp(1.0 - vr * vr - vth * vth - vphi * vphi, 1e-10, 1.0));
+    h = 1.0 + gamma * P / ((gamma - 1.0) * rho);
+    ut = W / alpha;
+    ur = W * vr / std::sqrt(gammaRr);
+    uth = W * vth / std::sqrt(gammaThth);
+    uPhiContra = W * vphi / std::sqrt(gammaPhiphi) - W * betaPhiUp / alpha;
+    urCov = W * std::sqrt(gammaRr) * vr;
+    uthCov = W * std::sqrt(gammaThth) * vth;
+    uPhiCov = W * std::sqrt(gammaPhiphi) * vphi;
+    E = W * (alpha - gTphi * vphi / std::sqrt(gammaPhiphi));
+}
+
+// Returns (D,Sr,Sth,tau,L) and (Fr_D,Fr_Sr,Fr_Sth,Fr_tau,Fr_L),
+// (Fth_D,Fth_Sr,Fth_Sth,Fth_tau,Fth_L) for one cell's primitives.
+void SideState2DRef(const glm::dvec4& prim, double P, double r, double theta, double M, double a, double gamma,
+                     glm::dvec4& U, double& Ul, glm::dvec4& Fr, double& Frl, glm::dvec4& Fth, double& Fthl) {
+    double W, h, ut, ur, uth, uPhiContra, urCov, uthCov, uPhiCov, E;
+    Kinematics2DRef(prim, P, r, theta, M, a, gamma, W, h, ut, ur, uth, uPhiContra, urCov, uthCov, uPhiCov, E);
+    const double rho = prim.x;
+    const double sqrtg = SqrtNegG2D(r, theta, M, a);
+
+    const double D = sqrtg * rho * ut;
+    const double Sr = sqrtg * rho * h * ut * urCov;
+    const double Sth = sqrtg * rho * h * ut * uthCov;
+    const double L = sqrtg * rho * h * ut * uPhiCov;
+    const double tau = sqrtg * rho * h * ut * E - sqrtg * P - D;
+    U = glm::dvec4(D, Sr, Sth, tau);
+    Ul = L;
+
+    const double FrD = sqrtg * rho * ur;
+    const double FrSr = sqrtg * (rho * h * ur * urCov + P);
+    const double FrSth = sqrtg * rho * h * ur * uthCov;
+    const double FrTau = sqrtg * rho * ur * (h * E - 1.0);
+    Fr = glm::dvec4(FrD, FrSr, FrSth, FrTau);
+    Frl = sqrtg * rho * h * ur * uPhiCov;
+
+    const double FthD = sqrtg * rho * uth;
+    const double FthSr = sqrtg * rho * h * uth * urCov;
+    const double FthSth = sqrtg * (rho * h * uth * uthCov + P);
+    const double FthTau = sqrtg * rho * uth * (h * E - 1.0);
+    Fth = glm::dvec4(FthD, FthSr, FthSth, FthTau);
+    Fthl = sqrtg * rho * h * uth * uPhiCov;
+}
+
+glm::dvec4 RecoverPrimitivesKerr2DRef(double D, double Sr, double Sth, double L, double tau, double pGuess, double r,
+                                       double theta, double M, double a, double gamma, int iters) {
+    double alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi;
+    Zamo2DRef(r, theta, M, a, alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi);
+    const double sqrtg = SqrtNegG2D(r, theta, M, a);
+    const double kappaR = Sr / D, kappaTh = Sth / D, lam = L / D;
+    const double K = kappaR * kappaR / gammaRr + kappaTh * kappaTh / gammaThth + lam * lam / gammaPhiphi;
+
+    auto residual = [&](double h) {
+        const double W0 = std::sqrt(1.0 + K / (h * h));
+        const double rho0 = D * alpha / (sqrtg * W0);
+        const double P0 = (gamma - 1.0) * rho0 * (h - 1.0) / gamma;
+        const double Q0 = (tau + D + sqrtg * P0) / D;
+        return Q0 / h - (W0 * alpha - gTphi * lam / (h * gammaPhiphi));
+    };
+    const double rhoGuess = D * alpha / (sqrtg * std::sqrt(1.0 + K));
+    double h = 1.0 + gamma * std::max(pGuess, 1e-12) / ((gamma - 1.0) * rhoGuess);
+    for (int it = 0; it < iters; ++it) {
+        const double f0 = residual(h);
+        const double dh = std::max(1e-6 * std::abs(h), 1e-9);
+        const double fPlus = residual(h + dh);
+        const double fMinus = residual(h - dh);
+        const double deriv = (fPlus - fMinus) / (2.0 * dh);
+        if (std::abs(deriv) > 1e-12) h = std::max(h - f0 / deriv, 1.0 + 1e-9);
+    }
+    const double W = std::sqrt(1.0 + K / (h * h));
+    const double rho = D * alpha / (sqrtg * W);
+    const double vr = kappaR / (h * W * std::sqrt(gammaRr));
+    const double vth = kappaTh / (h * W * std::sqrt(gammaThth));
+    const double vphi = lam / (h * W * std::sqrt(gammaPhiphi));
+    const double eps = (h - 1.0) / gamma;
+    const double P = (gamma - 1.0) * rho * eps;
+    return glm::dvec4(rho, vr, vth, vphi);
+}
+
+glm::dvec4 HlleFluxKerr2DRef(const glm::dvec4& fluxL, const glm::dvec4& UL, const glm::dvec4& fluxR,
+                              const glm::dvec4& UR, double s) {
+    const double sL = -s, sR = s;
+    return (sR * fluxL - sL * fluxR + sL * sR * (UR - UL)) / (sR - sL);
+}
+
+// N random mildly-relativistic cells spread over a 2D (r,theta) patch,
+// off the equator (so v_theta actually matters), GPU vs. CPU
+// double-precision reference for ConsToPrim + both flux directions.
+bool SelfTestKerrTorus() {
+    constexpr int NR = 6, NTH = 7;
+    constexpr int N = NR * NTH;
+    constexpr int ITERS = 40;
+    constexpr double GAMMA = 4.0 / 3.0;
+    constexpr double M = 1.0, A = 0.8;
+    constexpr double R_MIN = 5.0, DR = 0.6;          // r in [5, 5+6*0.6)=[5,8.6)
+    constexpr double TH_MIN = 1.0, DTH = 0.09;        // theta in [1.0, 1.0+7*0.09)=[1.0,1.63) -- off-equator
+
+    std::mt19937 rng(23);
+    std::uniform_real_distribution<double> rhoDist(0.5, 2.0);
+    std::uniform_real_distribution<double> vDist(-0.15, 0.15);
+    std::uniform_real_distribution<double> vphiDist(0.1, 0.35);
+    std::uniform_real_distribution<double> pDist(0.02, 0.15);
+
+    std::vector<glm::dvec4> prim0(N);
+    std::vector<double> p0(N), rCell(N), thCell(N);
+    std::vector<glm::vec4> cons(N);
+    std::vector<float> consL(N);
+    for (int i = 0; i < NR; ++i) {
+        for (int j = 0; j < NTH; ++j) {
+            const int idx = i * NTH + j;
+            rCell[idx] = R_MIN + (i + 0.5) * DR;
+            thCell[idx] = TH_MIN + (j + 0.5) * DTH;
+            const double rho = rhoDist(rng), vr = vDist(rng), vth = vDist(rng), vphi = vphiDist(rng), p = pDist(rng);
+            prim0[idx] = glm::dvec4(rho, vr, vth, vphi);
+            p0[idx] = p;
+            glm::dvec4 U, Fr, Fth;
+            double Ul, Frl, Fthl;
+            SideState2DRef(prim0[idx], p, rCell[idx], thCell[idx], M, A, GAMMA, U, Ul, Fr, Frl, Fth, Fthl);
+            cons[idx] = glm::vec4(static_cast<float>(U.x), static_cast<float>(U.y), static_cast<float>(U.z),
+                                   static_cast<float>(U.w));
+            consL[idx] = static_cast<float>(Ul);
+        }
+    }
+
+    std::vector<glm::dvec4> primRef(N);
+    for (int idx = 0; idx < N; ++idx) {
+        primRef[idx] = RecoverPrimitivesKerr2DRef(cons[idx].x, cons[idx].y, cons[idx].z, consL[idx], cons[idx].w,
+                                                   p0[idx], rCell[idx], thCell[idx], M, A, GAMMA, ITERS);
+    }
+
+    // r-direction fluxes: (NR+1)*NTH interfaces.
+    std::vector<glm::dvec4> fluxRRef((NR + 1) * NTH);
+    for (int i = 0; i <= NR; ++i) {
+        for (int j = 0; j < NTH; ++j) {
+            const int iL = (i == 0) ? 0 : (i - 1), iR = (i == NR) ? (NR - 1) : i;
+            const double rFace = R_MIN + i * DR;
+            const double theta = TH_MIN + (j + 0.5) * DTH;
+            const Metric2DRef m = Metric2DAt(rFace, theta, M, A);
+            const double s = std::sqrt(-m.gtt / m.grr);
+            glm::dvec4 UL, UR, FrL, FrR, FthDummyL, FthDummyR;
+            double UlL, UlR, FrlL, FrlR, FthlDummyL, FthlDummyR;
+            SideState2DRef(primRef[iL * NTH + j], p0[iL * NTH + j], rFace, theta, M, A, GAMMA, UL, UlL, FrL, FrlL,
+                            FthDummyL, FthlDummyL);
+            SideState2DRef(primRef[iR * NTH + j], p0[iR * NTH + j], rFace, theta, M, A, GAMMA, UR, UlR, FrR, FrlR,
+                            FthDummyR, FthlDummyR);
+            fluxRRef[i * NTH + j] = HlleFluxKerr2DRef(FrL, UL, FrR, UR, s);
+        }
+    }
+    // theta-direction fluxes: NR*(NTH+1) interfaces.
+    std::vector<glm::dvec4> fluxThRef(NR * (NTH + 1));
+    for (int i = 0; i < NR; ++i) {
+        for (int j = 0; j <= NTH; ++j) {
+            const int jL = (j == 0) ? 0 : (j - 1), jR = (j == NTH) ? (NTH - 1) : j;
+            const double r = R_MIN + (i + 0.5) * DR;
+            const double thFace = TH_MIN + j * DTH;
+            const Metric2DRef m = Metric2DAt(r, thFace, M, A);
+            const double s = std::sqrt(-m.gtt / m.gthth);
+            glm::dvec4 UL, UR, FrDummyL, FrDummyR, FthL, FthR;
+            double UlL, UlR, FrlDummyL, FrlDummyR, FthlL, FthlR;
+            SideState2DRef(primRef[i * NTH + jL], p0[i * NTH + jL], r, thFace, M, A, GAMMA, UL, UlL, FrDummyL,
+                            FrlDummyL, FthL, FthlL);
+            SideState2DRef(primRef[i * NTH + jR], p0[i * NTH + jR], r, thFace, M, A, GAMMA, UR, UlR, FrDummyR,
+                            FrlDummyR, FthR, FthlR);
+            fluxThRef[i * (NTH + 1) + j] = HlleFluxKerr2DRef(FthL, UL, FthR, UR, s);
+        }
+    }
+
+    // GPU.
+    fw::ComputeShader consToPrim = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::ConsToPrim());
+    fw::ComputeShader fluxesR = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::FluxesR());
+    fw::ComputeShader fluxesTheta = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::FluxesTheta());
+
+    GLuint bufCons = 0, bufConsL = 0, bufPrimMain = 0, bufPrimP = 0, bufFluxR = 0, bufFluxRL = 0, bufFluxTh = 0,
+           bufFluxThL = 0;
+    glCreateBuffers(1, &bufCons);
+    glCreateBuffers(1, &bufConsL);
+    glCreateBuffers(1, &bufPrimMain);
+    glCreateBuffers(1, &bufPrimP);
+    glCreateBuffers(1, &bufFluxR);
+    glCreateBuffers(1, &bufFluxRL);
+    glCreateBuffers(1, &bufFluxTh);
+    glCreateBuffers(1, &bufFluxThL);
+    glNamedBufferData(bufCons, N * sizeof(glm::vec4), cons.data(), GL_STATIC_DRAW);
+    glNamedBufferData(bufConsL, N * sizeof(float), consL.data(), GL_STATIC_DRAW);
+    std::vector<glm::vec4> primMainSeed(N);
+    std::vector<float> primPSeed(N);
+    for (int idx = 0; idx < N; ++idx) {
+        primMainSeed[idx] = glm::vec4(0.0f, 0.0f, 0.0f, 0.0f);
+        primPSeed[idx] = static_cast<float>(p0[idx]);
+    }
+    glNamedBufferData(bufPrimMain, N * sizeof(glm::vec4), primMainSeed.data(), GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufPrimP, N * sizeof(float), primPSeed.data(), GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufFluxR, (NR + 1) * NTH * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufFluxRL, (NR + 1) * NTH * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufFluxTh, NR * (NTH + 1) * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufFluxThL, NR * (NTH + 1) * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+
+    auto setCommon = [&](fw::ComputeShader& sh) {
+        sh.Use();
+        sh.SetInt("uNr", NR);
+        sh.SetInt("uNth", NTH);
+        sh.SetFloat("uGamma", static_cast<float>(GAMMA));
+        sh.SetFloat("uM", static_cast<float>(M));
+        sh.SetFloat("uA", static_cast<float>(A));
+        sh.SetFloat("uRmin", static_cast<float>(R_MIN));
+        sh.SetFloat("uDr", static_cast<float>(DR));
+        sh.SetFloat("uThetaMin", static_cast<float>(TH_MIN));
+        sh.SetFloat("uDth", static_cast<float>(DTH));
+    };
+
+    const GLuint groupsN = static_cast<GLuint>((N + grhd::kernels_kerr2d::kWorkgroupSize - 1) / grhd::kernels_kerr2d::kWorkgroupSize);
+    const GLuint groupsFacesR =
+        static_cast<GLuint>(((NR + 1) * NTH + grhd::kernels_kerr2d::kWorkgroupSize - 1) / grhd::kernels_kerr2d::kWorkgroupSize);
+    const GLuint groupsFacesTh =
+        static_cast<GLuint>((NR * (NTH + 1) + grhd::kernels_kerr2d::kWorkgroupSize - 1) / grhd::kernels_kerr2d::kWorkgroupSize);
+
+    setCommon(consToPrim);
+    consToPrim.SetInt("uIters", ITERS);
+    consToPrim.SetFloat("uRhoFloor", 0.0f); // test cells are all well above any floor -- disable it here
+    consToPrim.SetFloat("uPFloor", 0.0f);
+    fw::ComputeShader::BindBuffer(0, bufCons);
+    fw::ComputeShader::BindBuffer(6, bufConsL);
+    fw::ComputeShader::BindBuffer(4, bufPrimMain);
+    fw::ComputeShader::BindBuffer(10, bufPrimP);
+    consToPrim.Dispatch(groupsN);
+    fw::ComputeShader::Barrier();
+
+    setCommon(fluxesR);
+    fw::ComputeShader::BindBuffer(4, bufPrimMain);
+    fw::ComputeShader::BindBuffer(10, bufPrimP);
+    fw::ComputeShader::BindBuffer(5, bufFluxR);
+    fw::ComputeShader::BindBuffer(11, bufFluxRL);
+    fluxesR.Dispatch(groupsFacesR);
+    fw::ComputeShader::Barrier();
+
+    setCommon(fluxesTheta);
+    fw::ComputeShader::BindBuffer(4, bufPrimMain);
+    fw::ComputeShader::BindBuffer(10, bufPrimP);
+    fw::ComputeShader::BindBuffer(12, bufFluxTh);
+    fw::ComputeShader::BindBuffer(13, bufFluxThL);
+    fluxesTheta.Dispatch(groupsFacesTh);
+    fw::ComputeShader::Barrier();
+
+    std::vector<glm::vec4> primGpu(N), fluxRGpu((NR + 1) * NTH), fluxThGpu(NR * (NTH + 1));
+    glGetNamedBufferSubData(bufPrimMain, 0, N * sizeof(glm::vec4), primGpu.data());
+    glGetNamedBufferSubData(bufFluxR, 0, (NR + 1) * NTH * sizeof(glm::vec4), fluxRGpu.data());
+    glGetNamedBufferSubData(bufFluxTh, 0, NR * (NTH + 1) * sizeof(glm::vec4), fluxThGpu.data());
+    GLuint bufs[] = {bufCons, bufConsL, bufPrimMain, bufPrimP, bufFluxR, bufFluxRL, bufFluxTh, bufFluxThL};
+    glDeleteBuffers(8, bufs);
+
+    double primErr = 0.0, recoveryErr = 0.0, fluxErr = 0.0;
+    for (int idx = 0; idx < N; ++idx) {
+        const glm::dvec4 gpu(primGpu[idx].x, primGpu[idx].y, primGpu[idx].z, primGpu[idx].w);
+        primErr = std::max(primErr, glm::length(gpu - primRef[idx]) / glm::length(primRef[idx]));
+        recoveryErr = std::max(recoveryErr, glm::length(gpu - prim0[idx]) / glm::length(prim0[idx]));
+    }
+    for (size_t idx = 0; idx < fluxRRef.size(); ++idx) {
+        const glm::dvec4 gpu(fluxRGpu[idx].x, fluxRGpu[idx].y, fluxRGpu[idx].z, fluxRGpu[idx].w);
+        const double refNorm = std::max(glm::length(fluxRRef[idx]), 1e-10);
+        fluxErr = std::max(fluxErr, glm::length(gpu - fluxRRef[idx]) / refNorm);
+    }
+    for (size_t idx = 0; idx < fluxThRef.size(); ++idx) {
+        const glm::dvec4 gpu(fluxThGpu[idx].x, fluxThGpu[idx].y, fluxThGpu[idx].z, fluxThGpu[idx].w);
+        const double refNorm = std::max(glm::length(fluxThRef[idx]), 1e-10);
+        fluxErr = std::max(fluxErr, glm::length(gpu - fluxThRef[idx]) / refNorm);
+    }
+
+    std::printf("selftest (kerr torus 2D): max relative error  prim_vs_cpu=%.3e  prim_vs_truth=%.3e  flux=%.3e\n",
+                primErr, recoveryErr, fluxErr);
+    const bool ok = primErr < 1e-4 && recoveryErr < 1e-4 && fluxErr < 1e-4;
+    std::printf("selftest (kerr torus 2D): %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -622,7 +945,8 @@ int main(int argc, char** argv) {
         const bool flatOk = SelfTest();
         const bool schOk = SelfTestSchwarzschild();
         const bool kerrOk = SelfTestKerrEquatorial();
-        return (flatOk && schOk && kerrOk) ? 0 : 1;
+        const bool torusOk = SelfTestKerrTorus();
+        return (flatOk && schOk && kerrOk && torusOk) ? 0 : 1;
     }
 
     if (a.deck.empty()) {
@@ -632,7 +956,8 @@ int main(int argc, char** argv) {
                      "  07_grhd --interactive --deck <f.toml>\n"
                      "  07_grhd --selftest\n"
                      "deck's [geometry] key selects the solver: \"flat\" (default, Phase 0), "
-                     "\"schwarzschild\" (Phase 1), or \"kerr_equatorial\" (Phase 2a).\n");
+                     "\"schwarzschild\" (Phase 1), \"kerr_equatorial\" (Phase 2a), "
+                     "or \"kerr_torus\" (Phase 2b).\n");
         return 2;
     }
 
@@ -640,9 +965,14 @@ int main(int argc, char** argv) {
     const std::string geometry = deck.GetString("geometry", "flat");
     const bool schwarzschild = (geometry == "schwarzschild");
     const bool kerrEquatorial = (geometry == "kerr_equatorial");
+    const bool kerrTorus = (geometry == "kerr_torus");
 
     if (a.interactive) {
-        if (kerrEquatorial) {
+        if (kerrTorus) {
+            grhd::KerrTorusSim sim;
+            fw::SimApp app(sim, deck, deck.GetString("title", "GRHD -- Kerr Fishbone-Moncrief torus"));
+            app.Run();
+        } else if (kerrEquatorial) {
             grhd::KerrEquatorialSim sim;
             fw::SimApp app(sim, deck, deck.GetString("title", "GRHD -- Kerr equatorial circular orbit"));
             app.Run();
@@ -669,6 +999,11 @@ int main(int argc, char** argv) {
     opts.frames = a.frames;
     opts.substeps = a.substeps;
 
+    if (kerrTorus) {
+        grhd::KerrTorusSim sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
     if (kerrEquatorial) {
         grhd::KerrEquatorialSim sim;
         sim.Configure(deck);

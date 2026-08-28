@@ -3,6 +3,7 @@ add_executable(07_grhd
     src/GrhdSim.cpp
     src/SchwarzschildSim.cpp
     src/KerrEquatorialSim.cpp
+    src/KerrTorusSim.cpp
 )
 
 target_link_libraries(07_grhd PRIVATE physgl)
