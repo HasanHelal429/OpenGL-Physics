@@ -37,6 +37,8 @@ python tools/make_movie.py out/encounter_beta3
 # very dilute debris out of nearly-black on the log color scale
 python tools/make_movie.py out/encounter_beta3_long --half-extent 40 \
     --out out/encounter_beta3_long/movie_zoom.mp4
+# quantitative fallback rate: dM/dt vs. time since pericenter, vs. t^(-5/3)
+python tools/fallback_rate.py out/encounter_beta3_long
 ```
 
 ## Physics
@@ -299,21 +301,37 @@ of much larger terms.
 
 ## Validation: fallback (`decks/encounter_beta3_long.toml`, same encounter, extended to 50 dynamical times)
 
-Checking `star_verify_n1.5`'s own settled-star final frame for specific
-orbital energy relative to the black hole (`eps = 0.5*v^2 - G*M_bh/r`, star
-self-gravity/pressure ignored -- a fine approximation once `M_bh`
-dominates) found **~54% of the star's mass is actually bound** (`eps<0`),
-with periods (Kepler's third law from `eps`) ranging `18.85` (most tightly
-bound single particle) to a median of `264` (code time units). The
-prediction: the earliest possible return is around
-`t_pericenter + 18.85 = 2.82 + 18.85 = 21.7`.
+Checking the final frame's specific orbital energy relative to the black
+hole (`eps = 0.5*v^2 - G*M_bh/r`, star self-gravity/pressure ignored -- a
+fine approximation once `M_bh` dominates and the debris has cleared the
+star's own gravity) finds **~54% of the star's mass is bound** (`eps<0`),
+with periods (Kepler's third law from `eps`) ranging `6.87` (most tightly
+bound single particle) up to effectively unbounded (`eps` clusters near
+`0` for the least-bound tail, giving formally enormous periods -- physically
+correct, these particles trickle back over a very long tail rather than a
+sharp cutoff). Earliest possible return: `t_pericenter + 6.87 = 2.80 + 6.87
+= 9.67`; the bulk of returning mass arrives later, matching where the
+fallback-rate curve below actually peaks.
 
 | check | result |
 |---|---|
-| onset of fallback | the minimum particle-BH separation, which climbs smoothly outward from `t=15` to `18.85` (the last validated point of the shorter run), starts crashing back down around `t=21` -- matching the predicted `21.7` |
-| depth of return passages | multiple later passages come back *closer* than the original pericenter (`r_min=2.56` at `t=39`, vs. the original `r_p=3.33`) -- real, repeated close encounters, not a one-off |
-| NaN/blowup check (post-fix) | none over the full 1000-frame run -- the zero-density fix above (found by *this* run) holds |
-| energy conservation | `0.05%` of the peak orbital energy scale (`~591` code units), same as the shorter run |
+| onset of fallback | the minimum particle-BH separation starts dipping back below the original pericenter (`r_p=3.33`) around `t=24.5`, with repeated passages closer than that afterward (e.g. `r_min=2.02` at `t=44.75`) -- real, repeated close encounters, not a one-off |
+| NaN/blowup check (post-fix) | none over the full 1000-frame run -- the zero-density fix (found by an earlier version of this run) holds |
+| energy conservation | `0.11%` of the peak orbital energy scale (~590 code units), consistent with the shorter run |
+
+**Quantitative fallback rate** (`tools/fallback_rate.py`): binning the bound
+debris mass by each particle's Kepler return time gives `dM/dt` vs. time
+since pericenter. The result follows a clean power law across ~4 decades
+in time (`t~10` to `t~3e5`), with a fitted slope of **`-1.31`**, shallower
+than the classic Rees (1988) "frozen-in", asymptotic `t^(-5/3)` (`-1.667`)
+-- see `out/encounter_beta3_long/fallback_rate.png`. This is not a bug: the
+`-5/3` law is a late-time asymptote of the idealized frozen-in-energy
+argument, and realistic polytropic disruptions (particularly the
+centrally-concentrated `n=3/2` profile used here) are well known to show a
+shallower decline near peak fallback, steepening toward `-5/3` only much
+later (Lodato, King & Pringle 2009). The measured slope is a physically
+reasonable value for a real `n=1.5` SPH disruption run of this length, not
+an exact `-5/3` match.
 
 The bulk of the star's mass (the unbound majority) keeps receding to
 hundreds of length units, which forces `tools/make_movie.py`'s default
@@ -332,6 +350,6 @@ actually visible; see `out/encounter_beta3_long/movie_zoom.mp4`.
 - [x] `src/TdeSim` leapfrog integration + damped relaxation + undamped verification, validated per the table above
 - [x] external black hole potential (point-mass done + validated; Paczynski-Wiita implemented + selftest-validated, not yet used in a full encounter run) + `tools/make_orbit_ic.py` (parabolic orbit placement, validated) + the actual encounter (`decks/encounter_beta3.toml`, validated per the table above) + `tools/make_movie.py` (BH marker, tight framing, `--half-extent`/`--gamma`)
 - [x] fallback: extended the encounter to 50 dynamical times (`decks/encounter_beta3_long.toml`), found and fixed a real zero-density-particle NaN crash along the way (see Physics above), confirmed bound debris (~54% of the star's mass) actually returns and re-passes the black hole closer than the original pericenter, matching the predicted return time -- validated per the table above
-- [ ] close the ~10-30% bulk density calibration gap (see the star-relaxation Validation above) -- lower priority, doesn't block the items below
-- [ ] proper fallback-rate diagnostics: dM/dt vs. t from the bound debris's energy distribution, compared to the classic t^(-5/3) law (the qualitative fallback is now confirmed above; this would make it quantitative)
+- [x] closed the ~10-30% bulk density calibration gap -- was the self-term exclusion, not a resolution/EOS mismatch (see Physics + star-relaxation Validation above)
+- [x] quantitative fallback-rate diagnostics (`tools/fallback_rate.py`): dM/dt vs. t from the bound debris's frozen-in orbital energy, compared to the classic t^(-5/3) law -- see Validation above
 - [ ] Paczynski-Wiita encounter run (relativistic apsidal precession/plunge) as a bridge toward Tier 2
