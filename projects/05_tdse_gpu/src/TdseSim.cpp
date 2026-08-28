@@ -171,9 +171,9 @@ void main() { FragColor = vec4(uColor, vA * 0.9); }
 } // namespace
 
 TdseSim::~TdseSim() {
-    GLuint bufs[] = {m_psi,   m_tmp,        m_spec,  m_vprop,      m_kprop,  m_twiddle,
-                     m_potential, m_stat,  m_currentBuf, m_statJ, m_kdisp,  m_statK};
-    glDeleteBuffers(12, bufs);
+    GLuint bufs[] = {m_psi,       m_tmp,   m_spec,       m_vprop, m_kprop,  m_twiddle, m_potential,
+                     m_cap,       m_stat,  m_currentBuf, m_statJ, m_kdisp,  m_statK};
+    glDeleteBuffers(13, bufs);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
     if (m_arrowVao) glDeleteVertexArrays(1, &m_arrowVao);
 }
@@ -204,6 +204,33 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_vCpu = BuildPotential(m_grid, deck);
     m_initial = BuildInitial(m_grid, deck);
 
+    for (const auto& d : deck.GetTables("drive")) {
+        if (m_drives.size() == 4) break;
+        DriveTerm t;
+        const std::string type = d.GetString("type", "tilt");
+        if (type == "tilt") {
+            t.type = 0;
+            t.a = {static_cast<float>(d.GetDouble("amplitude", 1.0)),
+                   static_cast<float>(d.GetDouble("omega", 1.0)),
+                   static_cast<float>(d.GetDouble("phase", 0.0)),
+                   static_cast<float>(d.GetDouble("ramp", 0.0))};
+            t.b = {static_cast<float>(d.GetDouble("dir_x", 1.0)),
+                   static_cast<float>(d.GetDouble("dir_y", 0.0)), 0.0f, 0.0f};
+        } else if (type == "gate") {
+            t.type = 1;
+            t.a = {static_cast<float>(d.GetDouble("amplitude", 1.0)),
+                   static_cast<float>(d.GetDouble("sigma", 1.0)),
+                   static_cast<float>(d.GetDouble("t_on", 0.0)),
+                   static_cast<float>(d.GetDouble("t_ramp", 0.5))};
+            t.b = {static_cast<float>(d.GetDouble("x0", 0.0)),
+                   static_cast<float>(d.GetDouble("y0", 0.0)), 0.0f, 0.0f};
+        } else {
+            continue;
+        }
+        m_drives.push_back(t);
+    }
+    m_hasDrives = !m_drives.empty();
+
     // Momentum-view window: a few times the spread expected from the initial
     // momentum, packet width, and the deepest/highest part of the potential.
     {
@@ -220,6 +247,7 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_reduceMax = fw::ComputeShader::FromSource(kernels::ReduceMax(n));
     m_currentProg = fw::ComputeShader::FromSource(kernels::Current(n));
     m_fftshift = fw::ComputeShader::FromSource(kernels::FftShift(n));
+    m_buildVprop = fw::ComputeShader::FromSource(kernels::BuildVprop(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
     m_arrows = fw::Shader::FromSource(kArrowVert, kArrowFrag);
     glGenVertexArrays(1, &m_vao);
@@ -246,6 +274,7 @@ void TdseSim::CreateBuffers() {
     mk(m_kprop, cplx);
     mk(m_twiddle, static_cast<GLsizeiptr>(n) * 2 * sizeof(float));
     mk(m_potential, static_cast<GLsizeiptr>(n) * n * sizeof(float));
+    mk(m_cap, static_cast<GLsizeiptr>(n) * n * sizeof(float));
     mk(m_stat, sizeof(uint32_t));
     mk(m_currentBuf, cplx);
     mk(m_statJ, sizeof(uint32_t));
@@ -257,20 +286,12 @@ void TdseSim::CreateBuffers() {
 
 void TdseSim::BuildPropagators(const fw::Deck& deck) {
     const int n = m_grid.n;
-    const std::vector<float> w = BuildCap(m_grid, deck);
 
-    // Vprop = exp(-i V dt/2) * exp(-W dt/2)   (per half kick)
-    std::vector<float> vprop(static_cast<size_t>(n) * n * 2);
-    for (int j = 0; j < n; ++j) {
-        for (int i = 0; i < n; ++i) {
-            const size_t k = static_cast<size_t>(j) * n + i;
-            const double ph = -m_vCpu[k] * m_dt * 0.5;
-            const double damp = std::exp(-static_cast<double>(w[k]) * m_dt * 0.5);
-            vprop[2 * k + 0] = static_cast<float>(damp * std::cos(ph));
-            vprop[2 * k + 1] = static_cast<float>(damp * std::sin(ph));
-        }
-    }
-    glNamedBufferSubData(m_vprop, 0, static_cast<GLsizeiptr>(vprop.size() * sizeof(float)), vprop.data());
+    // Static potential V0 and absorbing rate W live in their own buffers; the
+    // half-kick multiplier Vprop is (re)built on the GPU by BuildVprop.
+    const std::vector<float> w = BuildCap(m_grid, deck);
+    glNamedBufferSubData(m_cap, 0, static_cast<GLsizeiptr>(w.size() * sizeof(float)), w.data());
+    RebuildVprop(0.0);
 
     // Kprop in the transposed layout the k-space multiply sees: index = kxIdx*n + kyIdx.
     std::vector<float> kprop(static_cast<size_t>(n) * n * 2);
@@ -300,9 +321,40 @@ void TdseSim::UploadInitial() {
                          static_cast<GLsizeiptr>(m_initial.size() * sizeof(std::complex<float>)),
                          m_initial.data());
     m_stepsDone = 0;
+    m_time = 0.0;
 }
 
-void TdseSim::Reset() { UploadInitial(); }
+void TdseSim::Reset() {
+    UploadInitial();
+    RebuildVprop(0.0);
+}
+
+void TdseSim::RebuildVprop(double t) {
+    const int n = m_grid.n;
+    int types[4] = {0, 0, 0, 0};
+    glm::vec4 as[4] = {}, bs[4] = {};
+    for (size_t d = 0; d < m_drives.size(); ++d) {
+        types[d] = m_drives[d].type;
+        as[d] = m_drives[d].a;
+        bs[d] = m_drives[d].b;
+    }
+    m_buildVprop.Use();
+    m_buildVprop.SetFloat("uDt", static_cast<float>(m_dt));
+    m_buildVprop.SetFloat("uTime", static_cast<float>(t));
+    m_buildVprop.SetFloat("uX0", static_cast<float>(-0.5 * m_grid.lx));
+    m_buildVprop.SetFloat("uDx", static_cast<float>(m_grid.dx()));
+    m_buildVprop.SetFloat("uY0", static_cast<float>(-0.5 * m_grid.ly));
+    m_buildVprop.SetFloat("uDy", static_cast<float>(m_grid.dy()));
+    m_buildVprop.SetInt("uDriveCount", static_cast<int>(m_drives.size()));
+    m_buildVprop.SetIntArray("uDriveType", types, 4);
+    m_buildVprop.SetVec4Array("uDriveA", as, 4);
+    m_buildVprop.SetVec4Array("uDriveB", bs, 4);
+    fw::ComputeShader::BindBuffer(0, m_potential);
+    fw::ComputeShader::BindBuffer(1, m_cap);
+    fw::ComputeShader::BindBuffer(2, m_vprop);
+    m_buildVprop.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
 
 void TdseSim::Fft(GLuint buffer, bool inverse) {
     const int n = m_grid.n;
@@ -333,7 +385,10 @@ void TdseSim::CMulBuf(GLuint dst, GLuint by) {
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
-void TdseSim::RunStep() {
+void TdseSim::RunStep(double t0) {
+    // Time-dependent potential: both half-kicks of this step use V at the
+    // midpoint t0 + dt/2 (2nd-order accurate).
+    if (m_hasDrives) RebuildVprop(t0 + 0.5 * m_dt);
     CMulBuf(m_psi, m_vprop);      // half potential kick
     Fft(m_psi, false);            // FFT over x   -> psi[y][kx]
     TransposeBuf(m_psi, m_tmp);   // tmp[kx][y]
@@ -347,7 +402,8 @@ void TdseSim::RunStep() {
 
 void TdseSim::Step(int substeps) {
     for (int s = 0; s < substeps; ++s) {
-        RunStep();
+        RunStep(m_time);
+        m_time += m_dt;
         ++m_stepsDone;
     }
 }

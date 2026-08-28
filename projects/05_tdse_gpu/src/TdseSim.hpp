@@ -37,10 +37,18 @@ public:
     void OnKey(int key, int action) override;
 
 private:
+    // A time-dependent drive term (see kernels::BuildVprop): type 0 = tilt, 1 = gate.
+    struct DriveTerm {
+        int type = 0;
+        glm::vec4 a{0.0f};
+        glm::vec4 b{0.0f};
+    };
+
     void CreateBuffers();
     void UploadInitial();
     void BuildPropagators(const fw::Deck& deck);
-    void RunStep();
+    void RebuildVprop(double t);
+    void RunStep(double t0);
     void Fft(GLuint buffer, bool inverse);
     void TransposeBuf(GLuint src, GLuint dst);
     void CMulBuf(GLuint dst, GLuint by);
@@ -54,6 +62,9 @@ private:
     std::string m_title = "2D TDSE (GPU)";
     std::vector<std::string> m_diagNames;
     long m_stepsDone = 0;
+    double m_time = 0.0;
+    std::vector<DriveTerm> m_drives;
+    bool m_hasDrives = false;
 
     // GPU state (all vec2 complex, row-major, except m_potential which is float).
     GLuint m_psi = 0;
@@ -62,7 +73,8 @@ private:
     GLuint m_vprop = 0;   // exp(-i V dt/2) * exp(-W dt/2)
     GLuint m_kprop = 0;   // exp(-i (kx^2+ky^2)/2 dt), transposed layout
     GLuint m_twiddle = 0; // length N
-    GLuint m_potential = 0;
+    GLuint m_potential = 0;   // static external potential V0 (float), also BuildVprop input
+    GLuint m_cap = 0;         // absorbing rate W (float), BuildVprop input
     GLuint m_stat = 0;        // 1 uint: max |psi|^2 for the interactive view
     GLuint m_currentBuf = 0;  // vec2 probability current j
     GLuint m_statJ = 0;       // 1 uint: max |j|^2
@@ -75,6 +87,7 @@ private:
     fw::ComputeShader m_reduceMax;
     fw::ComputeShader m_currentProg;
     fw::ComputeShader m_fftshift;
+    fw::ComputeShader m_buildVprop;
 
     // Interactive view.
     fw::Shader m_view;
