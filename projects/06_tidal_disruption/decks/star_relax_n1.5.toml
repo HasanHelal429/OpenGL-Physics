@@ -1,0 +1,23 @@
+title = "Star relaxation -- n=1.5 polytrope, N=4000 SPH particles, no black hole yet"
+
+# K, Gamma, and the suggested h/softening below come straight from
+# tools/make_star_ic.py's printed output for this ic_file -- regenerate both
+# together if n/N/mass/radius change.
+[star]
+ic_file = "ic/star_n1.5.bin"
+
+[gravity]
+G = 1.0
+softening = 0.063
+
+[sph]
+h = 0.157
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[time]
+dt = 0.005
+substeps_per_frame = 10
+frames = 200

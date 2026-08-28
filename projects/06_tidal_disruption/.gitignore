@@ -1,0 +1,9 @@
+# Headless run output (raw .npy frames + diagnostics) -- regenerate by running
+# the sim against a deck, see README.md.
+out/
+
+# Generated initial conditions -- regenerate with tools/make_star_ic.py
+# (deterministic given --seed), see README.md's deck-format note.
+ic/*.bin
+
+__pycache__/
