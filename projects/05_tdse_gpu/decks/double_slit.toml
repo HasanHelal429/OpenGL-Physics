@@ -1,0 +1,36 @@
+title = "2D TDSE - double slit"
+
+[grid]
+n = 512
+lx = 50.0
+ly = 50.0
+
+[time]
+dt = 0.003
+substeps_per_frame = 8
+frames = 300
+
+[initial]
+type = "gaussian"
+x0 = -14.0
+y0 = 0.0
+sigma = 3.0
+kx = 4.0
+ky = 0.0
+
+[boundary]
+type = "cap"
+cap_width = 6.0
+cap_strength = 5.0
+
+[[potential]]
+type = "double_slit"
+x0 = -2.0
+thickness = 0.8
+slit_sep = 5.0
+slit_width = 1.2
+height = 60.0
+
+[output]
+diagnostics = ["norm", "energy", "x_mean", "px_mean", "transmission"]
+transmission_x = 0.0

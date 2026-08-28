@@ -1,0 +1,31 @@
+title = "2D TDSE - free Gaussian wavepacket"
+
+[grid]
+n = 512
+lx = 60.0
+ly = 60.0
+
+[time]
+dt = 0.004
+substeps_per_frame = 8
+frames = 240
+
+[initial]
+type = "gaussian"
+x0 = -12.0
+y0 = 0.0
+sigma = 2.0
+kx = 3.0
+ky = 0.0
+
+# Packet never nears the edge over the run; keep the box strictly periodic so
+# the free-spreading validation is not perturbed by absorption.
+[boundary]
+type = "periodic"
+
+[[potential]]
+type = "free"
+
+[output]
+diagnostics = ["norm", "energy", "kinetic", "potential_energy", "x_mean", "y_mean", "x_var", "y_var", "px_mean", "transmission"]
+transmission_x = 0.0
