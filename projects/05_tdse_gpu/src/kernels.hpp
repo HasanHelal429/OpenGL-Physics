@@ -126,6 +126,35 @@ void main() {
 )";
 }
 
+// Probability current j = Im(conj(psi) grad psi)  (hbar = m = 1), central
+// differences with periodic wrap. Reads psi (binding 0), writes j as vec2
+// (binding 1).
+inline std::string Current(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Psi { vec2 psi[]; };
+layout(std430, binding = 1) writeonly buffer Cur { vec2 j[]; };
+
+uniform float uDx;
+uniform float uDy;
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= N || y >= N) return;
+    int xp = (x + 1) % N, xm = (x + N - 1) % N;
+    int yp = (y + 1) % N, ym = (y + N - 1) % N;
+    vec2 p  = psi[y * N + x];
+    vec2 gx = (psi[y * N + xp] - psi[y * N + xm]) / (2.0 * uDx);
+    vec2 gy = (psi[yp * N + x] - psi[ym * N + x]) / (2.0 * uDy);
+    // Im(conj(p) * g) = p.x*g.y - p.y*g.x
+    j[y * N + x] = vec2(p.x * gx.y - p.y * gx.x, p.x * gy.y - p.y * gy.x);
+}
+)";
+}
+
 // Pointwise complex multiply: a[i] <- a[i] * b[i]  (binding 0 *= binding 1).
 inline std::string CMul(int n) {
     return R"(#version 460 core

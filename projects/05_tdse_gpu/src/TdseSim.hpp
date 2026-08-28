@@ -44,6 +44,7 @@ private:
     void Fft(GLuint buffer, bool inverse);
     void TransposeBuf(GLuint src, GLuint dst);
     void CMulBuf(GLuint dst, GLuint by);
+    void ComputeCurrent();
     void Readback() const;
 
     Grid m_grid;
@@ -62,21 +63,28 @@ private:
     GLuint m_kprop = 0;   // exp(-i (kx^2+ky^2)/2 dt), transposed layout
     GLuint m_twiddle = 0; // length N
     GLuint m_potential = 0;
-    GLuint m_stat = 0;    // 1 uint: max |psi|^2 for the interactive view
+    GLuint m_stat = 0;        // 1 uint: max |psi|^2 for the interactive view
+    GLuint m_currentBuf = 0;  // vec2 probability current j
+    GLuint m_statJ = 0;       // 1 uint: max |j|^2
 
     fw::ComputeShader m_fft;
     fw::ComputeShader m_transpose;
     fw::ComputeShader m_cmul;
     fw::ComputeShader m_reduceMax;
+    fw::ComputeShader m_currentProg;
 
     // Interactive view.
     fw::Shader m_view;
+    fw::Shader m_arrows;      // probability-current overlay
     GLuint m_vao = 0;
+    GLuint m_arrowVao = 0;
     int m_mode = 0;        // 0 phase-colored density, 1 magma density, 2 Re(psi)
     float m_gain = 1.15f;  // linear push before the perceptual curve
     float m_gamma = 0.5f;  // density brightness curve; <1 lifts tails/fringe minima
     float m_zoom = 1.0f;
     glm::vec2 m_panPix{0.0f, 0.0f};
+    bool m_showCurrent = false;
+    bool m_writeCurrent = false;
 
     // CPU mirrors.
     std::vector<std::complex<float>> m_initial;
