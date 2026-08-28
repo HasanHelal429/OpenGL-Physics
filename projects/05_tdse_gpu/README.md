@@ -20,6 +20,14 @@ checks it against a direct DFT and a round-trip before it is trusted.
 
 `N` must be a power of two, ≤ 2048.
 
+The interactive view domain-colors ψ (phase → hue). Brightness tracks the
+probability density, **auto-scaled each frame to the current peak** (a GPU
+max-reduction) so the whole distribution stays readable as the packet spreads
+or is absorbed, with a γ≈0.5 (amplitude) curve so tails and fringe minima stay
+visible rather than crushing to black. `m` cycles phase-colored density → a
+magma density ramp → Re ψ. `tools/make_movie.py` uses the same mapping
+(`--normalize frame|global`, `--gamma`, `--gain`).
+
 ## This project also introduces the reusable batch/interactive layer
 
 New in `framework/`, meant for every future project:
@@ -46,8 +54,11 @@ cmake --build --preset release --target 05_tdse_gpu
 # batch: run a deck, write raw data
 05_tdse_gpu --deck decks/tunneling.toml --out out/tunneling [--frames N] [--substeps N]
 
-# interactive: window + HUD (mouse drag = pan, wheel = zoom,
-#              m = cycle view mode, [ ] = exposure, F12 = screenshot)
+# interactive: window + HUD
+#   mouse drag = pan, wheel = zoom, 0 = reset view
+#   m = cycle view (phase-colored density / magma density / Re ψ)
+#   [ ] = brightness gain,  - = = density gamma (lower shows fainter tails)
+#   F12 = screenshot
 05_tdse_gpu --interactive --deck decks/double_slit.toml
 
 # FFT kernel self-test

@@ -105,6 +105,27 @@ void main() {
 )";
 }
 
+// Reduce max |psi|^2 over the grid into a single uint (float bits; |psi|^2 >= 0
+// so the bit order is monotonic). Clear binding 1 to 0 before dispatching.
+// Used by the interactive view to auto-scale brightness to the current density.
+inline std::string ReduceMax(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(u
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Psi { vec2 psi[]; };
+layout(std430, binding = 1) buffer Stat { uint sMaxBits; };
+
+void main() {
+    uint x = gl_GlobalInvocationID.x;
+    uint y = gl_GlobalInvocationID.y;
+    if (x >= N || y >= N) return;
+    vec2 p = psi[y * N + x];
+    atomicMax(sMaxBits, floatBitsToUint(dot(p, p)));
+}
+)";
+}
+
 // Pointwise complex multiply: a[i] <- a[i] * b[i]  (binding 0 *= binding 1).
 inline std::string CMul(int n) {
     return R"(#version 460 core
