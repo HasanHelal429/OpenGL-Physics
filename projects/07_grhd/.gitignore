@@ -2,4 +2,8 @@
 # the sim against a deck, see README.md.
 out/
 
+# Generated initial conditions -- regenerate with tools/make_bondi_ic.py,
+# see README.md's deck-format note.
+ic/*.bin
+
 __pycache__/
