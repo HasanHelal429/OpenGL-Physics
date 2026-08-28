@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <stdexcept>
 
 namespace tdse {
@@ -28,8 +29,9 @@ void main() {
 const char* kViewFrag = R"(#version 460 core
 out vec4 FragColor;
 
-layout(std430, binding = 0) readonly buffer Psi { vec2 psi[]; };
-layout(std430, binding = 1) readonly buffer Pot { float pot[]; };
+layout(std430, binding = 0) readonly buffer Psi  { vec2 psi[]; };
+layout(std430, binding = 1) readonly buffer Pot  { float pot[]; };
+layout(std430, binding = 2) readonly buffer Stat { uint sMaxBits; }; // max |psi|^2 this frame
 
 uniform vec2 uRes;
 uniform int uN;
@@ -38,13 +40,27 @@ uniform float uLy;
 uniform float uPixPerUnit;
 uniform vec2 uPanPix;
 uniform int uMode;
-uniform float uExposure;
+uniform float uGain;   // linear push before the perceptual curve
+uniform float uGamma;  // <1 lifts low density so tails/fringe minima stay visible
 uniform float uVref;
 
 vec3 hsv2rgb(vec3 c) {
     vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
     vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
     return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+}
+
+// Polynomial fit of matplotlib 'magma' (Bhaskaran / Stefan-Gustavson style).
+vec3 magma(float t) {
+    t = clamp(t, 0.0, 1.0);
+    const vec3 c0 = vec3(-0.002136, -0.000750, -0.005386);
+    const vec3 c1 = vec3(0.251723, 0.677631, 2.494027);
+    const vec3 c2 = vec3(8.353717, -3.577720, 0.311613);
+    const vec3 c3 = vec3(-27.668733, 14.264731, -13.649213);
+    const vec3 c4 = vec3(52.176140, -27.943606, 12.944169);
+    const vec3 c5 = vec3(-50.768525, 29.046583, 4.234153);
+    const vec3 c6 = vec3(18.655705, -11.489774, -5.601962);
+    return clamp(c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6))))), 0.0, 1.0);
 }
 
 void main() {
@@ -63,20 +79,25 @@ void main() {
     float mag2 = dot(p, p);
     float v = pot[idx];
 
+    // Brightness tracks probability density, auto-scaled to the current peak so
+    // the whole distribution stays legible as the packet spreads or is absorbed,
+    // then a gamma < 1 pulls the low end up so tails and fringe minima show.
+    float rhoMax = max(uintBitsToFloat(sMaxBits), 1e-30);
+    float rel = clamp(uGain * mag2 / rhoMax, 0.0, 1.0);
+    float dens = pow(rel, uGamma);
+
     vec3 col;
     if (uMode == 1) {
-        float g = 1.0 - exp(-uExposure * mag2 * float(uN) * float(uN) * dx * dy);
-        col = vec3(g);
+        col = magma(dens);
     } else if (uMode == 2) {
-        float r = p.x;
-        float s = tanh(uExposure * r * float(uN) * sqrt(dx * dy));
+        float s = clamp(uGain * p.x / sqrt(rhoMax), -1.0, 1.0);
+        s = sign(s) * pow(abs(s), uGamma);
         col = mix(vec3(0.15, 0.3, 0.9), vec3(0.95, 0.25, 0.2), 0.5 + 0.5 * s);
-        col *= 0.4 + 0.6 * abs(s);
+        col *= 0.25 + 0.75 * abs(s);
     } else {
         float phase = atan(p.y, p.x);
         float hue = phase / (2.0 * 3.14159265) + 0.5;
-        float val = 1.0 - exp(-uExposure * mag2 * float(uN) * float(uN) * dx * dy);
-        col = hsv2rgb(vec3(hue, 0.85, val));
+        col = hsv2rgb(vec3(hue, 0.82, dens));
     }
 
     if (uVref > 0.0) {
@@ -90,8 +111,8 @@ void main() {
 } // namespace
 
 TdseSim::~TdseSim() {
-    GLuint bufs[] = {m_psi, m_tmp, m_spec, m_vprop, m_kprop, m_twiddle, m_potential};
-    glDeleteBuffers(7, bufs);
+    GLuint bufs[] = {m_psi, m_tmp, m_spec, m_vprop, m_kprop, m_twiddle, m_potential, m_stat};
+    glDeleteBuffers(8, bufs);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
@@ -121,6 +142,7 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_fft = fw::ComputeShader::FromSource(kernels::Fft1D(n));
     m_transpose = fw::ComputeShader::FromSource(kernels::Transpose(n));
     m_cmul = fw::ComputeShader::FromSource(kernels::CMul(n));
+    m_reduceMax = fw::ComputeShader::FromSource(kernels::ReduceMax(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
     glGenVertexArrays(1, &m_vao);
 
@@ -145,6 +167,7 @@ void TdseSim::CreateBuffers() {
     mk(m_kprop, cplx);
     mk(m_twiddle, static_cast<GLsizeiptr>(n) * 2 * sizeof(float));
     mk(m_potential, static_cast<GLsizeiptr>(n) * n * sizeof(float));
+    mk(m_stat, sizeof(uint32_t));
 
     glNamedBufferSubData(m_potential, 0, static_cast<GLsizeiptr>(n) * n * sizeof(float), m_vCpu.data());
 }
@@ -359,6 +382,15 @@ void TdseSim::Render(int fbWidth, int fbHeight) {
     float vref = 0.0f;
     for (float v : m_vCpu) vref = std::max(vref, std::abs(v));
 
+    // Peak |psi|^2 this frame -> the view auto-scales brightness to it.
+    const uint32_t zero = 0;
+    glNamedBufferSubData(m_stat, 0, sizeof(zero), &zero);
+    m_reduceMax.Use();
+    fw::ComputeShader::BindBuffer(0, m_psi);
+    fw::ComputeShader::BindBuffer(1, m_stat);
+    m_reduceMax.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
     glDisable(GL_DEPTH_TEST);
     m_view.Use();
     m_view.SetVec2("uRes", glm::vec2(fbWidth, fbHeight));
@@ -368,11 +400,13 @@ void TdseSim::Render(int fbWidth, int fbHeight) {
     m_view.SetFloat("uPixPerUnit", pixPerUnit);
     m_view.SetVec2("uPanPix", m_panPix);
     m_view.SetInt("uMode", m_mode);
-    m_view.SetFloat("uExposure", m_exposure);
+    m_view.SetFloat("uGain", m_gain);
+    m_view.SetFloat("uGamma", m_gamma);
     m_view.SetFloat("uVref", vref);
 
     fw::ComputeShader::BindBuffer(0, m_psi);
     fw::ComputeShader::BindBuffer(1, m_potential);
+    fw::ComputeShader::BindBuffer(2, m_stat);
 
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
@@ -395,9 +429,11 @@ void TdseSim::OnKey(int key, int action) {
     (void)action;
     switch (key) {
         case 'M': m_mode = (m_mode + 1) % 3; break;
-        case '[': m_exposure = std::max(0.5f, m_exposure * 0.8f); break;
-        case ']': m_exposure = std::min(80.0f, m_exposure * 1.25f); break;
-        case '0': m_zoom = 1.0f; m_panPix = {0.0f, 0.0f}; break;
+        case '[': m_gain = std::max(0.15f, m_gain * 0.85f); break;
+        case ']': m_gain = std::min(12.0f, m_gain * 1.18f); break;
+        case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break; // lift tails
+        case '=': m_gamma = std::min(1.4f, m_gamma + 0.05f); break; // sharpen to the core
+        case '0': m_zoom = 1.0f; m_panPix = {0.0f, 0.0f}; m_gain = 1.15f; m_gamma = 0.5f; break;
         default: break;
     }
 }

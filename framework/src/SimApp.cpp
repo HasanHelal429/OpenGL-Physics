@@ -111,9 +111,10 @@ void SimApp::OnRender() {
         }
         std::filesystem::create_directories("screenshots");
         const auto now = std::chrono::system_clock::now().time_since_epoch();
-        const long secs = std::chrono::duration_cast<std::chrono::seconds>(now).count();
-        char path[64];
-        std::snprintf(path, sizeof(path), "screenshots/shot_%ld.png", secs);
+        const long ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        char path[80];
+        std::snprintf(path, sizeof(path), "screenshots/shot_%ld_%03d.png", ms / 1000,
+                      static_cast<int>(ms % 1000));
         stbi_write_png(path, w, h, 3, flip.data(), w * 3);
         std::printf("[shot] %s\n", path);
     }

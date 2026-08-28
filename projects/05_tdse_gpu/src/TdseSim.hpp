@@ -62,16 +62,19 @@ private:
     GLuint m_kprop = 0;   // exp(-i (kx^2+ky^2)/2 dt), transposed layout
     GLuint m_twiddle = 0; // length N
     GLuint m_potential = 0;
+    GLuint m_stat = 0;    // 1 uint: max |psi|^2 for the interactive view
 
     fw::ComputeShader m_fft;
     fw::ComputeShader m_transpose;
     fw::ComputeShader m_cmul;
+    fw::ComputeShader m_reduceMax;
 
     // Interactive view.
     fw::Shader m_view;
     GLuint m_vao = 0;
-    int m_mode = 0;         // 0 phase-colored |psi|^2, 1 grayscale |psi|^2, 2 Re(psi)
-    float m_exposure = 6.0f;
+    int m_mode = 0;        // 0 phase-colored density, 1 magma density, 2 Re(psi)
+    float m_gain = 1.15f;  // linear push before the perceptual curve
+    float m_gamma = 0.5f;  // density brightness curve; <1 lifts tails/fringe minima
     float m_zoom = 1.0f;
     glm::vec2 m_panPix{0.0f, 0.0f};
 
