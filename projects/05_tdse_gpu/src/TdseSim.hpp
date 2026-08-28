@@ -40,7 +40,9 @@ public:
         int states = 1;
         int steps = 2000;
         double dtau = 0.01;
+        int orthoEvery = 1;   // Gram-Schmidt every N steps (SCF warm starts can use >1)
         const std::vector<float>* extraPotential = nullptr;  // added to V0 (e.g. V_Hartree)
+        const std::vector<std::vector<std::complex<float>>>* warmStart = nullptr;
         bool quiet = false;
     };
     struct RelaxResult {
