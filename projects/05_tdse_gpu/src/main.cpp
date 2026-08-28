@@ -5,6 +5,7 @@
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
+#include "framework/OutputWriter.hpp"
 #include "framework/SimApp.hpp"
 
 #include <glad/glad.h>
@@ -29,6 +30,12 @@ struct Args {
     int substeps = 0;
     bool interactive = false;
     bool selftest = false;
+    bool relax = false;
+    bool scf = false;
+    int states = 1;
+    int relaxSteps = 2500;
+    double relaxDtau = 0.0;   // 0 -> auto
+    int scfElectrons = 0;     // 0 -> fill all `states`
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -42,9 +49,41 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
+        else if (s == "--relax") a.relax = true;
+        else if (s == "--scf") a.scf = true;
+        else if (s == "--states") a.states = std::atoi(next());
+        else if (s == "--relax-steps") a.relaxSteps = std::atoi(next());
+        else if (s == "--relax-dtau") a.relaxDtau = std::atof(next());
+        else if (s == "--electrons") a.scfElectrons = std::atoi(next());
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
+}
+
+// Write a set of eigenstates (+ energies + the potential) as frames.
+void WriteEigenstates(const std::string& outDir, const fw::Deck& deck, const tdse::Grid& g,
+                      const std::vector<float>& potential,
+                      const tdse::TdseSim::RelaxResult& r, const char* title) {
+    fw::SimInfo info;
+    info.title = title;
+    info.gridNx = g.n;
+    info.gridNy = g.n;
+    info.lx = g.lx;
+    info.ly = g.ly;
+    info.frameFields = {"psi", "potential"};
+    info.diagnostics = {"energy"};
+    fw::OutputWriter w(outDir, info, deck);
+    for (size_t k = 0; k < r.states.size(); ++k) {
+        w.BeginFrame(static_cast<double>(k), static_cast<long>(k));
+        w.WriteField("psi", r.states[k].data(), fw::NpyDtype::C8, g.n, g.n);
+        if (k == 0) w.WriteField("potential", potential.data(), fw::NpyDtype::F4, g.n, g.n);
+        w.WriteScalar("energy", r.energies[k]);
+        w.EndFrame();
+    }
+    w.Finish();
+    std::printf("energies:");
+    for (double e : r.energies) std::printf(" %.4f", e);
+    std::printf("\n");
 }
 
 // Round-trip and forward-vs-DFT check of the GPU FFT kernel.
@@ -150,6 +189,22 @@ int main(int argc, char** argv) {
     fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
     tdse::TdseSim sim;
     sim.Configure(deck);
+
+    if (a.relax || a.scf) {
+        const tdse::Grid& g = sim.GridInfo();
+        const double dtau = a.relaxDtau > 0.0 ? a.relaxDtau : 0.4 * (g.lx / g.n) * (g.lx / g.n);
+        tdse::TdseSim::RelaxOptions ro;
+        ro.states = a.states;
+        ro.steps = a.relaxSteps;
+        ro.dtau = dtau;
+
+        if (a.relax) {
+            tdse::TdseSim::RelaxResult r = sim.Relax(ro);
+            WriteEigenstates(a.out, deck, g, sim.StaticPotential(), r, "eigenstates (imaginary time)");
+            return 0;
+        }
+        return sim.RunScf(deck, ro, a.scfElectrons, a.out);  // --scf (Phase G4)
+    }
 
     fw::HeadlessOptions opts;
     opts.outDir = a.out;
