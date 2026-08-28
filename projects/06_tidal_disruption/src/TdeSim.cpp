@@ -19,11 +19,18 @@ GLuint MakeVec4Buffer(GLsizei count) {
                          GL_DYNAMIC_STORAGE_BIT);
     return buf;
 }
+GLuint MakeFloatBuffer(GLsizei count) {
+    GLuint buf = 0;
+    glCreateBuffers(1, &buf);
+    glNamedBufferStorage(buf, count * static_cast<GLsizeiptr>(sizeof(float)), nullptr,
+                         GL_DYNAMIC_STORAGE_BIT);
+    return buf;
+}
 } // namespace
 
 TdeSim::~TdeSim() {
-    GLuint bufs[4] = {m_posMass, m_vel, m_acc, m_rhoPress};
-    glDeleteBuffers(4, bufs);
+    GLuint bufs[5] = {m_posMass, m_vel, m_acc, m_rhoPress, m_h};
+    glDeleteBuffers(5, bufs);
 }
 
 void TdeSim::Configure(const fw::Deck& deck) {
@@ -54,11 +61,16 @@ void TdeSim::Configure(const fw::Deck& deck) {
     m_G = deck.GetDouble("gravity.G", 1.0);
     m_softening = deck.GetDouble("gravity.softening", 0.05);
 
-    m_h = deck.GetDouble("sph.h", 0.1);
+    m_hInit = deck.GetDouble("sph.h_init", 0.1);
+    m_eta = deck.GetDouble("sph.eta", 1.2);
+    m_hIters = deck.GetInt("sph.h_iters", 3);
+    m_hMin = deck.GetDouble("sph.h_min_factor", 0.2) * m_hInit;
+    m_hMax = deck.GetDouble("sph.h_max_factor", 8.0) * m_hInit;
     m_K = deck.GetDouble("sph.K", 1.0);
     m_gamma = deck.GetDouble("sph.gamma", 5.0 / 3.0);
     m_viscAlpha = deck.GetDouble("sph.visc_alpha", 1.0);
     m_viscBeta = deck.GetDouble("sph.visc_beta", 2.0);
+    m_damping = deck.GetDouble("time.damping", 0.0);
 
     m_dt = deck.GetDouble("time.dt", 1e-3);
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 1);
@@ -85,6 +97,7 @@ void TdeSim::CreateBuffers() {
     m_vel = MakeVec4Buffer(m_n);
     m_acc = MakeVec4Buffer(m_n);
     m_rhoPress = MakeVec4Buffer(m_n);
+    m_h = MakeFloatBuffer(m_n);
 }
 
 void TdeSim::UploadInitial() {
@@ -98,6 +111,8 @@ void TdeSim::UploadInitial() {
     const std::vector<glm::vec4> zero(m_n, glm::vec4(0.0f));
     glNamedBufferSubData(m_acc, 0, m_n * sizeof(glm::vec4), zero.data());
     glNamedBufferSubData(m_rhoPress, 0, m_n * sizeof(glm::vec4), zero.data());
+    const std::vector<float> hInit(m_n, static_cast<float>(m_hInit));
+    glNamedBufferSubData(m_h, 0, m_n * sizeof(float), hInit.data());
 }
 
 void TdeSim::Reset() {
@@ -110,17 +125,20 @@ void TdeSim::ComputeDensityAndForces() {
 
     m_density.Use();
     m_density.SetInt("uN", m_n);
-    m_density.SetFloat("uH", static_cast<float>(m_h));
     m_density.SetFloat("uK", static_cast<float>(m_K));
     m_density.SetFloat("uGamma", static_cast<float>(m_gamma));
+    m_density.SetFloat("uEta", static_cast<float>(m_eta));
+    m_density.SetInt("uHIters", m_hIters);
+    m_density.SetFloat("uHMin", static_cast<float>(m_hMin));
+    m_density.SetFloat("uHMax", static_cast<float>(m_hMax));
     fw::ComputeShader::BindBuffer(0, m_posMass);
     fw::ComputeShader::BindBuffer(3, m_rhoPress);
+    fw::ComputeShader::BindBuffer(4, m_h);
     m_density.Dispatch(groups);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     m_forces.Use();
     m_forces.SetInt("uN", m_n);
-    m_forces.SetFloat("uH", static_cast<float>(m_h));
     m_forces.SetFloat("uG", static_cast<float>(m_G));
     m_forces.SetFloat("uSoftening2", static_cast<float>(m_softening * m_softening));
     m_forces.SetFloat("uViscAlpha", static_cast<float>(m_viscAlpha));
@@ -129,6 +147,7 @@ void TdeSim::ComputeDensityAndForces() {
     fw::ComputeShader::BindBuffer(1, m_vel);
     fw::ComputeShader::BindBuffer(2, m_acc);
     fw::ComputeShader::BindBuffer(3, m_rhoPress);
+    fw::ComputeShader::BindBuffer(4, m_h);
     m_forces.Dispatch(groups);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
@@ -136,11 +155,13 @@ void TdeSim::ComputeDensityAndForces() {
 void TdeSim::Step(int substeps) {
     const GLuint groups = static_cast<GLuint>((m_n + kernels::kWorkgroupSize - 1) / kernels::kWorkgroupSize);
     const float halfDt = static_cast<float>(0.5 * m_dt);
+    const float dampingFactor = static_cast<float>(std::exp(-m_damping * halfDt));
 
     auto kick = [&]() {
         m_kick.Use();
         m_kick.SetInt("uN", m_n);
         m_kick.SetFloat("uHalfDt", halfDt);
+        m_kick.SetFloat("uDampingFactor", dampingFactor);
         fw::ComputeShader::BindBuffer(1, m_vel);
         fw::ComputeShader::BindBuffer(2, m_acc);
         m_kick.Dispatch(groups);
@@ -168,9 +189,11 @@ void TdeSim::ReadBack() {
     m_posMassCpu.resize(m_n);
     m_velCpu.resize(m_n);
     m_rhoPressCpu.resize(m_n);
+    m_hCpu.resize(m_n);
     glGetNamedBufferSubData(m_posMass, 0, m_n * sizeof(glm::vec4), m_posMassCpu.data());
     glGetNamedBufferSubData(m_vel, 0, m_n * sizeof(glm::vec4), m_velCpu.data());
     glGetNamedBufferSubData(m_rhoPress, 0, m_n * sizeof(glm::vec4), m_rhoPressCpu.data());
+    glGetNamedBufferSubData(m_h, 0, m_n * sizeof(float), m_hCpu.data());
 }
 
 void TdeSim::Snapshot(fw::OutputWriter& writer) {
@@ -205,6 +228,7 @@ void TdeSim::Snapshot(fw::OutputWriter& writer) {
     writer.WriteField("pos_mass", m_posMassCpu.data(), fw::NpyDtype::F4, m_n, 4);
     writer.WriteField("vel", m_velCpu.data(), fw::NpyDtype::F4, m_n, 4);
     writer.WriteField("rho_press", m_rhoPressCpu.data(), fw::NpyDtype::F4, m_n, 4);
+    writer.WriteField("h", m_hCpu.data(), fw::NpyDtype::F4, m_n, 1);
     writer.WriteScalar("kinetic", kinetic);
     writer.WriteScalar("thermal", thermal);
     writer.WriteScalar("potential", potential);
@@ -221,7 +245,7 @@ fw::SimInfo TdeSim::Info() const {
     info.title = m_title;
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = {"pos_mass", "vel", "rho_press"};
+    info.frameFields = {"pos_mass", "vel", "rho_press", "h"};
     info.diagnostics = m_diagNames;
     return info;
 }
