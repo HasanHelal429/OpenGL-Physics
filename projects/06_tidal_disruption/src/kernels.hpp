@@ -95,17 +95,23 @@ uniform int uHIters;
 uniform float uHMin;
 uniform float uHMax;
 
-// Excludes j==i: W(0,h) is nonzero (unlike the force kernel's gradient,
-// which vanishes at r=0), so a naive self-inclusive sum adds a spurious
-// m_i/(pi*h^3) term. That's negligible at a large fixed h, but once h
-// adapts down toward the true local spacing this self-term becomes 15-30%
-// of the total -- a real, measured bias (bin-averaged density running
-// 25-30% high through the star's bulk), not a rounding-level effect. Fixed
-// by never letting a particle see itself as its own neighbor.
-float gatherDensity(vec3 ri, float h, uint selfIdx) {
+// Includes j==i: standard SPH summation density is rho_i = sum_j m_j
+// W(r_ij, h_i) over ALL particles including i itself (Monaghan 1992; Price
+// 2012 review, eq. 5) -- W(0,h) is nonzero and its self-contribution is
+// what keeps the estimate well-behaved as the local neighbor count drops
+// (e.g. near the star's free surface). An earlier version of this shader
+// excluded j==i after observing a 25-30% high bulk-density bias with it
+// included; that bias was a fixed-point *convergence* artifact of only
+// iterating uHIters=3 times (self-inclusion makes the rho->h->rho loop
+// stiffer near the core), not a flaw in the self-term itself -- excluding
+// it "fixed" that symptom but introduced the opposite, a systematic
+// 10-30% *under*-estimate everywhere the neighbor count is modest, because
+// every particle was missing its own legitimate mass contribution. Fixed
+// for real by keeping the self-term and instead iterating enough times to
+// converge (see sph.h_iters in the deck).
+float gatherDensity(vec3 ri, float h) {
     float rho = 0.0;
     for (uint j = 0u; j < uint(uN); ++j) {
-        if (j == selfIdx) continue;
         float r = length(ri - posMass[j].xyz);
         rho += posMass[j].w * kernelW(r, h);
     }
@@ -139,10 +145,10 @@ void main() {
     float h = hArr[i];
     float rho = 0.0;
     for (int it = 0; it < uHIters; ++it) {
-        rho = gatherDensity(ri, h, i);
+        rho = gatherDensity(ri, h);
         h = clamp(uEta * pow(mi / rho, 1.0 / 3.0), uHMin, uHMax); // rho==0 -> mi/rho=+inf -> clamps to uHMax, no NaN
     }
-    rho = gatherDensity(ri, h, i); // final density consistent with the converged h
+    rho = gatherDensity(ri, h); // final density consistent with the converged h
 
     hArr[i] = h;
     float pressure = (rho > kRhoFloor) ? uK * pow(rho, uGamma) : 0.0;

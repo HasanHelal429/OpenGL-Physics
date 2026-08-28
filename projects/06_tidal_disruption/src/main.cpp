@@ -92,8 +92,7 @@ bool SelfTest() {
     std::vector<double> hRef(N, H_INIT), rhoRef(N), pressRef(N), csRef(N);
     auto gatherDensity = [&](int i, double h) {
         double rho = 0.0;
-        for (int j = 0; j < N; ++j) {
-            if (j == i) continue; // see kernels.hpp Density()'s comment on the self-term bias
+        for (int j = 0; j < N; ++j) { // includes j==i -- see kernels.hpp Density()'s comment on the self-term
             const double r = glm::length(glm::dvec3(posMass[i]) - glm::dvec3(posMass[j]));
             rho += posMass[j].w * RefKernelW(r, h);
         }
