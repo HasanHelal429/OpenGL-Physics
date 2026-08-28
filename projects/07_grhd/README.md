@@ -1,4 +1,4 @@
-# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2a)
+# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2b part 1)
 
 This is Tier 2 of the tidal-disruption project (see
 `06_tidal_disruption/README.md`'s tier table): fluid on a fixed
@@ -333,6 +333,11 @@ python tools/make_kerr_orbit_ic.py --M 1.0 --a 0.7 --gamma 1.333333 \
     --deck decks/kerr_circular_orbit.toml --out out/kerr_circular_orbit
 python tools/plot_kerr_orbit.py out/kerr_circular_orbit
 python tools/make_kerr_orbit_movie.py out/kerr_circular_orbit
+
+# Phase 2b, part 1: Fishbone-Moncrief torus (analytic construction only --
+# no deck/dynamical run yet, see Progress)
+python tools/plot_fishbone_moncrief.py --M 1.0 --a 0.9 --gamma 1.333333 \
+    --r_in 6.0 --r_center 10.0 --out fishbone_moncrief.png
 ```
 
 ## Deck format
@@ -522,6 +527,87 @@ that bound, and/or starting from a genuine equilibrium profile instead of
 constant density, are the natural next steps if Phase 2b's precision needs
 demand it.
 
+## Physics: Phase 2b, part 1 (Fishbone-Moncrief torus -- analytic construction)
+
+`tools/fishbone_moncrief.py`. A stationary, axisymmetric equilibrium with
+purely toroidal motion (`u^r=u^theta=0`) and constant specific angular
+momentum `l=-u_phi/u_t` everywhere. This needed the FULL (r,theta)-dependent
+Kerr metric (`Sigma=r^2+a^2*cos^2(theta)`, etc. -- the textbook definition,
+not derived), not just Phase 2a's equatorial slice.
+
+**This construction is commonly quoted with a shortcut** ("potential
+`W=ln|u_t|`, enthalpy `h=exp(W_in-W)`") that this project tried first and
+which **failed its own consistency check**: the claimed pressure maximum
+came out as a potential *maximum* (a pressure *minimum*) -- backwards.
+Rather than hunt for a sign fix inside a shortcut that was already
+producing the wrong physical picture, this instead:
+
+1. Rederived the 4-acceleration from scratch:
+   `a_mu = -0.5*(d(g^ab)/dx^mu)*u_a*u_b` (`ab` in `{tt,tphi,phiphi}`) --
+   the correct index placement for this identity (inverse metric derivative
+   contracted with *covariant* momenta) was itself only settled by trying
+   the other natural-looking option (metric derivative with *contravariant*
+   velocities) and rejecting it because it failed the check below, not by
+   getting the tensor calculus right on paper first.
+2. **Validated `a_mu` three independent ways** before using it for
+   anything: (a) at `l` equal to the local geodesic value
+   (`tools/kerr_orbits.py`), `a_r` comes out `~1e-11` -- exactly matching
+   the independently-derived circular-orbit condition; (b)
+   `d(a_r)/d(theta) == d(a_theta)/d(r)` to 5 significant figures -- the
+   field is curl-free, i.e. really is a gradient (a mathematical
+   requirement for the whole construction, not assumed); (c) integrating
+   it gives `h` that actually *peaks* (not troughs) at `r_center`.
+3. Found the Euler equation's sign was backwards in the first pass too:
+   the correct relation is `d(ln h) = +a_r*dr` (not `-a_r*dr`) -- resolved
+   empirically, by checking which sign produces the physically required
+   shape, not by re-deriving the Euler equation a third time.
+4. Given `a_mu` is curl-free, `h` is well-defined by any path integral
+   from a reference point `(r_in, pi/2)` (`h=1` there): radially in to
+   `(r,pi/2)`, then vertically to `(r,theta)` -- computed by direct
+   numerical quadrature of the (already validated) `a_r`/`a_theta`, not
+   by trying yet another closed-form shortcut.
+
+**A fourth, unrelated bug** surfaced once the shape was qualitatively
+right but a quantitative cross-check was run: `u_t_of_l`'s implementation
+was `-sqrt(-(denom))` where it should have been `-1/sqrt(-(denom))` (the
+docstring already had the right formula -- this was a plain transcription
+slip, not a derivation error). It didn't break the qualitative torus shape
+at all (the pressure-maximum/curl-free checks above are insensitive to an
+overall, even position-dependent, rescaling of the acceleration's
+magnitude in specific ways), so it was only caught by a targeted numeric
+comparison: `u_t_of_l` evaluated at `r_center` with `l=l_geodesic(r_center)`
+should equal `-E_geodesic(r_center)` exactly, and it didn't, until fixed.
+
+`l` is fixed by requiring the pressure maximum sit exactly at the chosen
+`r_center`: this project's earlier, independently-derived
+`tools/kerr_orbits.py` gives that condition directly
+(`l = L_geodesic(r_center)/E_geodesic(r_center)`) -- verified, not just
+assumed, by confirming `a_r(r_center)~0` inside `FishboneMoncriefTorus`'s
+own constructor. `r_in` (inner edge, `h=1`) is the second free shape
+parameter, fixing the overall additive normalization of `ln(h)`; density
+is normalized to `rho=1` at `r_center` (same convention as
+`tools/bondi_analytic.py`'s `rho_c=1`).
+
+## Validation: Phase 2b, part 1 (Fishbone-Moncrief torus construction)
+
+`M=1`, `a=0.9M`, `r_in=6M`, `r_center=10M`, `Gamma=4/3`:
+`l=3.6307`, `ln(h)` at the pressure maximum `=0.0233`.
+
+| check | result |
+|---|---|
+| `a_r` at the local geodesic radius, 3 independent radii (`r=7,12,18M`) | `~1e-11` (floating-point noise) |
+| curl-free (`d(a_r)/dtheta` vs. `d(a_theta)/dr`, 3 test points) | agree to 5 significant figures |
+| `a_r` at `r_center` (the pressure-maximum condition itself) | `<1e-6` (checked inside the constructor; construction refuses to proceed otherwise) |
+| `u_t_of_l(r_center)` vs. independently-computed `-E_geodesic(r_center)` | exact match after the transcription-bug fix (mismatched by ~10% before it) |
+| torus shape (`tools/plot_fishbone_moncrief.py`) | a genuine, smooth, symmetric-about-the-equator crescent cross-section, density=0 at `r_in` and beyond a few tens of `M`, peak exactly at `r_center`, correctly excluding the horizon and polar regions -- see the poloidal-cross-section plot |
+
+This is a real, validated equilibrium *solution* -- the piece Phase 2b
+needs before there's anything meaningful to hand the dynamical solver.
+**The dynamical extension itself (a genuine 2D `(r,theta)` grid, 3-component
+velocity primitive recovery, 2D flux divergence, pole boundary conditions)
+is substantially more implementation work than Phase 2a's equatorial
+restriction and has not been started** -- see Progress below.
+
 ## Progress
 
 - [x] Valencia conservative variables, HLLE flux, Newton-Raphson primitive recovery, RK2 time integration -- all GPU compute shaders, validated against an independent CPU reference (`--selftest`)
@@ -529,5 +615,6 @@ demand it.
 - [x] relativistic shock tube: correct qualitative wave structure (rarefaction/contact/shock), no NaN, conservation validated including the open-boundary momentum-forcing check
 - [x] Phase 1: fixed Schwarzschild metric (Schwarzschild coordinates, not the originally planned Kerr-Schild -- see Physics above for why), conserved variables/flux/momentum source term derived from first principles and cross-checked three ways, validated against the analytic Bondi accretion solution per the table above; found and fixed a real outer-boundary instability and a wrong sonic-point formula along the way
 - [x] Phase 2a: Kerr restricted to the equatorial plane (an exact invariant submanifold, keeping the grid 1D-in-r), conserved variables/flux/source rederived for frame dragging and cross-checked against an independently-derived circular-orbit solution; validated per the table above; caught two further mistakes (a shift sign error, a missing factor in the specific-energy formula) before they reached code
-- [ ] Phase 2b: extend to genuine 2D (r,theta) structure and validate against a Fishbone-Moncrief equilibrium torus sitting still (no spurious drift) -- the actual originally-stated Phase 2 goal, needing real off-equatorial-plane structure that Phase 2a's restriction can't represent
+- [x] Phase 2b, part 1: Fishbone-Moncrief equilibrium torus analytic construction (`tools/fishbone_moncrief.py`), rederived from the Euler equation after a commonly-quoted shortcut failed its own consistency check; validated per the table above (curl-free acceleration field, zero radial force at the geodesic/pressure-maximum radius, correct torus shape); caught two further mistakes (a wrong potential shortcut/Euler-equation sign, a `u_t_of_l` transcription bug) before trusting it
+- [ ] Phase 2b, part 2: extend the dynamical solver to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, pole boundary conditions) and confirm the torus above holds steady under evolution -- not started, substantially more implementation work than Phase 2a's equatorial restriction
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff
