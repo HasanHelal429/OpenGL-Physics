@@ -1,4 +1,4 @@
-# 07 — General-relativistic hydrodynamics (Tier 2 Phase 0: flat spacetime)
+# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-1)
 
 This is Tier 2 of the tidal-disruption project (see
 `06_tidal_disruption/README.md`'s tier table): fluid on a fixed
@@ -8,16 +8,29 @@ variables, not particle methods -- a genuinely different numerical method
 from Tier 1's SPH -- so this project starts from scratch rather than
 extending `06_tidal_disruption`.
 
-**Phase 0 (this phase, done): validate the fluid solver before adding a
-curved metric.** A relativistic hydro code has two pieces that are easy to
-get subtly wrong and hard to debug once a black hole's metric is also in
-the mix: the conservative-to-primitive variable recovery, and the Riemann
+**Phase 0 (done): validate the fluid solver before adding a curved
+metric.** A relativistic hydro code has two pieces that are easy to get
+subtly wrong and hard to debug once a black hole's metric is also in the
+mix: the conservative-to-primitive variable recovery, and the Riemann
 solver. Both are built and checked here on flat (Minkowski) spacetime
 first, where trustworthy answers exist -- the classic relativistic shock
 tube, and the low-velocity limit where the equations must reduce to
 ordinary Newtonian hydrodynamics -- exactly the same "validate the
 foundation before adding the black hole" approach Tier 1 used (Lane-Emden
 hydrostatic equilibrium before adding gravity).
+
+**Phase 1 (done): a fixed Schwarzschild background.** Radial-only flow,
+spherical symmetry, in *Schwarzschild* coordinates (not the originally
+planned Kerr-Schild -- see Physics below for why that turned out to be the
+better choice for this phase specifically). Validated against the exact
+analytic relativistic Bondi accretion solution: initialize the grid to it
+and confirm the solver holds it steady over many settling times, the same
+"settle then verify it's a genuine equilibrium" methodology Tier 1 used for
+its SPH star. Found and fixed one real bug along the way -- an ill-posed
+outer boundary condition that let mass pile up and eventually diverge (see
+Validation below) -- and, in deriving the curved-spacetime equations from
+first principles, caught a mis-remembered sonic-point formula before it
+ever reached code (see Physics below).
 
 ## Physics
 
@@ -66,7 +79,90 @@ use the nearest interior cell as both "left" and "right" state, which
 makes HLLE degenerate to that cell's own physical flux, exactly a
 zero-gradient condition.
 
-## GPU shaders (`src/kernels.hpp`)
+## Physics: Phase 1 (Schwarzschild)
+
+Schwarzschild coordinates `(t,r,theta,phi)`, `ds^2=-f dt^2+dr^2/f+r^2 dOmega^2`,
+`f=1-2M/r` (`G=c=1`), radial-only flow (spherical symmetry, `v^theta=v^phi=0`).
+**Chose Schwarzschild coordinates over the originally planned Kerr-Schild**:
+Schwarzschild is diagonal and static with zero shift, which makes the
+conserved-variable/flux/source-term derivation meaningfully lower-risk to
+get right from first principles than Kerr-Schild's off-diagonal `g_tr`
+term -- worth the trade for this phase, at the cost of not being
+horizon-penetrating (the grid's inner edge has to stay outside `r=2M`,
+fine for a Bondi-flow test with the sonic point well outside the horizon).
+Kerr forces genuinely more general coordinates anyway (Boyer-Lindquist is
+also off-diagonal), so Phase 2 was always going to need to handle that
+regardless -- this just defers it rather than taking it on twice.
+
+Conserved variables (same `v`/`W`/`h` definitions as flat SRHD --
+`v` is the physical, *locally* orthonormal-frame radial velocity measured
+by a static observer, not a coordinate velocity; only `D`,`S`,`tau` and the
+flux/source pick up the metric's `r`, `f`, `alpha=sqrt(f)` dependence):
+
+    D   = r^2 * rho * W / alpha
+    S   = r^2 * rho * h * W^2 * v
+    tau = r^2 * (rho*h*W^2 - P) - D
+
+    d_t D   + d_r(f*v*D)                 = 0
+    d_t S   + d_r(f*(v*S + r^2*P))       = -M*rho*h + 2*M*P + 2*f*P*r
+    d_t tau + d_r(f*(S - v*D))           = 0
+
+Derived from `nabla_mu T^munu = 0` (perfect fluid, projected onto the `r`
+and `t` directions with the standard Schwarzschild Christoffel symbols) and
+`nabla_mu(rho u^mu)=0` (baryon number, exactly source-free always). Cross-
+checked three independent ways before trusting it -- worth doing given how
+easy curved-spacetime source terms are to get subtly wrong, and how hard
+that is to notice from the numerics alone:
+
+1. **Newtonian limit**: as `M/r->0`, `h->1`, the momentum source
+   `-M*rho*h+2*M*P+2*f*P*r` reduces to `-rho*GM+2*P*r`, exactly the
+   classical spherical Euler momentum source (`-rho*GM/r^2` gravity plus
+   the `r^2*dP/dr` geometric pressure term), derived independently.
+2. **Killing-vector energy conservation**: the derivation initially gave
+   an awkward `tau` equation with an explicit `1/f` factor that didn't
+   match the clean conservative form the other two equations have; working
+   through it algebraically, the source term canceled to exactly zero.
+   That's not a coincidence to shrug off -- it has to be exactly zero,
+   because a stationary spacetime's timelike Killing vector guarantees an
+   exactly conserved current by Noether's theorem, with no source ever.
+   Getting a clean zero (rather than something merely small) was the
+   confirmation the algebra was actually right, not the risk that it
+   wasn't.
+3. **Flat-space limit**: stripping the `r^2` geometric factors (setting
+   `f=alpha=1`) from the `tau` flux reduces it to exactly Phase 0's
+   already-validated flat SRHD flux form -- a direct check against code
+   that was itself checked against an exact Newtonian solution.
+
+**The sonic-point condition was wrong on the first pass, and the fix is a
+good general lesson.** A remembered formula (`v_c^2=M/(2r_c)`,
+`cs_c^2=v_c^2/(1-3v_c^2)`) gave `v_c != cs_c` at the "sonic" point, which
+contradicts the very definition of a sonic point. Rather than trust the
+recollection, the critical-point condition was re-derived directly from
+the conserved-quantity equations (write `du/dr` as a ratio `N/D`; a finite
+`du/dr` at a point where `D=0` requires `N=0` there too) -- yielding the
+correct, self-consistent condition `u_c=cs_c` with
+`cs_c^2=M/(2*r_c-3*M)` (checked to reduce to the standard Newtonian
+`cs_c^2=M/(2*r_c)` as `r_c->infinity`). Using the wrong formula produced a
+profile with a visible, discontinuous jump exactly at `r_c` when sampled
+finely there; the corrected one is smooth and monotonic straight through
+it (see `tools/bondi_analytic.py`'s docstring for the full derivation).
+**Lesson: a formula recalled from memory that produces an internally
+inconsistent result (here, `v_c != cs_c` at a point defined by `v=cs`) is
+worth re-deriving from the equations you already trust, not patching or
+re-guessing.**
+
+**Outer boundary must be Dirichlet, not outflow.** The domain's outer edge
+(`r_max`) sits in the *subsonic* part of the flow, where one characteristic
+family is incoming from outside the domain -- a zero-gradient/outflow
+ghost state there is ill-posed (confirmed the hard way: it let mass
+visibly pile up at the outer edge over ~100 time units, then diverge --
+see Validation). Fixed by pinning the outer ghost state to the exact
+analytic solution at `r_max` (`tools/make_bondi_ic.py` appends it as an
+`N+1`-th IC record). The inner edge (`r_min<r_c`) stays plain outflow,
+correctly, since the flow is supersonic there and all characteristics
+already point outward.
+
+## GPU shaders (`src/kernels.hpp`, `src/kernels_schwarzschild.hpp`)
 
 Buffer layout (std430 SSBOs; `Cons0`/`Cons1` ping-pong the "current" state
 across substeps, `Stage1`/`Stage2` hold the RK2 intermediate states):
@@ -81,6 +177,14 @@ Each substep (`GrhdSim::RunOneRk2Step`): `ConsToPrim` -> `Fluxes` ->
 `EulerStep` (Stage1->Stage2) -> `Combine` (`0.5*(current+Stage2)` ->
 the other ping-pong slot).
 
+`kernels_schwarzschild.hpp` (`SchwarzschildSim`) reuses this exact buffer
+layout and RK2 pipeline (`ConsToPrim`/`Fluxes`/`EulerStep`/`Combine`) --
+only the per-cell/per-interface physics changes: `ConsToPrim` and `Fluxes`
+take extra `uM`/`uRmin`/`uDr` uniforms to compute `r`, `f`, `alpha` per
+cell/interface; `EulerStep` adds the momentum source term (reading `Prim`,
+an extra binding it didn't need in the flat case); `Fluxes` also takes a
+`uGhostHi` uniform for the outer Dirichlet boundary (see Physics above).
+
 ## Build & run
 
 ```sh
@@ -89,6 +193,7 @@ cmake --build build/release --target 07_grhd
 
 ./build/release/projects/07_grhd/07_grhd.exe --selftest
 
+# Phase 0: flat-spacetime shock tubes
 ./build/release/projects/07_grhd/07_grhd.exe \
     --deck decks/shocktube_relativistic.toml --out out/shocktube_relativistic
 python tools/plot_shocktube.py out/shocktube_relativistic
@@ -96,6 +201,17 @@ python tools/plot_shocktube.py out/shocktube_relativistic
 ./build/release/projects/07_grhd/07_grhd.exe \
     --deck decks/shocktube_newton_limit.toml --out out/shocktube_newton_limit
 python tools/plot_shocktube.py out/shocktube_newton_limit --newtonian
+
+# Phase 1: Schwarzschild Bondi accretion
+python tools/make_bondi_ic.py --M 1.0 --r_c 8.0 --gamma 1.4 \
+    --n 400 --r_min 3.0 --r_max 40.0 --out ic/bondi_rc8.bin
+./build/release/projects/07_grhd/07_grhd.exe \
+    --deck decks/bondi_schwarzschild.toml --out out/bondi_schwarzschild
+python tools/plot_bondi.py out/bondi_schwarzschild
+# movie: revolves the 1D radial rho(r) profile into a 2D density image
+# (the flow is genuinely spherically symmetric, so this is an honest
+# visualization, not an artistic liberty), event horizon marked
+python tools/make_bondi_movie.py out/bondi_schwarzschild
 ```
 
 ## Deck format
@@ -115,15 +231,34 @@ No external IC-generation tool is needed for this phase (unlike Tier 1's
 Lane-Emden sampling) -- a Riemann problem's initial condition is just two
 constant states, built directly in `GrhdSim::Configure` from the deck.
 
+Phase 1 (`decks/bondi_schwarzschild.toml`, `SchwarzschildSim`):
+
+```toml
+geometry = "schwarzschild"          # selects SchwarzschildSim instead of GrhdSim
+[grid]      n = 400  r_min = 3.0  r_max = 40.0   # r_min must be > 2*M
+[physics]   M = 1.0  gamma = 1.4
+[bondi]     ic_file = "ic/bondi_rc8.bin"   # tools/make_bondi_ic.py
+            r_c = 8.0                      # sonic radius (for tools/plot_bondi.py's reference overlay)
+[solver]    cons_to_prim_iters = 30
+[time]      cfl = 0.2  substeps_per_frame = 100  frames = 100
+```
+
+`bondi.ic_file` is `grid.n` cell records plus one extra outer-ghost record
+(`tools/make_bondi_ic.py`, see Physics' Dirichlet-boundary note above) --
+`grid.n`/`r_min`/`r_max`/`physics.M`/`gamma` must match what the IC was
+generated with, the same convention as Tier 1's `ic/*.bin`.
+
 ## Validation
 
-`--selftest` (GPU vs. an independent CPU double-precision reference, for
-both `ConsToPrim` and `Fluxes`, on 40 random mildly-relativistic cells --
-not a physics validation, just a check the GPU shaders implement the
-documented formulas correctly):
+`--selftest` runs both geometries' GPU-vs-CPU cross-checks (independent
+double-precision reference for `ConsToPrim` and `Fluxes`, 40 random
+mildly-relativistic cells each -- not a physics validation, just a check
+the GPU shaders implement the documented formulas correctly):
 
     selftest: max relative error  prim_vs_cpu=3.4e-07  prim_vs_truth=3.6e-07  flux=2.3e-06
     selftest: PASS
+    selftest (schwarzschild): max relative error  prim_vs_cpu=1.9e-07  prim_vs_truth=2.0e-07  flux=8.6e-07
+    selftest (schwarzschild): PASS
 
 `prim_vs_truth` recovers the *original* `(rho,v,P)` the conserved
 variables were built from, not just agreement between two implementations
@@ -173,16 +308,47 @@ predicts first.
 
 **Known simplifications**, to be addressed as needed in later phases:
 first-order-in-space reconstruction (a slope limiter, e.g. minmod/MC, would
-sharpen the contact/shock -- worth adding if Phase 1's curved-spacetime
-tests need it); no adaptive timestep (see Physics above); HLLE rather than
-HLLC (no resolved contact wave); 1D only (Phase 1 will need at least 2D for
-a non-trivial curved-spacetime test problem).
+sharpen the contact/shock -- also the likely source of Phase 1's ~4%
+accretion-rate spread, see below); no adaptive timestep (see Physics
+above); HLLE rather than HLLC (no resolved contact wave); 1D only (Phase 2
+will need at least 2D for a non-axisymmetric Kerr test, or an assumption of
+equatorial-plane confinement).
+
+## Validation: Phase 1 (Schwarzschild Bondi accretion)
+
+`decks/bondi_schwarzschild.toml`: `M=1`, sonic radius `r_c=8` (`Mdot=16`,
+`Be=1.116`, `K=0.068` at the sonic point), grid `r in [3,40]` (`N=400`),
+evolved to `t=183` (~100+ settling/free-fall times at the inner edge).
+
+The analytic solution itself (`tools/bondi_analytic.py`) is self-checked
+before being trusted: `Mdot`, `Be`, `K` evaluated along the constructed
+profile agree with their sonic-point values to `~1e-16` (machine
+precision) at every sampled radius, and the profile is smooth and strictly
+monotonic through `r_c` (not true of the first, wrong sonic-point formula
+-- see Physics above).
+
+| check | result |
+|---|---|
+| profile match, `t=0` (IC) vs. `t=183` | visually indistinguishable from the analytic Bondi solution across the whole domain (`tools/plot_bondi.py`'s overlay) -- density spans a factor of ~10.7 from `r=3` to `r=40` |
+| final-frame max relative error vs. analytic | `rho: 0.63%`  `v: 1.9%` |
+| accretion-rate uniformity (`f*v*D`, exactly constant in `r` in the true steady state) | spread `(max-min)/mean` rises from `0` to `~4%` within the first ~20 time units, then stays flat (`3.9%-4.0%`) for the remaining ~160 time units -- a small, stable first-order-discretization offset, not a growing instability |
+| NaN/blowup | none (after the boundary fix below) |
+
+**Found and fixed a real bug**: the first version of this test used plain
+outflow at both domain edges and mass visibly piled up at the outer edge
+over ~100 time units (density there rising monotonically, `mdot` spread
+growing past `200%` and eventually diverging to `O(100-1000)` -- a real,
+reproducible blowup, not a subtle drift). Root cause and fix: see Physics
+above (the outer edge is subsonic, needs a Dirichlet ghost state, not
+outflow). After the fix, `mdot` spread the first frame is `2e-7`
+(essentially the exact IC) and settles to a flat `~4%`, confirming the fix
+addressed the actual mechanism rather than just delaying the symptom.
 
 ## Progress
 
 - [x] Valencia conservative variables, HLLE flux, Newton-Raphson primitive recovery, RK2 time integration -- all GPU compute shaders, validated against an independent CPU reference (`--selftest`)
 - [x] Newtonian-limit validation against an exact Riemann solver (`tools/exact_riemann_newtonian.py`, itself checked against the classic Sod reference values)
 - [x] relativistic shock tube: correct qualitative wave structure (rarefaction/contact/shock), no NaN, conservation validated including the open-boundary momentum-forcing check
-- [ ] Phase 1: add a fixed Schwarzschild metric (Kerr-Schild coordinates, horizon-penetrating) -- geometric source terms, metric-dependent fluxes -- validated against the analytic steady-state relativistic Bondi accretion solution
-- [ ] Phase 2: extend to Kerr (`a != 0`); validate against a Fishbone-Moncrief equilibrium torus sitting still (no spurious drift)
+- [x] Phase 1: fixed Schwarzschild metric (Schwarzschild coordinates, not the originally planned Kerr-Schild -- see Physics above for why), conserved variables/flux/momentum source term derived from first principles and cross-checked three ways, validated against the analytic Bondi accretion solution per the table above; found and fixed a real outer-boundary instability and a wrong sonic-point formula along the way
+- [ ] Phase 2: extend to Kerr (`a != 0`), genuinely off-diagonal/non-static coordinates this time (Boyer-Lindquist or Kerr-Schild); validate against a Fishbone-Moncrief equilibrium torus sitting still (no spurious drift)
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff

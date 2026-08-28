@@ -1,0 +1,30 @@
+title = "GRHD Tier 2 Phase 1 -- relativistic Bondi accretion, Schwarzschild M=1"
+
+# Radial accretion of a Gamma-law gas onto a Schwarzschild black hole
+# (M=1, geometrized units), initialized to the exact analytic Bondi
+# solution (tools/make_bondi_ic.py, sonic radius r_c=8) and evolved --
+# the check is whether it holds steady (see tools/plot_bondi.py), the
+# same "settle then verify it's a genuine equilibrium" methodology
+# 06_tidal_disruption used for its SPH star.
+geometry = "schwarzschild"
+
+[grid]
+n = 400
+r_min = 3.0
+r_max = 40.0
+
+[physics]
+M = 1.0
+gamma = 1.4
+
+[bondi]
+ic_file = "ic/bondi_rc8.bin"
+r_c = 8.0
+
+[solver]
+cons_to_prim_iters = 30
+
+[time]
+cfl = 0.2
+substeps_per_frame = 100
+frames = 100
