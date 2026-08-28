@@ -8,6 +8,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -97,9 +98,18 @@ private:
     std::vector<glm::vec4> m_rhoPressCpu;
     std::vector<float> m_hCpu;
 
-    // Interactive view.
+    // Interactive view. fw::ParticleCloud's constructor calls OpenGL
+    // functions immediately (shader compile, glGenVertexArrays/Buffers), so
+    // it cannot be a plain default-constructed member: main.cpp's
+    // interactive path constructs TdeSim before fw::SimApp creates the
+    // window and loads GL function pointers, which made this crash with
+    // an access violation (glad's pointers are still null at that point).
+    // Headless mode never hit this -- it creates the GL context before
+    // constructing TdeSim. Deferred construction to Configure() (which by
+    // contract always runs after a valid current GL context exists, in
+    // both modes) fixes it.
     fw::Camera m_camera;
-    fw::ParticleCloud m_particles;
+    std::unique_ptr<fw::ParticleCloud> m_particles;
 };
 
 } // namespace tde
