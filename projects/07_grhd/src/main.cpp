@@ -1,6 +1,8 @@
 #include "GrhdSim.hpp"
+#include "KerrEquatorialSim.hpp"
 #include "SchwarzschildSim.hpp"
 #include "kernels.hpp"
+#include "kernels_kerr.hpp"
 #include "kernels_schwarzschild.hpp"
 
 #include "framework/ComputeShader.hpp"
@@ -396,6 +398,220 @@ bool SelfTestSchwarzschild() {
     return ok;
 }
 
+// CPU (double-precision) reference for kernels_kerr.hpp's Kerr-equatorial
+// primitive recovery and HLLE flux -- cross-checks only, not a physics
+// validation (that is decks/kerr_circular_orbit.toml +
+// tools/plot_kerr_orbit.py, checked against the independently-derived
+// circular-orbit solution; see README.md).
+struct KerrMetricRef { double gtt, gtphi, grr, gphiphi; };
+KerrMetricRef KerrMetricAt(double r, double M, double a) {
+    const double Delta = r * r - 2.0 * M * r + a * a;
+    KerrMetricRef m;
+    m.gtt = -(1.0 - 2.0 * M / r);
+    m.gtphi = -2.0 * M * a / r;
+    m.grr = r * r / Delta;
+    m.gphiphi = r * r + a * a + 2.0 * M * a * a / r;
+    return m;
+}
+void ZamoAtRef(double r, double M, double a, double& alpha, double& betaPhiUp, double& gammaRr,
+               double& gammaPhiphi, double& gTphi) {
+    const KerrMetricRef m = KerrMetricAt(r, M, a);
+    const double Delta = r * r - 2.0 * M * r + a * a;
+    const double A = (r * r + a * a) * (r * r + a * a) - a * a * Delta;
+    alpha = std::sqrt(r * r * Delta / A);
+    betaPhiUp = m.gtphi / m.gphiphi;
+    gammaRr = m.grr;
+    gammaPhiphi = m.gphiphi;
+    gTphi = m.gtphi;
+}
+void KinematicsRef(const glm::dvec4& prim, double r, double M, double a, double gamma, double& W, double& h,
+                    double& ut, double& ur, double& uPhiContra, double& urCov, double& uPhiCov, double& E) {
+    const double rho = prim.x, vr = prim.y, vphi = prim.z, P = prim.w;
+    double alpha, betaPhiUp, gammaRr, gammaPhiphi, gTphi;
+    ZamoAtRef(r, M, a, alpha, betaPhiUp, gammaRr, gammaPhiphi, gTphi);
+    W = 1.0 / std::sqrt(std::clamp(1.0 - vr * vr - vphi * vphi, 1e-10, 1.0));
+    h = 1.0 + gamma * P / ((gamma - 1.0) * rho);
+    ut = W / alpha;
+    ur = W * vr / std::sqrt(gammaRr);
+    uPhiContra = W * vphi / std::sqrt(gammaPhiphi) - W * betaPhiUp / alpha;
+    urCov = W * std::sqrt(gammaRr) * vr;
+    uPhiCov = W * std::sqrt(gammaPhiphi) * vphi;
+    E = W * (alpha - gTphi * vphi / std::sqrt(gammaPhiphi));
+}
+
+glm::dvec4 RecoverPrimitivesKerrRef(double D, double Sr, double L, double tau, double pGuess, double r, double M,
+                                     double a, double gamma, int iters) {
+    double alpha, betaPhiUp, gammaRr, gammaPhiphi, gTphi;
+    ZamoAtRef(r, M, a, alpha, betaPhiUp, gammaRr, gammaPhiphi, gTphi);
+    const double r2 = r * r;
+    const double kappa = Sr / D, lam = L / D;
+    const double K = kappa * kappa / gammaRr + lam * lam / gammaPhiphi;
+
+    auto residual = [&](double h) {
+        const double W0 = std::sqrt(1.0 + K / (h * h));
+        const double rho0 = D * alpha / (r2 * W0);
+        const double eps0 = (h - 1.0) / gamma;
+        const double P0 = (gamma - 1.0) * rho0 * eps0;
+        const double Q0 = (tau + D + r2 * P0) / D;
+        return Q0 / h - (W0 * alpha - gTphi * lam / (h * gammaPhiphi));
+    };
+
+    const double rhoGuess = D * alpha / (r2 * std::sqrt(1.0 + K));
+    double h = 1.0 + gamma * std::max(pGuess, 1e-12) / ((gamma - 1.0) * rhoGuess);
+    for (int it = 0; it < iters; ++it) {
+        const double f0 = residual(h);
+        const double dh = std::max(1e-6 * std::abs(h), 1e-9);
+        const double fPlus = residual(h + dh);
+        const double fMinus = residual(h - dh);
+        const double deriv = (fPlus - fMinus) / (2.0 * dh);
+        if (std::abs(deriv) > 1e-12) h = std::max(h - f0 / deriv, 1.0 + 1e-9);
+    }
+    const double W = std::sqrt(1.0 + K / (h * h));
+    const double rho = D * alpha / (r2 * W);
+    const double vr = kappa / (h * W * std::sqrt(gammaRr));
+    const double vphi = lam / (h * W * std::sqrt(gammaPhiphi));
+    const double eps = (h - 1.0) / gamma;
+    const double P = (gamma - 1.0) * rho * eps;
+    return glm::dvec4(rho, vr, vphi, P);
+}
+
+void SideFluxKerrRef(const glm::dvec4& prim, double r, double M, double a, double gamma, glm::dvec4& U,
+                      glm::dvec4& F) {
+    double W, h, ut, ur, uPhiContra, urCov, uPhiCov, E;
+    KinematicsRef(prim, r, M, a, gamma, W, h, ut, ur, uPhiContra, urCov, uPhiCov, E);
+    const double rho = prim.x, P = prim.w;
+    const double r2 = r * r;
+    const double D = r2 * rho * ut;
+    const double Sr = r2 * rho * h * ut * urCov;
+    const double L = r2 * rho * h * ut * uPhiCov;
+    const double tau = r2 * rho * h * ut * E - r2 * P - D;
+    U = glm::dvec4(D, Sr, L, tau);
+    const double FD = r2 * rho * ur;
+    const double FSr = r2 * (rho * h * ur * urCov + P);
+    const double FL = r2 * rho * h * ur * uPhiCov;
+    const double Ftau = r2 * rho * ur * (h * E - 1.0);
+    F = glm::dvec4(FD, FSr, FL, Ftau);
+}
+
+glm::dvec4 HlleFluxKerrRef(const glm::dvec4& primL, const glm::dvec4& primR, double r, double M, double a,
+                            double gamma) {
+    glm::dvec4 UL, UR, FL, FR;
+    SideFluxKerrRef(primL, r, M, a, gamma, UL, FL);
+    SideFluxKerrRef(primR, r, M, a, gamma, UR, FR);
+    const KerrMetricRef m = KerrMetricAt(r, M, a);
+    const double fPhoton = std::sqrt(-m.gtt / m.grr);
+    const double sL = -fPhoton, sR = fPhoton;
+    return (sR * FL - sL * FR + sL * sR * (UR - UL)) / (sR - sL);
+}
+
+// Random mildly-relativistic cells on a grid with real spin, GPU vs. CPU
+// double-precision reference, same structure as SelfTest()/
+// SelfTestSchwarzschild() above.
+bool SelfTestKerrEquatorial() {
+    constexpr int N = 40;
+    constexpr int ITERS = 40;
+    constexpr double GAMMA = 4.0 / 3.0;
+    constexpr double M = 1.0, A = 0.7, R_MIN = 6.0, DR = 0.3; // r in [6, 6+40*0.3)=[6,18)
+
+    std::mt19937 rng(11);
+    std::uniform_real_distribution<double> rhoDist(0.5, 2.0);
+    std::uniform_real_distribution<double> vrDist(-0.2, 0.2);
+    std::uniform_real_distribution<double> vphiDist(0.1, 0.4);
+    std::uniform_real_distribution<double> pDist(0.02, 0.2);
+
+    std::vector<glm::dvec4> prim0(N);
+    std::vector<glm::vec4> cons(N);
+    std::vector<double> rCell(N);
+    for (int i = 0; i < N; ++i) {
+        rCell[i] = R_MIN + (i + 0.5) * DR;
+        const double rho = rhoDist(rng), vr = vrDist(rng), vphi = vphiDist(rng), p = pDist(rng);
+        prim0[i] = glm::dvec4(rho, vr, vphi, p);
+        glm::dvec4 U, F;
+        SideFluxKerrRef(prim0[i], rCell[i], M, A, GAMMA, U, F);
+        cons[i] = glm::vec4(static_cast<float>(U.x), static_cast<float>(U.y), static_cast<float>(U.z),
+                             static_cast<float>(U.w));
+    }
+
+    std::vector<glm::dvec4> primRef(N);
+    for (int i = 0; i < N; ++i) {
+        primRef[i] = RecoverPrimitivesKerrRef(cons[i].x, cons[i].y, cons[i].z, cons[i].w, prim0[i].w, rCell[i], M, A,
+                                               GAMMA, ITERS);
+    }
+    std::vector<glm::dvec4> fluxRef(N + 1);
+    for (int i = 0; i <= N; ++i) {
+        const int iL = (i == 0) ? 0 : (i - 1);
+        const int iR = (i == N) ? (N - 1) : i;
+        const double rFace = R_MIN + i * DR;
+        fluxRef[i] = HlleFluxKerrRef(primRef[iL], primRef[iR], rFace, M, A, GAMMA);
+    }
+
+    fw::ComputeShader consToPrim = fw::ComputeShader::FromSource(grhd::kernels_kerr::ConsToPrim());
+    fw::ComputeShader fluxes = fw::ComputeShader::FromSource(grhd::kernels_kerr::Fluxes());
+    GLuint bufCons = 0, bufPrim = 0, bufFlux = 0;
+    glCreateBuffers(1, &bufCons);
+    glCreateBuffers(1, &bufPrim);
+    glCreateBuffers(1, &bufFlux);
+    glNamedBufferData(bufCons, N * sizeof(glm::vec4), cons.data(), GL_STATIC_DRAW);
+    std::vector<glm::vec4> primSeed(N);
+    for (int i = 0; i < N; ++i) primSeed[i] = glm::vec4(0.0f, 0.0f, 0.0f, static_cast<float>(prim0[i].w));
+    glNamedBufferData(bufPrim, N * sizeof(glm::vec4), primSeed.data(), GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufFlux, (N + 1) * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+
+    const GLuint groupsN = static_cast<GLuint>((N + grhd::kernels_kerr::kWorkgroupSize - 1) / grhd::kernels_kerr::kWorkgroupSize);
+    const GLuint groupsNp1 =
+        static_cast<GLuint>((N + 1 + grhd::kernels_kerr::kWorkgroupSize - 1) / grhd::kernels_kerr::kWorkgroupSize);
+
+    consToPrim.Use();
+    consToPrim.SetInt("uN", N);
+    consToPrim.SetFloat("uGamma", static_cast<float>(GAMMA));
+    consToPrim.SetFloat("uM", static_cast<float>(M));
+    consToPrim.SetFloat("uA", static_cast<float>(A));
+    consToPrim.SetFloat("uRmin", static_cast<float>(R_MIN));
+    consToPrim.SetFloat("uDr", static_cast<float>(DR));
+    consToPrim.SetInt("uIters", ITERS);
+    fw::ComputeShader::BindBuffer(0, bufCons);
+    fw::ComputeShader::BindBuffer(4, bufPrim);
+    consToPrim.Dispatch(groupsN);
+    fw::ComputeShader::Barrier();
+
+    fluxes.Use();
+    fluxes.SetInt("uN", N);
+    fluxes.SetFloat("uGamma", static_cast<float>(GAMMA));
+    fluxes.SetFloat("uM", static_cast<float>(M));
+    fluxes.SetFloat("uA", static_cast<float>(A));
+    fluxes.SetFloat("uRmin", static_cast<float>(R_MIN));
+    fluxes.SetFloat("uDr", static_cast<float>(DR));
+    fw::ComputeShader::BindBuffer(4, bufPrim);
+    fw::ComputeShader::BindBuffer(5, bufFlux);
+    fluxes.Dispatch(groupsNp1);
+    fw::ComputeShader::Barrier();
+
+    std::vector<glm::vec4> primGpu(N), fluxGpu(N + 1);
+    glGetNamedBufferSubData(bufPrim, 0, N * sizeof(glm::vec4), primGpu.data());
+    glGetNamedBufferSubData(bufFlux, 0, (N + 1) * sizeof(glm::vec4), fluxGpu.data());
+    glDeleteBuffers(1, &bufCons);
+    glDeleteBuffers(1, &bufPrim);
+    glDeleteBuffers(1, &bufFlux);
+
+    double primErr = 0.0, recoveryErr = 0.0, fluxErr = 0.0;
+    for (int i = 0; i < N; ++i) {
+        const glm::dvec4 gpu(primGpu[i].x, primGpu[i].y, primGpu[i].z, primGpu[i].w);
+        primErr = std::max(primErr, glm::length(gpu - primRef[i]) / glm::length(primRef[i]));
+        recoveryErr = std::max(recoveryErr, glm::length(gpu - prim0[i]) / glm::length(prim0[i]));
+    }
+    for (int i = 0; i <= N; ++i) {
+        const glm::dvec4 gpu(fluxGpu[i].x, fluxGpu[i].y, fluxGpu[i].z, fluxGpu[i].w);
+        const double refNorm = std::max(glm::length(fluxRef[i]), 1e-10);
+        fluxErr = std::max(fluxErr, glm::length(gpu - fluxRef[i]) / refNorm);
+    }
+
+    std::printf("selftest (kerr equatorial): max relative error  prim_vs_cpu=%.3e  prim_vs_truth=%.3e  flux=%.3e\n",
+                primErr, recoveryErr, fluxErr);
+    const bool ok = primErr < 1e-4 && recoveryErr < 1e-4 && fluxErr < 1e-4;
+    std::printf("selftest (kerr equatorial): %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -405,7 +621,8 @@ int main(int argc, char** argv) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
         const bool flatOk = SelfTest();
         const bool schOk = SelfTestSchwarzschild();
-        return (flatOk && schOk) ? 0 : 1;
+        const bool kerrOk = SelfTestKerrEquatorial();
+        return (flatOk && schOk && kerrOk) ? 0 : 1;
     }
 
     if (a.deck.empty()) {
@@ -414,17 +631,22 @@ int main(int argc, char** argv) {
                      "  07_grhd --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  07_grhd --interactive --deck <f.toml>\n"
                      "  07_grhd --selftest\n"
-                     "deck's [geometry] key selects the solver: \"flat\" (default, Phase 0) "
-                     "or \"schwarzschild\" (Phase 1).\n");
+                     "deck's [geometry] key selects the solver: \"flat\" (default, Phase 0), "
+                     "\"schwarzschild\" (Phase 1), or \"kerr_equatorial\" (Phase 2a).\n");
         return 2;
     }
 
     fw::Deck deck = fw::Deck::FromFile(a.deck);
     const std::string geometry = deck.GetString("geometry", "flat");
     const bool schwarzschild = (geometry == "schwarzschild");
+    const bool kerrEquatorial = (geometry == "kerr_equatorial");
 
     if (a.interactive) {
-        if (schwarzschild) {
+        if (kerrEquatorial) {
+            grhd::KerrEquatorialSim sim;
+            fw::SimApp app(sim, deck, deck.GetString("title", "GRHD -- Kerr equatorial circular orbit"));
+            app.Run();
+        } else if (schwarzschild) {
             grhd::SchwarzschildSim sim;
             fw::SimApp app(sim, deck, deck.GetString("title", "GRHD -- Schwarzschild Bondi flow"));
             app.Run();
@@ -447,6 +669,11 @@ int main(int argc, char** argv) {
     opts.frames = a.frames;
     opts.substeps = a.substeps;
 
+    if (kerrEquatorial) {
+        grhd::KerrEquatorialSim sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
     if (schwarzschild) {
         grhd::SchwarzschildSim sim;
         sim.Configure(deck);

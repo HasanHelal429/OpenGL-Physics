@@ -1,4 +1,4 @@
-# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-1)
+# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2a)
 
 This is Tier 2 of the tidal-disruption project (see
 `06_tidal_disruption/README.md`'s tier table): fluid on a fixed
@@ -31,6 +31,27 @@ outer boundary condition that let mass pile up and eventually diverge (see
 Validation below) -- and, in deriving the curved-spacetime equations from
 first principles, caught a mis-remembered sonic-point formula before it
 ever reached code (see Physics below).
+
+**Phase 2a (done): Kerr, restricted to the equatorial plane.** Full Kerr
+(nonzero spin) is a bigger jump than Phase 1 was: it's only axisymmetric,
+not spherically symmetric, and the eventual Fishbone-Moncrief equilibrium
+torus is a genuinely 2D (r,theta) structure with real thickness away from
+the equatorial plane. Rather than take that whole jump at once, this phase
+restricts to the equatorial plane (theta=pi/2) -- an exact invariant
+submanifold of Kerr (reflection symmetry keeps v^theta=0 fluid exactly
+there), which keeps the numerics "1D in r" like Phases 0-1, at the cost of
+not yet being able to represent a torus's finite thickness (the actual
+Fishbone-Moncrief validation is deferred to Phase 2b). Validated against
+exact circular geodesic orbits, derived independently via the
+effective-potential double-root condition rather than trusting a recalled
+closed form (Bardeen-Press-Teukolsky give one, but see Phase 1's own
+sonic-point mistake above for why that habit changed). Kerr's off-diagonal
+metric made this derivation considerably more error-prone than
+Schwarzschild's -- it caught two further mistakes before they reached
+code (a sign error in the frame-dragging shift, a missing factor in the
+specific-energy formula), both described in Physics below, both caught by
+cross-checking against independently-verified results rather than by
+proofreading the algebra.
 
 ## Physics
 
@@ -162,7 +183,99 @@ analytic solution at `r_max` (`tools/make_bondi_ic.py` appends it as an
 correctly, since the flow is supersonic there and all characteristics
 already point outward.
 
-## GPU shaders (`src/kernels.hpp`, `src/kernels_schwarzschild.hpp`)
+## Physics: Phase 2a (Kerr, equatorial plane)
+
+Boyer-Lindquist coordinates, restricted to `theta=pi/2`:
+
+    g_tt=-(1-2M/r)   g_tphi=-2Ma/r   g_rr=r^2/Delta   g_phiphi=r^2+a^2+2Ma^2/r
+    Delta=r^2-2Mr+a^2
+
+Frame dragging (`g_tphi != 0`) means the fluid now has two physical
+(ZAMO-frame) velocity components, `v_r` and `v_phi`,
+`W=1/sqrt(1-v_r^2-v_phi^2)`. Conserved variables, mixed-index
+`T^mu_nu=rho*h*u^mu*u_nu+P*delta^mu_nu` (still "areal", `r^2`-inclusive):
+
+    D   = r^2 * rho * u^t                     (baryon current -- always source-free)
+    Sr  = r^2 * T^t_r   = r^2*rho*h*u^t*u_r    (radial momentum -- the only one with a source)
+    L   = r^2 * T^t_phi = r^2*rho*h*u^t*u_phi  (angular momentum -- source-free: phi is a Killing direction too)
+    tau = -r^2*T^t_t - D                       (source-free: t-Killing, same argument as Phase 1)
+
+with (from the general 3+1 relation `u^mu=W(n^mu+v^mu)`, worked out fully
+in `tools/kerr_equatorial_ref.py`):
+
+    u^t=W/alpha   u_r=W*sqrt(gamma_rr)*v_r   u_phi=W*sqrt(gamma_phiphi)*v_phi
+    E:=-u_t = W*(alpha - g_tphi*v_phi/sqrt(gamma_phiphi))
+
+**Avoided hand-derived Christoffel symbols entirely.** Kerr's off-diagonal
+metric makes the standard symbolic Christoffel-symbol algebra considerably
+more error-prone than Schwarzschild's diagonal case -- borne out in
+practice (see the two bugs below, both found in derivations that used
+closed-form algebra, neither in the numerical parts). So the one place a
+geometric source term is actually needed (the radial momentum equation)
+uses the standard symmetric-tensor identity
+`Gamma^lambda_{mu r} T^mu_lambda = 0.5*T^ab*d(g_ab)/dr`, with the metric
+derivative taken by **central finite difference of the metric components
+themselves** -- which are the textbook Kerr metric definition, not a
+derived quantity, so there is nothing left to get subtly wrong. The exact
+same numerical approach is used in `tools/kerr_metric_check.py` (Python
+reference) and `src/kernels_kerr.hpp` (the actual shader), so the two are
+provably doing the same computation, not just two independent
+transcriptions of one formula that could silently diverge.
+
+**Two more mistakes caught before reaching code** (on top of Phase 1's
+sonic-point one), both while deriving the primitive<->conserved relations
+above, both caught by cross-checking against the independently-derived
+circular-orbit solution (`tools/kerr_orbits.py`) rather than by
+proofreading the algebra:
+- **Wrong sign in the shift.** The standard ADM relation is
+  `beta_phi=g_tphi` (no extra minus sign), but an early derivation used
+  `beta^phi=-g_tphi/gamma_phiphi`. The giveaway wasn't a failed check --
+  it was that a simplification that *should* have collapsed cleanly
+  (`u_phi` reducing to the same simple form as `u_r`) kept leaving behind
+  an extra term instead. That "this should be simpler than it is" feeling
+  turned out to be correct; fixing the sign made the extra term cancel
+  exactly.
+- **Missing factor of `W`.** The first version of the `E` formula was
+  `W*alpha - g_tphi*v_phi/sqrt(gamma_phiphi)` (missing a `W` on the second
+  term). This one passed a self-consistency round-trip test (build
+  conserved variables from primitives, recover primitives, compare) to
+  within ~0.1-0.3% for nonzero spin -- close enough to look like normal
+  solver-tolerance noise, *not* an error, unless directly compared against
+  the independently-trusted circular-orbit `E`. Lesson: a round-trip test
+  where both directions share the same bug doesn't catch that bug -- it
+  takes an independent reference to catch a self-consistent-but-wrong
+  formula.
+
+**HLLE wave speed: a deliberately conservative simplification.** Getting
+the *tight* multi-dimensional characteristic speed right (the actual
+flux-Jacobian eigenvalues for this coupled 4-variable system) needs the
+correct local-ZAMO-frame-to-coordinate-frame conversion factor for a
+signal moving partly radially and partly azimuthally -- and unlike
+Schwarzschild, where that factor was a single clean multiplier (`f`) that
+came directly out of the flux derivation, Kerr's shift breaks that
+simplicity (worked through two candidate conversion factors that
+disagreed with each other, without a clean way to tell which was right
+without further risky derivation). Rather than accept that risk for a
+Phase-2a validation target, this uses a manifestly safe bound instead: the
+exact coordinate speed of a purely radial photon,
+`sqrt(-g_tt/g_rr)` (from the null condition with `dphi=0` -- exact, not an
+approximation, and `g_tphi`/`g_phiphi` drop out entirely since there's no
+azimuthal motion to couple to). No physical signal exceeds this, so it's
+always a stable bound -- at the cost of more numerical diffusion than a
+tight bound would give, a known, visible-in-the-results trade-off (see
+Validation below), not a hidden one.
+
+**Known simplification: no self-consistent equilibrium density/pressure
+profile.** A circular orbit's *velocity* is exactly determined by geodesic
+motion regardless of density or pressure, but a real equilibrium disk
+additionally needs its pressure gradient to exactly balance the residual
+radial force at every radius -- that is exactly the Fishbone-Moncrief
+construction, deferred to Phase 2b (it also needs actual 2D structure).
+This phase's initial condition uses arbitrary constant density/pressure
+instead, which is not that equilibrium -- see Validation below for what
+that costs quantitatively.
+
+## GPU shaders (`src/kernels.hpp`, `src/kernels_schwarzschild.hpp`, `src/kernels_kerr.hpp`)
 
 Buffer layout (std430 SSBOs; `Cons0`/`Cons1` ping-pong the "current" state
 across substeps, `Stage1`/`Stage2` hold the RK2 intermediate states):
@@ -212,6 +325,14 @@ python tools/plot_bondi.py out/bondi_schwarzschild
 # (the flow is genuinely spherically symmetric, so this is an honest
 # visualization, not an artistic liberty), event horizon marked
 python tools/make_bondi_movie.py out/bondi_schwarzschild
+
+# Phase 2a: Kerr equatorial circular orbit
+python tools/make_kerr_orbit_ic.py --M 1.0 --a 0.7 --gamma 1.333333 \
+    --n 400 --r_min 6.0 --r_max 20.0 --rho 1.0 --p 0.01 --out ic/kerr_ring_a07.bin
+./build/release/projects/07_grhd/07_grhd.exe \
+    --deck decks/kerr_circular_orbit.toml --out out/kerr_circular_orbit
+python tools/plot_kerr_orbit.py out/kerr_circular_orbit
+python tools/make_kerr_orbit_movie.py out/kerr_circular_orbit
 ```
 
 ## Deck format
@@ -248,9 +369,28 @@ geometry = "schwarzschild"          # selects SchwarzschildSim instead of GrhdSi
 `grid.n`/`r_min`/`r_max`/`physics.M`/`gamma` must match what the IC was
 generated with, the same convention as Tier 1's `ic/*.bin`.
 
+Phase 2a (`decks/kerr_circular_orbit.toml`, `KerrEquatorialSim`):
+
+```toml
+geometry = "kerr_equatorial"
+[grid]      n = 400  r_min = 6.0  r_max = 20.0   # r_min must clear the ISCO/photon region for this spin
+[physics]   M = 1.0  a = 0.7  gamma = 1.333333
+[kerr]      ic_file = "ic/kerr_ring_a07.bin"      # tools/make_kerr_orbit_ic.py
+[solver]    cons_to_prim_iters = 40
+[time]      cfl = 0.2  substeps_per_frame = 400  frames = 200
+```
+
+`kerr.ic_file` is `grid.n` records of `(rho, v_r, v_phi, P)` -- no outer
+ghost record needed here (unlike Phase 1's Bondi flow), since there's no
+bulk radial accretion in this test to make the boundary treatment matter
+the same way; plain outflow at both ends. Pick `time.substeps_per_frame *
+time.frames * (time.cfl*dr)` to cover several orbital periods at
+`r_min` (the fastest, most dynamically demanding radius) -- the deck's own
+comment shows the estimate used here.
+
 ## Validation
 
-`--selftest` runs both geometries' GPU-vs-CPU cross-checks (independent
+`--selftest` runs all three geometries' GPU-vs-CPU cross-checks (independent
 double-precision reference for `ConsToPrim` and `Fluxes`, 40 random
 mildly-relativistic cells each -- not a physics validation, just a check
 the GPU shaders implement the documented formulas correctly):
@@ -259,6 +399,8 @@ the GPU shaders implement the documented formulas correctly):
     selftest: PASS
     selftest (schwarzschild): max relative error  prim_vs_cpu=1.9e-07  prim_vs_truth=2.0e-07  flux=8.6e-07
     selftest (schwarzschild): PASS
+    selftest (kerr equatorial): max relative error  prim_vs_cpu=2.9e-07  prim_vs_truth=3.1e-07  flux=3.8e-06
+    selftest (kerr equatorial): PASS
 
 `prim_vs_truth` recovers the *original* `(rho,v,P)` the conserved
 variables were built from, not just agreement between two implementations
@@ -310,9 +452,10 @@ predicts first.
 first-order-in-space reconstruction (a slope limiter, e.g. minmod/MC, would
 sharpen the contact/shock -- also the likely source of Phase 1's ~4%
 accretion-rate spread, see below); no adaptive timestep (see Physics
-above); HLLE rather than HLLC (no resolved contact wave); 1D only (Phase 2
-will need at least 2D for a non-axisymmetric Kerr test, or an assumption of
-equatorial-plane confinement).
+above); HLLE rather than HLLC (no resolved contact wave); 1D only (Phase 2a
+handled Kerr by staying in the equatorial plane rather than going 2D --
+see its own Physics/Validation sections -- and the actual Fishbone-Moncrief
+torus will need real 2D structure, deferred to Phase 2b).
 
 ## Validation: Phase 1 (Schwarzschild Bondi accretion)
 
@@ -344,11 +487,47 @@ outflow). After the fix, `mdot` spread the first frame is `2e-7`
 (essentially the exact IC) and settles to a flat `~4%`, confirming the fix
 addressed the actual mechanism rather than just delaying the symptom.
 
+## Validation: Phase 2a (Kerr equatorial circular orbit)
+
+`decks/kerr_circular_orbit.toml`: `M=1`, `a=0.7M`, grid `r in [6,20]`
+(`N=400`, comfortably outside the ISCO for this spin), every cell
+initialized on its own exact circular geodesic (`v_r=0`, `v_phi` from
+`tools/kerr_orbits.py`), constant `rho=1`, `P=0.01` (not a real
+equilibrium profile -- see Physics above), evolved to `t=557` (~6 orbital
+periods at the fast, demanding inner edge).
+
+`tools/kerr_orbits.py` itself is validated before being trusted: the
+circular-orbit solve reproduces published Kerr ISCO radii (e.g. `a=0.9M`:
+prograde `2.32M`, matching standard tables) despite being derived from
+scratch via the effective-potential double-root condition, not by
+reproducing a textbook formula; `tools/kerr_metric_check.py` separately
+confirms the numerically-differentiated Christoffels give exactly zero
+radial 4-acceleration for these orbits (`~1e-12`, floating-point noise).
+
+| check | result |
+|---|---|
+| NaN/blowup | none, over the full 6-orbit run |
+| `v_phi` profile shape, `t=0` vs. `t=557` | tracks the exact circular-orbit curve closely at both times (`tools/plot_kerr_orbit.py`'s overlay); final-frame max relative error vs. exact `2.4%` |
+| `max|v_r|` across the grid vs. time | rises from `0` to a peak `~0.034` within the first orbital period (the initial adjustment away from the non-equilibrium constant-density IC), then damps into a bounded oscillation around `~0.023-0.024` for the remaining ~5 orbits -- not growing, not diverging |
+| radial velocity profile shape | smooth and monotonic, negative (slow inward drift) at the inner edge grading to positive (slow outward drift) at the outer edge -- consistent with the known-imperfect (non-equilibrium) density/pressure profile relaxing, not consistent with a numerical instability, which would not produce this smooth a shape |
+
+The dominant source of the ~2-3% quantitative drift (as opposed to the
+sharper Phase 0/1 results) is almost certainly the deliberately
+conservative photon-speed HLLE bound (see Physics above) rather than the
+physics itself: `v_phi` -- which the source term and flux need to get
+right for the orbit to hold at all -- tracks the exact solution well
+throughout, while the noisier quantity (`v_r`, which should be exactly
+zero) is exactly the one a diffusive Riemann solver smears fastest. Tightening
+that bound, and/or starting from a genuine equilibrium profile instead of
+constant density, are the natural next steps if Phase 2b's precision needs
+demand it.
+
 ## Progress
 
 - [x] Valencia conservative variables, HLLE flux, Newton-Raphson primitive recovery, RK2 time integration -- all GPU compute shaders, validated against an independent CPU reference (`--selftest`)
 - [x] Newtonian-limit validation against an exact Riemann solver (`tools/exact_riemann_newtonian.py`, itself checked against the classic Sod reference values)
 - [x] relativistic shock tube: correct qualitative wave structure (rarefaction/contact/shock), no NaN, conservation validated including the open-boundary momentum-forcing check
 - [x] Phase 1: fixed Schwarzschild metric (Schwarzschild coordinates, not the originally planned Kerr-Schild -- see Physics above for why), conserved variables/flux/momentum source term derived from first principles and cross-checked three ways, validated against the analytic Bondi accretion solution per the table above; found and fixed a real outer-boundary instability and a wrong sonic-point formula along the way
-- [ ] Phase 2: extend to Kerr (`a != 0`), genuinely off-diagonal/non-static coordinates this time (Boyer-Lindquist or Kerr-Schild); validate against a Fishbone-Moncrief equilibrium torus sitting still (no spurious drift)
+- [x] Phase 2a: Kerr restricted to the equatorial plane (an exact invariant submanifold, keeping the grid 1D-in-r), conserved variables/flux/source rederived for frame dragging and cross-checked against an independently-derived circular-orbit solution; validated per the table above; caught two further mistakes (a shift sign error, a missing factor in the specific-energy formula) before they reached code
+- [ ] Phase 2b: extend to genuine 2D (r,theta) structure and validate against a Fishbone-Moncrief equilibrium torus sitting still (no spurious drift) -- the actual originally-stated Phase 2 goal, needing real off-equatorial-plane structure that Phase 2a's restriction can't represent
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff
