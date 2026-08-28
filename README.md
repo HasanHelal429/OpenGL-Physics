@@ -33,6 +33,10 @@ projects/            One executable per simulation. Numbered by creation order.
   05_tdse_gpu/        2D time-dependent Schrödinger, split-step Fourier on the
                        GPU (hand-written FFT compute shader). First project on
                        the Simulation/Deck/headless model — see its README.
+  06_tidal_disruption/ Tidal disruption event, built up tier by tier. Tier 1
+                       (current): self-gravitating SPH star (GPU compute
+                       shaders) in hydrostatic equilibrium, no black hole yet
+                       — see its README.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so
