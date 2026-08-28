@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <fstream>
+#include <stdexcept>
 #include <string>
 
 namespace tdse {
@@ -172,9 +174,33 @@ std::vector<float> BuildCap(const Grid& g, const fw::Deck& deck) {
 
 std::vector<std::complex<float>> BuildInitial(const Grid& g, const fw::Deck& deck) {
     const int n = g.n;
-    std::vector<std::complex<double>> psi(static_cast<size_t>(n) * n, {0.0, 0.0});
+    const size_t nn = static_cast<size_t>(n) * n;
+    const std::string itype = deck.GetString("initial.type", "gaussian");
 
-    if (deck.GetString("initial.type", "gaussian") == "superposition") {
+    // Raw complex64 file (interleaved re/im float32, row-major n*n):
+    // np.asarray(psi, np.complex64).tofile(path)
+    if (itype == "file") {
+        const std::string path = deck.GetString("initial.path", "");
+        std::ifstream f(path, std::ios::binary | std::ios::ate);
+        if (!f) throw std::runtime_error("initial.path: cannot open " + path);
+        const std::streamsize sz = f.tellg();
+        if (static_cast<size_t>(sz) != nn * sizeof(std::complex<float>))
+            throw std::runtime_error("initial.path: size mismatch (expected " +
+                                     std::to_string(nn * sizeof(std::complex<float>)) + " bytes)");
+        f.seekg(0);
+        std::vector<std::complex<float>> out(nn);
+        f.read(reinterpret_cast<char*>(out.data()), sz);
+        double norm2 = 0.0;
+        for (const auto& c : out) norm2 += std::norm(c);
+        norm2 *= g.dx() * g.dy();
+        const float inv = norm2 > 0.0 ? static_cast<float>(1.0 / std::sqrt(norm2)) : 1.0f;
+        for (auto& c : out) c *= inv;
+        return out;
+    }
+
+    std::vector<std::complex<double>> psi(nn, {0.0, 0.0});
+
+    if (itype == "superposition") {
         for (const auto& comp : deck.GetTables("initial.component")) {
             AddComponent(psi, g, comp, "");
         }
