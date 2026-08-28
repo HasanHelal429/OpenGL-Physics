@@ -1,0 +1,32 @@
+title = "GRHD Tier 2 Phase 0 -- 1D SRHD shock tube (flat spacetime, relativistic regime)"
+
+# The classic Sod-type initial jump (density/pressure ratio 10, both sides
+# at rest) evolved with the *relativistic* Euler equations instead of the
+# Newtonian ones -- this is the standard first validation problem for any
+# relativistic hydro code (Marti & Muller's "Problem 1"; see e.g. their
+# Living Reviews in Relativity article). Gamma=5/3 here (our own choice,
+# for consistency with 06_tidal_disruption's polytrope -- not claiming an
+# exact match to any specific published table of post-shock numbers).
+[grid]
+n = 400
+length = 1.0
+
+[physics]
+gamma = 1.666667
+
+[riemann]
+rho_l = 1.0
+v_l = 0.0
+p_l = 1.0
+rho_r = 0.125
+v_r = 0.0
+p_r = 0.1
+x0 = 0.5
+
+[solver]
+cons_to_prim_iters = 25
+
+[time]
+cfl = 0.4
+substeps_per_frame = 8
+frames = 50

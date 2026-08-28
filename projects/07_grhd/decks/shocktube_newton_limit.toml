@@ -1,0 +1,35 @@
+title = "GRHD Tier 2 Phase 0 -- 1D SRHD shock tube (Newtonian limit)"
+
+# Same Sod-type density/pressure ratio (10x) as shocktube_relativistic.toml,
+# but with pressures scaled down ~1000x relative to the rest-mass density
+# scale (rho*c^2=rho in these units): this keeps the specific internal
+# energy P/((Gamma-1)*rho) << 1 and the fluid velocities that develop << 1
+# everywhere, i.e. deep in the regime where relativistic corrections should
+# be negligible and this SRHD solver's output should reduce to the
+# classic exact Newtonian Sod solution. A real check that the relativistic
+# machinery (conservative variables, HLLE flux, primitive recovery)
+# correctly contains Newtonian hydrodynamics as its low-velocity limit --
+# see tools/plot_shocktube.py --newtonian-check.
+[grid]
+n = 400
+length = 1.0
+
+[physics]
+gamma = 1.4
+
+[riemann]
+rho_l = 1.0
+v_l = 0.0
+p_l = 0.001
+rho_r = 0.125
+v_r = 0.0
+p_r = 0.0001
+x0 = 0.5
+
+[solver]
+cons_to_prim_iters = 25
+
+[time]
+cfl = 0.4
+substeps_per_frame = 8
+frames = 50
