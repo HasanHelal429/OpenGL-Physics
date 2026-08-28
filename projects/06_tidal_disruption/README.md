@@ -44,7 +44,7 @@ python tools/make_movie.py out/encounter_beta3_long --half-extent 40 \
 Governing equations, per SPH particle *i*:
 
     h_i       = eta*(m_i/rho_i)^(1/3)                                (adaptive smoothing length, fixed-point solve)
-    rho_i     = sum_{j!=i}  m_j W(|r_i - r_j|, h_i)                  (density, cubic spline kernel, "gather" form)
+    rho_i     = sum_j  m_j W(|r_i - r_j|, h_i)                       (density, cubic spline kernel, "gather" form, includes j=i)
     P_i       = K rho_i^Gamma                                        (polytropic EOS)
     a_i       = -sum_j G m_j (r_i-r_j) / (|r_i-r_j|^2 + eps^2)^1.5   (softened self-gravity)
               -  sum_j m_j (P_i/rho_i^2 + P_j/rho_j^2 + Pi_ij) grad_i W_ij(r_ij, h_ij)   (SPH pressure + Monaghan artificial viscosity, h_ij=0.5(h_i+h_j))
@@ -61,13 +61,21 @@ solved per particle via `h_i = eta*(m_i/rho_i)^(1/3)` (Springel & Hernquist
 times per step, warm-started from the previous step's `h_i`. Two real bugs
 surfaced building this, both worth remembering for any future adaptive-h
 SPH work:
-- **Self-term bias.** `W(0,h)` is nonzero (unlike the force kernel's
-  gradient, which vanishes at `r=0`), so a naive self-inclusive density sum
-  adds a spurious `m_i/(pi h_i^3)` term -- negligible at a large fixed `h`
-  (~1.5% of the total at the old `h=0.157`), but 15-30% of the total once
-  `h_i` adapts down toward the true local spacing (measured: bin-averaged
-  bulk density running 25-30% high with the self-term included). Fixed by
-  excluding `j==i` from the density sum.
+- **Self-term convergence, not a self-term bug.** Standard SPH summation
+  density *includes* `j=i`: `W(0,h)` is nonzero (unlike the force kernel's
+  gradient, which vanishes at `r=0`) and that self-contribution is what
+  keeps the estimate well-behaved as the local neighbor count drops (e.g.
+  near the star's free surface). An earlier version of this project
+  excluded `j==i` after seeing a 25-30% *high* bulk-density bias with it
+  included -- but that was a fixed-point-iteration convergence artifact of
+  only running `sph.h_iters=3` (self-inclusion makes the `rho<->h` loop
+  stiffer near the core), not a flaw in the self-term. Excluding it
+  "fixed" that symptom but replaced it with a systematic 10-30%
+  *under*-estimate everywhere the neighbor count is modest, since every
+  particle was missing its own legitimate mass contribution -- this was
+  the calibration gap flagged below. Fixed for real by keeping the
+  self-term and confirming 3 fixed-point iterations is actually enough to
+  converge it (it is -- see Validation below).
 - **Asymmetric h_i, h_j.** The force kernel uses the *symmetrized* pair
   length `h_ij = 0.5*(h_i+h_j)` for both particles in a pair (not each
   particle's own `h_i`), so the same `W(r,h_ij)` is used in both directions
@@ -90,11 +98,12 @@ confirming it stays put on its own.
 **Known simplifications of this phase**, to be revisited before the actual
 disruption run needs them: a **barotropic** EOS (no separately evolved
 internal energy/entropy, so artificial-viscosity heating isn't tracked as
-heat); and a real, still-open calibration gap documented in Validation
-below (the settled equilibrium's bulk density runs ~10-30% below the exact
-Lane-Emden target at N=4000 -- a finite-resolution/EOS-calibration mismatch
-between the discrete SPH equilibrium and the continuum profile it was
-initialized from, not something reduced softening fully closed).
+heat). The bulk-density calibration gap from earlier sessions (settled
+equilibrium running 10-30% below the analytic Lane-Emden target) is
+**closed** -- see Validation below; it was the self-term exclusion above,
+not a resolution or EOS mismatch. The remaining, much smaller free-surface
+excess at the outermost, sparsely-sampled radii is a separate, lower-priority
+artifact (still present, not addressed by this fix).
 
 **The black hole** is a fixed point mass at the origin -- not integrated,
 since `M_bh >> M_star` makes its recoil negligible to leading order in the
@@ -249,26 +258,23 @@ for a further 10 dynamical times with **no** damping.
 
 | check | result (`star_verify_n1.5`) |
 |---|---|
-| momentum conservation | `com_speed` max `1.2e-8` (all pairwise sums are exactly antisymmetric; this is finite-precision floor, not physical drift) |
-| energy conservation | `0.20%` drift over 10 dynamical times (vs. `3.2%` before adaptive `h` -- a real improvement, and no longer oscillating: the settled state is a genuine equilibrium of the *undamped* equations) |
-| radial density profile, t=0 vs. t=end (10 t_dyn later) | **time-independent to a few percent everywhere** -- the settled configuration does not evolve once damping is removed |
-| radial density profile vs. analytic Lane-Emden | **still open**: bulk (`r<0.7R`) runs a systematic `10-30%` *below* the analytic target (e.g. ratio `0.71` at `r=0.125R`, `0.91` at `r=0.708R`); outer envelope (`r>0.79R`) still over-dense (ratio `~1.7` at `r=0.875R`), the same free-surface excess as the fixed-`h` version, not fixed by adaptive `h` alone |
+| momentum conservation | `com_speed` max `3.7e-8` (all pairwise sums are exactly antisymmetric; this is finite-precision floor, not physical drift) |
+| energy conservation | `0.09%` drift over 10 dynamical times (vs. `0.20%` with the self-term excluded, `3.2%` before adaptive `h` at all -- monotonically improving, and no longer oscillating: the settled state is a genuine equilibrium of the *undamped* equations) |
+| radial density profile, t=0 vs. t=end (10 t_dyn later) | **time-independent** -- the settled configuration does not evolve once damping is removed |
+| radial density profile vs. analytic Lane-Emden | **calibration gap closed**: bulk (`r<0.7R`) now agrees with the analytic target to `<1%` everywhere (e.g. ratio `1.004` at `r=0.125R`, `1.005` at `r=0.542R`, `1.005` at `r=0.625R`, 9 bins spanning `0<r<0.7R`, `N>=95` particles each) |
 
-Net: adaptive `h` (with the self-term fix) converts the star from
-"oscillates forever around approximately the right structure" into "settles
-to a genuine, time-independent equilibrium" -- a real improvement in
-dynamical correctness -- but that equilibrium's absolute density
-normalization doesn't exactly match the continuum Lane-Emden target it was
-initialized from. Tried and ruled out as the (sole) cause: gravitational
-softening comparable to the adaptive `h` reached in the core (reducing
-`softening` from `0.063` to `0.02` gave a small improvement, not a fix).
-Likely a genuine finite-`N` discrete-equilibrium-vs-continuum mismatch;
-candidate fixes for a future session: iteratively recalibrate `K` against
-the settled state rather than the raw analytic profile, or increase `N`.
-Does not block adding the black hole -- the star is a stable, non-oscillating
-object either way -- but is worth closing before precision fallback-rate
-comparisons (Phase after next) depend on knowing the pre-disruption profile
-exactly.
+The 10-30% *under*-density that used to run through the bulk here is gone:
+it was the self-term exclusion (see Physics above), not a finite-`N` or
+EOS-calibration mismatch as originally suspected -- restoring the
+self-inclusive density sum, with `sph.h_iters=3` (unchanged) enough to
+converge the `rho<->h` fixed point, reproduces the analytic profile
+directly with no other tuning. One artifact remains, smaller and separate:
+the outermost, sparsely-sampled bins (`r>0.79R`, `N<=24` particles/bin)
+still run over-dense (ratio `1.05` at `r=0.792R`, `1.75` at `r=0.875R`) --
+the same free-surface excess seen with the old fixed-`h` version, a
+resolution/edge effect at the star's surface rather than a bulk
+calibration problem, and lower priority since it affects a small fraction
+of the star's mass.
 
 ## Validation: the encounter (`decks/encounter_beta3.toml`: M_bh=1000 M_star, beta=3, "point" gravity)
 
@@ -281,8 +287,9 @@ above). Run for 300 frames (15 dynamical times) at `dt=0.002`.
 |---|---|
 | qualitative disruption | visible tidal stream (elongated, curved debris tail) within one frame of pericenter (t=2.85 vs. predicted t=2.82) -- see the movie |
 | peak kinetic energy timing | t=2.80 (bulk orbital KE, dominated by the whole star's ~24 (code-units) COM speed through the BH's potential well at closest approach) -- matches the predicted pericenter time to 1% |
-| energy conservation | naive `\|dE/E0\|` = `67%` looks alarming but is **the wrong number**: `E0` is a near-total cancellation of large terms even at the start, so it's a tiny, noise-sensitive denominator once the encounter's orbital kinetic/potential terms grow to ~590 (code units) near pericenter. The physically meaningful number -- absolute energy drift relative to that actual dynamic range -- is `0.05%`: the leapfrog integrator resolves the pericenter passage well at this `dt`. |
-| NaN/blowup check | none -- `thermal` energy rises (0.007 -> 0.53, real tidal/shock heating), `kinetic` and `potential_bh` both swing over a ~590-unit range and back down smoothly |
+| energy conservation | naive `\|dE/E0\|` looks alarming but is **the wrong number**: `E0` is a near-total cancellation of large terms even at the start, so it's a tiny, noise-sensitive denominator once the encounter's orbital kinetic/potential terms grow to ~590 (code units) near pericenter. The physically meaningful number -- absolute energy drift relative to that actual dynamic range -- is `0.11%`: the leapfrog integrator resolves the pericenter passage well at this `dt`. |
+| NaN/blowup check | none -- `kinetic` and `potential_bh` both swing over a ~590-unit range and back down smoothly |
+| thermal energy | now that the density calibration gap is closed, `thermal` starts at its correct pre-encounter equilibrium value (`0.44`, not the old kernel's artifactually low `0.007`), spikes to `0.67` right at pericenter (`t=2.95` -- real compressional heating as the star is squeezed) and then decays as the debris stretches into a rarefied stream (`0.008` by `t=15`). That decay past pericenter is an artifact of the **barotropic** EOS (see Physics above): `thermal` is recomputed each step purely from the instantaneous density via `P=K rho^Gamma`, so it tracks compression/rarefaction, not accumulated viscous heat -- a real gas would stay hot in the stream, this one doesn't. |
 
 The `energy0`-relative-drift trap above is worth remembering for any future
 orbital-encounter diagnostic: **compare drift to the dynamic range the
