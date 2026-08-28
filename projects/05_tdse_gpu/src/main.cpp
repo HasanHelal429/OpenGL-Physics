@@ -200,7 +200,8 @@ int main(int argc, char** argv) {
 
         if (a.relax) {
             tdse::TdseSim::RelaxResult r = sim.Relax(ro);
-            WriteEigenstates(a.out, deck, g, sim.StaticPotential(), r, "eigenstates (imaginary time)");
+            WriteEigenstates(a.out, deck, g, sim.StaticPotential(), r,
+                             deck.GetString("title", "eigenstates").c_str());
             return 0;
         }
         return sim.RunScf(deck, ro, a.scfElectrons, a.out);  // --scf (Phase G4)
