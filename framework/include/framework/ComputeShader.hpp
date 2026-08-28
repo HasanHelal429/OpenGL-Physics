@@ -36,7 +36,10 @@ public:
     void SetUInt(const std::string& name, unsigned value);
     void SetFloat(const std::string& name, float value);
     void SetVec2(const std::string& name, const glm::vec2& value);
+    void SetVec4(const std::string& name, const glm::vec4& value);
     void SetIVec2(const std::string& name, const glm::ivec2& value);
+    void SetIntArray(const std::string& name, const int* values, int count);
+    void SetVec4Array(const std::string& name, const glm::vec4* values, int count);
 
 private:
     explicit ComputeShader(GLuint program) : m_program(program) {}

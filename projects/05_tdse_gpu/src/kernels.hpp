@@ -155,6 +155,59 @@ void main() {
 )";
 }
 
+// Build the half-kick multiplier Vprop = exp(-i (V0 + sum drives(x,t)) dt/2) *
+// exp(-W dt/2) from the static external potential (binding 0), the absorbing
+// rate W (binding 1), and up to 4 time-dependent drive terms. Dispatched once
+// per substep when the deck has [[drive]] terms.
+inline std::string BuildVprop(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer V0 { float v0[]; };
+layout(std430, binding = 1) readonly buffer Cap { float wcap[]; };
+layout(std430, binding = 2) writeonly buffer Vp { vec2 vprop[]; };
+
+uniform float uDt;
+uniform float uTime;
+uniform float uX0;   // world x of the grid origin; x(i) = uX0 + (i+0.5)*uDx
+uniform float uDx;
+uniform float uY0;
+uniform float uDy;
+uniform int  uDriveCount;
+uniform int  uDriveType[4];  // 0 = tilt, 1 = gate
+uniform vec4 uDriveA[4];
+uniform vec4 uDriveB[4];
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    int j = int(gl_GlobalInvocationID.y);
+    if (i >= N || j >= N) return;
+    int k = j * N + i;
+    float x = uX0 + (float(i) + 0.5) * uDx;
+    float y = uY0 + (float(j) + 0.5) * uDy;
+
+    float V = v0[k];
+    for (int d = 0; d < uDriveCount; ++d) {
+        if (uDriveType[d] == 0) {           // tilt: E0 sin(w t + phi) env(t) (dx*x + dy*y)
+            float E0 = uDriveA[d].x, w = uDriveA[d].y, phi = uDriveA[d].z, ramp = uDriveA[d].w;
+            float env = ramp > 0.0 ? clamp(uTime / ramp, 0.0, 1.0) : 1.0;
+            V += E0 * sin(w * uTime + phi) * env * (uDriveB[d].x * x + uDriveB[d].y * y);
+        } else if (uDriveType[d] == 1) {    // gate: amp env(t) exp(-r^2 / 2 s^2)
+            float amp = uDriveA[d].x, s = uDriveA[d].y, tOn = uDriveA[d].z, tRamp = uDriveA[d].w;
+            float dx = x - uDriveB[d].x, dy = y - uDriveB[d].y;
+            float env = clamp((uTime - tOn) / max(tRamp, 1e-6), 0.0, 1.0);
+            V += amp * env * exp(-(dx * dx + dy * dy) / (2.0 * s * s));
+        }
+    }
+
+    float ph = -V * uDt * 0.5;
+    float damp = exp(-wcap[k] * uDt * 0.5);
+    vprop[k] = vec2(damp * cos(ph), damp * sin(ph));
+}
+)";
+}
+
 // Un-transpose + fftshift the diagnostic FFT result for display: reads
 // psihat in the transposed, DC-at-origin layout (binding 0, index kxIdx*N+kyIdx)
 // and writes it row-major with DC at the grid centre (binding 1, index y*N+x).

@@ -86,6 +86,11 @@ void ComputeShader::SetInt(const std::string& name, int value) { glUniform1i(Loc
 void ComputeShader::SetUInt(const std::string& name, unsigned value) { glUniform1ui(Location(name), value); }
 void ComputeShader::SetFloat(const std::string& name, float value) { glUniform1f(Location(name), value); }
 void ComputeShader::SetVec2(const std::string& name, const glm::vec2& v) { glUniform2fv(Location(name), 1, glm::value_ptr(v)); }
+void ComputeShader::SetVec4(const std::string& name, const glm::vec4& v) { glUniform4fv(Location(name), 1, glm::value_ptr(v)); }
 void ComputeShader::SetIVec2(const std::string& name, const glm::ivec2& v) { glUniform2iv(Location(name), 1, glm::value_ptr(v)); }
+void ComputeShader::SetIntArray(const std::string& name, const int* values, int count) { glUniform1iv(Location(name), count, values); }
+void ComputeShader::SetVec4Array(const std::string& name, const glm::vec4* values, int count) {
+    glUniform4fv(Location(name), count, glm::value_ptr(values[0]));
+}
 
 } // namespace fw
