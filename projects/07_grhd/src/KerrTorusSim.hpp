@@ -46,6 +46,7 @@ private:
     int m_consToPrimIters = 40;
     double m_rhoFloor = 1e-8;
     double m_pFloor = 1e-11;
+    double m_entropyFloor = 1e-5;
     int m_substepsPerFrame = 1;
 
     std::string m_icFile;

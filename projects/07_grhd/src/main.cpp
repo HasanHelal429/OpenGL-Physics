@@ -720,15 +720,22 @@ glm::dvec4 RecoverPrimitivesKerr2DRef(double D, double Sr, double Sth, double L,
         const double Q0 = (tau + D + sqrtg * P0) / D;
         return Q0 / h - (W0 * alpha - gTphi * lam / (h * gammaPhiphi));
     };
+    // Same safeguards as kernels_kerr2d.hpp's ConsToPrim (float32-safe
+    // floor + damped Newton step) -- see that shader's comment for why
+    // both are needed, not just a smaller epsilon.
+    const double kHFloor = 1.0 + 1e-4;
     const double rhoGuess = D * alpha / (sqrtg * std::sqrt(1.0 + K));
-    double h = 1.0 + gamma * std::max(pGuess, 1e-12) / ((gamma - 1.0) * rhoGuess);
+    double h = std::max(1.0 + gamma * std::max(pGuess, 1e-12) / ((gamma - 1.0) * rhoGuess), kHFloor);
     for (int it = 0; it < iters; ++it) {
         const double f0 = residual(h);
         const double dh = std::max(1e-6 * std::abs(h), 1e-9);
         const double fPlus = residual(h + dh);
         const double fMinus = residual(h - dh);
         const double deriv = (fPlus - fMinus) / (2.0 * dh);
-        if (std::abs(deriv) > 1e-12) h = std::max(h - f0 / deriv, 1.0 + 1e-9);
+        if (std::abs(deriv) > 1e-12) {
+            const double step = std::clamp(f0 / deriv, -0.5 * h, 0.5 * h);
+            h = std::max(h - step, kHFloor);
+        }
     }
     const double W = std::sqrt(1.0 + K / (h * h));
     const double rho = D * alpha / (sqrtg * W);
@@ -881,6 +888,7 @@ bool SelfTestKerrTorus() {
     consToPrim.SetInt("uIters", ITERS);
     consToPrim.SetFloat("uRhoFloor", 0.0f); // test cells are all well above any floor -- disable it here
     consToPrim.SetFloat("uPFloor", 0.0f);
+    consToPrim.SetFloat("uEntropyFloor", 0.0f);
     fw::ComputeShader::BindBuffer(0, bufCons);
     fw::ComputeShader::BindBuffer(6, bufConsL);
     fw::ComputeShader::BindBuffer(4, bufPrimMain);

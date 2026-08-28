@@ -83,6 +83,7 @@ void KerrTorusSim::Configure(const fw::Deck& deck) {
     m_consToPrimIters = deck.GetInt("solver.cons_to_prim_iters", 40);
     m_rhoFloor = deck.GetDouble("solver.rho_floor", 1e-8);
     m_pFloor = deck.GetDouble("solver.p_floor", 1e-11);
+    m_entropyFloor = deck.GetDouble("solver.entropy_floor", 1e-5);
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 1);
 
     m_icFile = deck.GetString("torus.ic_file", "");
@@ -230,6 +231,7 @@ void KerrTorusSim::RunOneRk2Step() {
         m_consToPrim.SetInt("uIters", m_consToPrimIters);
         m_consToPrim.SetFloat("uRhoFloor", static_cast<float>(m_rhoFloor));
         m_consToPrim.SetFloat("uPFloor", static_cast<float>(m_pFloor));
+        m_consToPrim.SetFloat("uEntropyFloor", static_cast<float>(m_entropyFloor));
         fw::ComputeShader::BindBuffer(0, consBuf);
         fw::ComputeShader::BindBuffer(6, consLBuf);
         fw::ComputeShader::BindBuffer(4, m_primMain);

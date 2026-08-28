@@ -339,14 +339,24 @@ python tools/make_kerr_orbit_movie.py out/kerr_circular_orbit
 python tools/plot_fishbone_moncrief.py --M 1.0 --a 0.9 --gamma 1.333333 \
     --r_in 6.0 --r_center 10.0 --out fishbone_moncrief.png
 
-# Phase 2b, part 2: dynamical 2D torus run -- runs and self-tests pass,
-# but currently blows up around t~46-47 (see Physics above); useful for
-# continuing to debug that, not yet a validated multi-orbit result
+# Phase 2b, part 2: dynamical 2D torus run -- no longer crashes (runs the
+# full t=897 duration with zero NaN), but still loses ~78% of the torus's
+# mass over that time (see Physics above) -- not yet a validated
+# multi-orbit result
 python tools/make_fm_torus_ic.py --M 1.0 --a 0.9 --gamma 1.333333 \
     --r_in 6.0 --r_center 10.0 --nr 96 --ntheta 64 \
     --r_min 4.0 --r_max 30.0 --theta_min 0.5 --out ic/fm_torus_a09.bin
 ./build/release/projects/07_grhd/07_grhd.exe \
     --deck decks/kerr_torus.toml --out out/kerr_torus
+python tools/make_torus_movie.py out/kerr_torus --fps 12
+# --frame_start/--frame_end zoom a movie into a specific window (e.g. to
+# inspect a crash) instead of rendering the whole run -- useful with a
+# fine-grained diagnostic run (--frames <N> --substeps 1) that lands many
+# frames right around a moment of interest, e.g.:
+#   ./build/release/projects/07_grhd/07_grhd.exe --deck decks/kerr_torus.toml \
+#       --out out/kerr_torus_finegrained --frames 2350 --substeps 1
+#   python tools/make_torus_movie.py out/kerr_torus_finegrained \
+#       --frame_start 2200 --frame_end 2315 --fps 12
 ```
 
 ## Deck format
@@ -636,7 +646,7 @@ is normalized to `rho=1` at `r_center` (same convention as
 This is a real, validated equilibrium *solution* -- the piece Phase 2b
 needs before there's anything meaningful to hand the dynamical solver.
 
-## Physics: Phase 2b, part 2 (dynamical 2D solver -- built, not yet stable)
+## Physics: Phase 2b, part 2 (dynamical 2D solver -- crash fixed, mass conservation still open)
 
 `src/kernels_kerr2d.hpp` / `src/KerrTorusSim.cpp` extend Phase 2a's
 equatorial solver to a genuine 2D `(r,theta)` grid: a third velocity
@@ -689,16 +699,70 @@ check against the analytic solution):
    displayed primitives), so it actually persists to the next step.
 
 **Both fixes are real and confirmed necessary** (mass conservation and
-short-time behavior measurably improved), **but full multi-orbit
-stability has not yet been achieved.** A further, CFL-independent
-instability remains, localized to the domain's innermost radial/innermost
-polar corner (`r~r_min`, `theta~theta_min`) -- confirmed CFL-independent
-by rerunning at 1/3 the timestep with no change in either the onset time
-(`t~46-47`, about a quarter of one orbital period at `r_center`) or its
-location; the effective local CFL numbers there are a modest `~0.1`, well
-under the stability limit, ruling out a plain resolution/timestep issue.
-This is an open item for a future session -- see Progress below for
-exactly what's confirmed-working vs. still open.
+short-time behavior measurably improved), but a further instability
+remained after them: a growing perturbation, confirmed CFL-independent
+(1/3 the timestep gave an identical onset time and location), that
+eventually produced NaN around `t~46-47` (about a quarter of one orbital
+period at `r_center`) -- see `out/*/crash_movie.mp4` (via
+`tools/make_torus_movie.py --frame_start ... --frame_end ...`, rendered
+from a `--substeps 1` diagnostic run) for a direct visualization: two
+small white "NaN" wedges erupt right at the horizon, in the vacuum-floor
+gap between it and the torus's inner edge -- exactly the region this
+debugging round traced the failure to.
+
+**Three more real, root-cause fixes closed this out:**
+
+3. **The Newton solve for specific enthalpy `h` had no upper bound and no
+   step damping.** Only a lower clamp existed (`h>=1+1e-9`), and that
+   epsilon was itself broken: float32 has ~1.19e-7 ULP spacing near 1, so
+   `1.0+1e-9` silently rounded to exactly `1.0`, making pressure exactly
+   `0.0` (not just small) whenever a cell's iteration converged there --
+   confirmed by replaying saved simulation frames through the exact
+   iteration and watching `P` sit at literal `0.0` for many frames before
+   a subsequent step's flux update left no valid solution nearby and the
+   unguarded step sent `h` to `2.36e8` in one jump. Fixed with a
+   float32-safe floor (`1.0+1e-4`) and a damped Newton step (at most a 50%
+   change in `h` per iteration) -- a standard primitive-recovery
+   safeguard (c.f. HARM's "u2p" routines).
+4. **That alone didn't fix it**: raising `cons_to_prim_iters` from 40 to
+   200 changed nothing (same crash, same time), which is the tell that
+   the conserved state itself sometimes has **no** valid `h>=1` solution
+   at all -- a genuine "failed inversion," not a slow-converging one.
+   Derived the exact solvability condition (`f(h)` is monotonically
+   negative as `h->infinity`, so a root exists only if
+   `f(h=1)=(tau+D)/D + g_tphi*L/(D*gamma_phiphi) >= sqrt(1+K)*alpha`;
+   verified against synthetic solvable/unsolvable cases before use).
+   First attempt: full reset to vacuum-at-rest on violation (mirroring
+   the density-floor branch) -- this ran the whole `t=897` duration with
+   no NaN, but lost **97% of the total mass**, because the violation
+   turns out to be common at the torus's own low-density surface (any
+   equilibrium's outer layers are the most marginal, easily perturbed
+   across this boundary by a first-order scheme's diffusion every step),
+   and discarding all momentum there every time was wholesale erasing
+   real torus material, not fixing a rare corner case.
+5. **Replaced the full reset with a minimal correction**: on violation,
+   rescale the momentum (`Sr,Sth,L`) down by the smallest factor (found
+   by bisection) that restores physicality, instead of discarding it
+   entirely -- a standard GRMHD "conserved-variable fixup" for a failed
+   inversion. This dropped the mass loss from 97% to 78% over the same
+   run and confirmed (via a tolerance experiment: allowing a `1e-4`
+   margin before triggering the fixup changed the result by nothing
+   measurable) that these are genuine, substantial violations, not
+   float-noise sitting right at the boundary.
+
+**Net result of this round**: the original NaN crash is fixed -- the full
+`t=897` (~4.4 orbits) run now completes with no NaN at all, using
+principled, validated corrections rather than papering over the symptom.
+What is NOT yet fixed: quantitative fidelity. The torus still loses ~78%
+of its mass over that run (`865.8 -> 187.4`), driven by how often the
+conserved-variable fixup above has to fire. This is now a different,
+more tractable class of problem than an unexplained crash -- likely
+needing higher spatial resolution, a less diffusive reconstruction than
+plain first-order Godunov (a slope limiter), and/or a closer look at
+*why* the fixup triggers so often at the vacuum/torus-material interface
+near `r_in` -- rather than more floor/tolerance tuning, which this round
+showed does not address it. See Progress below for the precise
+confirmed-working vs. still-open split.
 
 ## Progress
 
@@ -708,6 +772,6 @@ exactly what's confirmed-working vs. still open.
 - [x] Phase 1: fixed Schwarzschild metric (Schwarzschild coordinates, not the originally planned Kerr-Schild -- see Physics above for why), conserved variables/flux/momentum source term derived from first principles and cross-checked three ways, validated against the analytic Bondi accretion solution per the table above; found and fixed a real outer-boundary instability and a wrong sonic-point formula along the way
 - [x] Phase 2a: Kerr restricted to the equatorial plane (an exact invariant submanifold, keeping the grid 1D-in-r), conserved variables/flux/source rederived for frame dragging and cross-checked against an independently-derived circular-orbit solution; validated per the table above; caught two further mistakes (a shift sign error, a missing factor in the specific-energy formula) before they reached code
 - [x] Phase 2b, part 1: Fishbone-Moncrief equilibrium torus analytic construction (`tools/fishbone_moncrief.py`), rederived from the Euler equation after a commonly-quoted shortcut failed its own consistency check; validated per the table above (curl-free acceleration field, zero radial force at the geodesic/pressure-maximum radius, correct torus shape); caught two further mistakes (a wrong potential shortcut/Euler-equation sign, a `u_t_of_l` transcription bug) before trusting it
-- [x] Phase 2b, part 2 (partial): dynamical solver extended to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, source terms on both `Sr`/`Stheta`) -- GPU compute shaders, validated against an independent CPU reference (`--selftest`); found and fixed two real bugs (wrong volume-element weighting `sqrt(gamma)` vs. the correct `sqrt(-g)`; floor cells not being re-enforced every step) that measurably improved short-time mass conservation and stability
-- [ ] Phase 2b, part 2 (remaining): a further, CFL-independent instability localized to the inner-r/inner-theta domain corner still causes eventual blowup (~t=46-47, about a quarter-orbit at r_center) -- not yet resolved; full multi-orbit torus stability is the remaining bar for "Phase 2b done"
+- [x] Phase 2b, part 2 (crash fixed): dynamical solver extended to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, source terms on both `Sr`/`Stheta`) -- GPU compute shaders, validated against an independent CPU reference (`--selftest`). Found and fixed FIVE real bugs total in getting a full `t=897` (~4.4-orbit) run to complete with zero NaN: (1) wrong volume-element weighting `sqrt(gamma)` vs. the correct `sqrt(-g)`; (2) floor cells not being re-enforced every step; (3) the primitive-recovery Newton solve had no upper bound/step damping and a float32-broken epsilon; (4) confirmed via an iteration-count experiment that some conserved states have no valid solution at all (a genuine failed inversion, not a convergence problem) and derived the exact solvability condition; (5) a full vacuum reset on failed inversion avoided the crash but erased 97% of the torus's mass, so replaced it with a minimal conserved-variable rescue (bisection to the smallest momentum reduction that restores physicality) -- see Physics above for the full story, including the crash visualization command
+- [ ] Phase 2b, part 2 (remaining): the crash is gone, but quantitative fidelity is not there yet -- ~78% mass loss over the same `t=897` run, driven by how often the fixup above still has to fire (likely needs higher resolution and/or a less diffusive reconstruction scheme, not further floor/tolerance tuning -- that was tried and confirmed not to help). Full multi-orbit mass conservation is the remaining bar for "Phase 2b done"
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff

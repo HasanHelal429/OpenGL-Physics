@@ -195,6 +195,7 @@ inline std::string ConsToPrim() {
 uniform int uIters;
 uniform float uRhoFloor;
 uniform float uPFloor;
+uniform float uEntropyFloor;
 
 layout(std430, binding = 0) buffer ConsBuf { vec4 cons[]; };
 layout(std430, binding = 6) buffer ConsLBuf { float consL[]; };
@@ -219,24 +220,106 @@ void main() {
     float kappaR = Sr / D, kappaTh = Sth / D, lam = L / D;
     float K = kappaR*kappaR/gamma_rr + kappaTh*kappaTh/gamma_thth + lam*lam/gamma_phiphi;
 
+    // Physicality pre-check: does ANY h>=1 solve the residual equation at
+    // all? As h->infinity, f(h) -> -alpha/Gamma < 0 always (rho saturates
+    // at D*alpha/sqrtg, so P grows only linearly in h, not fast enough to
+    // keep f positive); so a root exists in [1,infinity) only if
+    // f(h=1)>=0, i.e.:
+    //   (tau+D)/D + g_tphi*lam/gamma_phiphi >= sqrt(1+K)*alpha
+    // (derived from the residual formula below evaluated at h=1, P=0;
+    // verified against synthetic solvable/unsolvable test cases before
+    // use -- see tools/ for the derivation notes). When this fails, NO
+    // number of Newton iterations can converge (confirmed empirically:
+    // raising cons_to_prim_iters from 40 to 200 did not change the
+    // observed blowup at all) -- the conserved state itself is
+    // momentarily unphysical.
+    //
+    // Fixup, NOT a full vacuum reset: a first attempt reset unphysical
+    // cells all the way to vacuum-at-rest, matching the vacuum-floor
+    // branch below -- but this violation turned out to be common at the
+    // torus's own low-density surface (any equilibrium's outer layers are
+    // the most marginal, easily perturbed across this boundary by a
+    // first-order scheme's diffusion every step), so a full reset there
+    // was erasing real torus mass wholesale (confirmed: >97% total mass
+    // lost over the run, an unphysical result in itself, not a fix).
+    // Standard GRMHD practice for a marginally-unphysical state is
+    // instead a MINIMAL correction: rescale the momentum (Sr,Sth,L, i.e.
+    // kappaR,kappaTh,lam) down by the smallest factor s in (0,1) that
+    // restores physicality, preserving as much of the original state as
+    // possible rather than discarding it. Found by bisection (the
+    // physical/unphysical boundary as a function of s is monotonic: s=0
+    // -- pure D,tau, no momentum -- is always physical if tau,D
+    // themselves are sane, and s=1 is the already-known-unphysical
+    // original state).
+    // A small tolerance here (vs. a strict >=0) turned out to change
+    // nothing: rerunning decks/kerr_torus.toml with tol=1e-4 gave
+    // essentially identical mass-loss numbers to tol=0 at every
+    // checkpoint. That rules out "marginal float-noise-level violations
+    // right at the boundary" as the trigger -- the fixups below are
+    // firing for genuinely, substantially unphysical states, not
+    // borderline ones. The real fix for the mass loss this fixup still
+    // leaves (see 07_grhd/README.md's Progress section) is therefore NOT
+    // a tolerance tweak; kept at 0 here since a nonzero value
+    // demonstrably buys nothing.
+    float physMargin = (tau + D) / D + g_tphi * lam / gamma_phiphi - sqrt(1.0 + K) * alpha;
+    bool physical = physMargin >= 0.0;
+    if (!physical) {
+        float sLo = 0.0, sHi = 1.0;
+        for (int bi = 0; bi < 24; ++bi) {
+            float sMid = 0.5 * (sLo + sHi);
+            float Kmid = sMid * sMid * K;
+            bool midOk = ((tau + D) / D + sMid * g_tphi * lam / gamma_phiphi) >= sqrt(1.0 + Kmid) * alpha;
+            if (midOk) sLo = sMid; else sHi = sMid;
+        }
+        float sFix = sLo * 0.999; // small safety margin inside the physical region
+        kappaR *= sFix; kappaTh *= sFix; lam *= sFix;
+        K = kappaR*kappaR/gamma_rr + kappaTh*kappaTh/gamma_thth + lam*lam/gamma_phiphi;
+        Sr = kappaR * D; Sth = kappaTh * D; L = lam * D;
+        cons[idx] = vec4(D, Sr, Sth, tau);
+        consL[idx] = L;
+        physical = true; // now solvable -- proceed with the normal Newton solve below
+    }
+
+    // Lower bound uses 1e-4 (NOT the mathematically-tighter 1e-9 an earlier
+    // version used): float32 near h=1 has ~1.19e-7 ULP spacing, so
+    // "1.0+1e-9" silently rounds to exactly 1.0 -- making eps=(h-1)/Gamma
+    // and hence P exactly 0.0, not just small. That degenerate exact-zero
+    // state was traced (via a from-scratch replay of this exact iteration
+    // against saved simulation frames) to precede every observed blowup:
+    // once h snaps to exactly 1, a subsequent step's flux/source update
+    // can leave no h>=1 solution nearby, and the unguarded Newton step
+    // below sent h to a nonsensical, enormous value in a single iteration
+    // (observed: P jumping from 0 to 2.36e8 between consecutive frames).
+    // Both changes below are real, independent safeguards, not just a
+    // bigger epsilon: a float32-representable floor, AND a damped step
+    // that caps how far a single Newton iteration can move h (a standard
+    // primitive-recovery safeguard -- c.f. HARM's "u2p" routines, which
+    // are well known to need exactly this kind of guarding), so a bad
+    // local derivative estimate can no longer run away unbounded.
+    const float kHFloor = 1.0 + 1e-4;
     float hGuess = primP[idx] > 0.0 ? 1.0 + uGamma*primP[idx]/((uGamma-1.0)*max(D*alpha/(sqrtg*sqrt(1.0+K)),1e-8)) : 1.001;
-    float h = max(hGuess, 1.0 + 1e-8);
-    for (int it = 0; it < uIters; ++it) {
-        float dh = max(1e-6*abs(h), 1e-9);
-        float hp = h + dh, hm = h - dh;
+    float h = max(hGuess, kHFloor);
+    if (physical) {
+        for (int it = 0; it < uIters; ++it) {
+            float dh = max(1e-6*abs(h), 1e-9);
+            float hp = h + dh, hm = h - dh;
 
-        float Wc = sqrt(1.0+K/(h*h));
-        float rhoC = D*alpha/(sqrtg*Wc);
-        float Pc = (uGamma-1.0)*rhoC*(h-1.0)/uGamma;
-        float f0 = (tau+D+sqrtg*Pc)/D/h - (Wc*alpha - g_tphi*lam/(h*gamma_phiphi));
+            float Wc = sqrt(1.0+K/(h*h));
+            float rhoC = D*alpha/(sqrtg*Wc);
+            float Pc = (uGamma-1.0)*rhoC*(h-1.0)/uGamma;
+            float f0 = (tau+D+sqrtg*Pc)/D/h - (Wc*alpha - g_tphi*lam/(h*gamma_phiphi));
 
-        float Wp = sqrt(1.0+K/(hp*hp)); float rhoP = D*alpha/(sqrtg*Wp); float Pp=(uGamma-1.0)*rhoP*(hp-1.0)/uGamma;
-        float fPlus = (tau+D+sqrtg*Pp)/D/hp - (Wp*alpha - g_tphi*lam/(hp*gamma_phiphi));
-        float Wm = sqrt(1.0+K/(hm*hm)); float rhoM = D*alpha/(sqrtg*Wm); float Pm=(uGamma-1.0)*rhoM*(hm-1.0)/uGamma;
-        float fMinus = (tau+D+sqrtg*Pm)/D/hm - (Wm*alpha - g_tphi*lam/(hm*gamma_phiphi));
+            float Wp = sqrt(1.0+K/(hp*hp)); float rhoP = D*alpha/(sqrtg*Wp); float Pp=(uGamma-1.0)*rhoP*(hp-1.0)/uGamma;
+            float fPlus = (tau+D+sqrtg*Pp)/D/hp - (Wp*alpha - g_tphi*lam/(hp*gamma_phiphi));
+            float Wm = sqrt(1.0+K/(hm*hm)); float rhoM = D*alpha/(sqrtg*Wm); float Pm=(uGamma-1.0)*rhoM*(hm-1.0)/uGamma;
+            float fMinus = (tau+D+sqrtg*Pm)/D/hm - (Wm*alpha - g_tphi*lam/(hm*gamma_phiphi));
 
-        float deriv = (fPlus - fMinus) / (2.0*dh);
-        if (abs(deriv) > 1e-12) h = max(h - f0/deriv, 1.0 + 1e-9);
+            float deriv = (fPlus - fMinus) / (2.0*dh);
+            if (abs(deriv) > 1e-12) {
+                float step = clamp(f0 / deriv, -0.5*h, 0.5*h); // damped: at most a 50% change in h per iteration
+                h = max(h - step, kHFloor);
+            }
+        }
     }
 
     float W = sqrt(1.0 + K/(h*h));
@@ -264,6 +347,50 @@ void main() {
         float tauf = sqrtg * rho * hf * utf * Ef - sqrtg * P - Df;
         cons[idx] = vec4(Df, Srf, Sthf, tauf);
         consL[idx] = Lf;
+    } else {
+        // Entropy/pressure floor: P_floor(rho) = uEntropyFloor * rho^Gamma
+        // -- a small FRACTION of what the torus's own polytropic relation
+        // (P=K*rho^Gamma) would give at this density, i.e. scaled WITH
+        // rho, unlike a fixed additive enthalpy floor (tried first: an
+        // h>=1.05 floor avoided the crash entirely but corresponds to a
+        // FIXED P offset independent of rho, which is negligible for the
+        // torus's dense core but dominates -- and badly distorts the
+        // physics -- for any low-density gas; confirmed by the 85% total
+        // mass INCREASE it caused, a clear sign of spurious energy
+        // injection, not a real fix). This scaled version targets only
+        // gas that has gone genuinely colder than the flow's own entropy
+        // floor should allow, without perturbing normal-density material
+        // at all (P_floor is tiny wherever rho is not tiny). Velocity is
+        // kept as recovered (unlike the vacuum-floor branch above) --
+        // this isn't declaring the cell vacuum, just refusing to let its
+        // entropy collapse toward the numerically fragile P~0 regime that
+        // preceded every observed blowup (see the kHFloor comment above).
+        float pFloorEntropy = uEntropyFloor * pow(rho, uGamma);
+        if (P < pFloorEntropy) {
+            P = pFloorEntropy;
+            float epsF = P / ((uGamma - 1.0) * rho);
+            float hF = 1.0 + uGamma * epsF;
+            float Wf = sqrt(1.0 + K/(hF*hF));
+            // Recompute rho from the (now slightly different) hF via the
+            // same W=sqrt(1+K/h^2) relation, keeping D fixed -- consistent
+            // with how rho/h/W all relate to the SAME conserved D above.
+            float rhoF = D*alpha/(sqrtg*Wf);
+            float vrF = kappaR/(hF*Wf*sqrt(gamma_rr));
+            float vthF = kappaTh/(hF*Wf*sqrt(gamma_thth));
+            float vphiF = lam/(hF*Wf*sqrt(gamma_phiphi));
+            P = (uGamma - 1.0) * rhoF * (hF - 1.0) / uGamma;
+            rho = rhoF; vr = vrF; vth = vthF; vphi = vphiF;
+
+            float Wf2, hf2, utf, urf, uthf, uPhiContraf, urCovf, uthCovf, uPhiCovf, Ef;
+            kinematics2D(rho, vr, vth, vphi, P, r, theta, Wf2, hf2, utf, urf, uthf, uPhiContraf, urCovf, uthCovf, uPhiCovf, Ef);
+            float Df = sqrtg * rho * utf;
+            float Srf = sqrtg * rho * hf2 * utf * urCovf;
+            float Sthf = sqrtg * rho * hf2 * utf * uthCovf;
+            float Lf = sqrtg * rho * hf2 * utf * uPhiCovf;
+            float tauf = sqrtg * rho * hf2 * utf * Ef - sqrtg * P - Df;
+            cons[idx] = vec4(Df, Srf, Sthf, tauf);
+            consL[idx] = Lf;
+        }
     }
 
     primMain[idx] = vec4(rho, vr, vth, vphi);
