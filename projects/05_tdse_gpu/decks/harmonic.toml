@@ -18,7 +18,7 @@ x0 = 4.0
 y0 = 0.0
 sigma = 1.0
 kx = 0.0
-ky = 0.0
+ky = 3.0
 
 [boundary]
 type = "periodic"

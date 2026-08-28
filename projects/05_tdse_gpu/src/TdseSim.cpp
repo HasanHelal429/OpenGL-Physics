@@ -108,12 +108,74 @@ void main() {
 }
 )";
 
+// Probability-current overlay: one instanced 3-segment arrow per cell of a
+// coarse screen grid, sampled from the current buffer, scaled/faded by |j|.
+const char* kArrowVert = R"(#version 460 core
+layout(std430, binding = 0) readonly buffer Cur  { vec2 jbuf[]; };
+layout(std430, binding = 1) readonly buffer StatJ { uint jMaxBits; };
+
+uniform vec2 uRes;
+uniform int uN;
+uniform float uLx;
+uniform float uLy;
+uniform float uPixPerUnit;
+uniform vec2 uPanPix;
+uniform int uCols;
+uniform int uRows;
+uniform float uArrowPx;
+
+out float vA;
+
+void main() {
+    int inst = gl_InstanceID;
+    int cx = inst % uCols;
+    int cy = inst / uCols;
+    vec2 scr = (vec2(cx, cy) + 0.5) / vec2(uCols, uRows) * uRes;
+
+    float wx = (scr.x - 0.5 * uRes.x - uPanPix.x) / uPixPerUnit;
+    float wy = (scr.y - 0.5 * uRes.y - uPanPix.y) / uPixPerUnit;
+    int i = int(floor((wx + 0.5 * uLx) / (uLx / float(uN))));
+    int k = int(floor((wy + 0.5 * uLy) / (uLy / float(uN))));
+    vec2 jj = vec2(0.0);
+    if (i >= 0 && k >= 0 && i < uN && k < uN) jj = jbuf[k * uN + i];
+
+    float jmax = sqrt(max(uintBitsToFloat(jMaxBits), 1e-30));
+    float mag = length(jj);
+    float f = clamp(mag / jmax, 0.0, 1.0);
+    float fv = sqrt(f);                 // perceptual: don't hide the weak flow
+    vA = 0.30 + 0.70 * fv;
+    vec2 dir = mag > 1e-20 ? jj / mag : vec2(1.0, 0.0);
+    vec2 perp = vec2(-dir.y, dir.x);
+    float L = uArrowPx * (0.45 + 0.55 * fv);
+    vec2 a = scr - dir * L * 0.5;
+    vec2 b = scr + dir * L * 0.5;
+    int id = gl_VertexID;
+    vec2 v = (id == 0) ? a
+           : (id == 1) ? b
+           : (id == 2) ? b
+           : (id == 3) ? (b - dir * L * 0.32 + perp * L * 0.22)
+           : (id == 4) ? b
+           :             (b - dir * L * 0.32 - perp * L * 0.22);
+    if (f < 0.02) v = scr;  // collapse invisible arrows to a point
+    gl_Position = vec4(v / uRes * 2.0 - 1.0, 0.0, 1.0);
+}
+)";
+
+const char* kArrowFrag = R"(#version 460 core
+in float vA;
+out vec4 FragColor;
+uniform vec3 uColor;
+void main() { FragColor = vec4(uColor, vA * 0.9); }
+)";
+
 } // namespace
 
 TdseSim::~TdseSim() {
-    GLuint bufs[] = {m_psi, m_tmp, m_spec, m_vprop, m_kprop, m_twiddle, m_potential, m_stat};
-    glDeleteBuffers(8, bufs);
+    GLuint bufs[] = {m_psi,       m_tmp,  m_spec,       m_vprop, m_kprop,
+                     m_twiddle,   m_potential, m_stat,  m_currentBuf, m_statJ};
+    glDeleteBuffers(10, bufs);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
+    if (m_arrowVao) glDeleteVertexArrays(1, &m_arrowVao);
 }
 
 void TdseSim::Configure(const fw::Deck& deck) {
@@ -128,6 +190,9 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_substepsPerFrame = std::max(1, deck.GetInt("time.substeps_per_frame", 10));
     m_transmissionX = deck.GetDouble("output.transmission_x", 0.0);
     m_title = deck.GetString("title", "2D TDSE (GPU)");
+    for (const auto& f : deck.GetStringArray("output.fields")) {
+        if (f == "current") m_writeCurrent = true;
+    }
 
     m_diagNames = deck.GetStringArray("output.diagnostics");
     if (m_diagNames.empty()) {
@@ -143,8 +208,11 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_transpose = fw::ComputeShader::FromSource(kernels::Transpose(n));
     m_cmul = fw::ComputeShader::FromSource(kernels::CMul(n));
     m_reduceMax = fw::ComputeShader::FromSource(kernels::ReduceMax(n));
+    m_currentProg = fw::ComputeShader::FromSource(kernels::Current(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
+    m_arrows = fw::Shader::FromSource(kArrowVert, kArrowFrag);
     glGenVertexArrays(1, &m_vao);
+    glGenVertexArrays(1, &m_arrowVao);
 
     CreateBuffers();
     BuildPropagators(deck);
@@ -168,6 +236,8 @@ void TdseSim::CreateBuffers() {
     mk(m_twiddle, static_cast<GLsizeiptr>(n) * 2 * sizeof(float));
     mk(m_potential, static_cast<GLsizeiptr>(n) * n * sizeof(float));
     mk(m_stat, sizeof(uint32_t));
+    mk(m_currentBuf, cplx);
+    mk(m_statJ, sizeof(uint32_t));
 
     glNamedBufferSubData(m_potential, 0, static_cast<GLsizeiptr>(n) * n * sizeof(float), m_vCpu.data());
 }
@@ -269,6 +339,17 @@ void TdseSim::Step(int substeps) {
     }
 }
 
+void TdseSim::ComputeCurrent() {
+    const GLuint groups = static_cast<GLuint>(m_grid.n / 16);
+    m_currentProg.Use();
+    m_currentProg.SetFloat("uDx", static_cast<float>(m_grid.dx()));
+    m_currentProg.SetFloat("uDy", static_cast<float>(m_grid.dy()));
+    fw::ComputeShader::BindBuffer(0, m_psi);
+    fw::ComputeShader::BindBuffer(1, m_currentBuf);
+    m_currentProg.Dispatch(groups, groups, 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
 void TdseSim::Readback() const {
     const int n = m_grid.n;
     m_scratch.resize(static_cast<size_t>(n) * n);
@@ -357,6 +438,17 @@ void TdseSim::Snapshot(fw::OutputWriter& writer) {
     put("kinetic", T);
     put("potential_energy", V);
     put("energy", T + V);
+
+    if (m_writeCurrent) {
+        ComputeCurrent();
+        m_scratch.resize(static_cast<size_t>(n) * n);
+        glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+        glGetNamedBufferSubData(m_currentBuf, 0,
+                                static_cast<GLsizeiptr>(m_scratch.size() * sizeof(std::complex<float>)),
+                                m_scratch.data());
+        // stored as complex64: real = Jx, imag = Jy
+        writer.WriteField("current", m_scratch.data(), fw::NpyDtype::C8, n, n);
+    }
 }
 
 fw::SimInfo TdseSim::Info() const {
@@ -368,7 +460,8 @@ fw::SimInfo TdseSim::Info() const {
     info.ly = m_grid.ly;
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = {"psi", "potential"};
+    info.frameFields = m_writeCurrent ? std::vector<std::string>{"psi", "potential", "current"}
+                                      : std::vector<std::string>{"psi", "potential"};
     info.diagnostics = m_diagNames;
     return info;
 }
@@ -411,6 +504,41 @@ void TdseSim::Render(int fbWidth, int fbHeight) {
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
+
+    if (m_showCurrent) {
+        ComputeCurrent();
+        const uint32_t z = 0;
+        glNamedBufferSubData(m_statJ, 0, sizeof(z), &z);
+        m_reduceMax.Use();
+        fw::ComputeShader::BindBuffer(0, m_currentBuf);
+        fw::ComputeShader::BindBuffer(1, m_statJ);
+        m_reduceMax.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+        fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+        const int cols = std::max(8, fbWidth / 34);
+        const int rows = std::max(6, fbHeight / 34);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        m_arrows.Use();
+        m_arrows.SetVec2("uRes", glm::vec2(fbWidth, fbHeight));
+        m_arrows.SetInt("uN", n);
+        m_arrows.SetFloat("uLx", static_cast<float>(m_grid.lx));
+        m_arrows.SetFloat("uLy", static_cast<float>(m_grid.ly));
+        m_arrows.SetFloat("uPixPerUnit", pixPerUnit);
+        m_arrows.SetVec2("uPanPix", m_panPix);
+        m_arrows.SetInt("uCols", cols);
+        m_arrows.SetInt("uRows", rows);
+        m_arrows.SetFloat("uArrowPx", 30.0f);
+        m_arrows.SetVec3("uColor", glm::vec3(0.85f, 0.98f, 1.0f));
+        glLineWidth(1.6f);
+        fw::ComputeShader::BindBuffer(0, m_currentBuf);
+        fw::ComputeShader::BindBuffer(1, m_statJ);
+        glBindVertexArray(m_arrowVao);
+        glDrawArraysInstanced(GL_LINES, 0, 6, cols * rows);
+        glBindVertexArray(0);
+        glDisable(GL_BLEND);
+    }
+
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -434,6 +562,7 @@ void TdseSim::OnKey(int key, int action) {
         case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break; // lift tails
         case '=': m_gamma = std::min(1.4f, m_gamma + 0.05f); break; // sharpen to the core
         case '0': m_zoom = 1.0f; m_panPix = {0.0f, 0.0f}; m_gain = 1.15f; m_gamma = 0.5f; break;
+        case 'J': m_showCurrent = !m_showCurrent; break;
         default: break;
     }
 }
