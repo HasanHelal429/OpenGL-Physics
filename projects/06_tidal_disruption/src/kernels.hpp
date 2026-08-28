@@ -112,6 +112,24 @@ float gatherDensity(vec3 ri, float h, uint selfIdx) {
     return rho;
 }
 
+// A particle in the far-stretched, thinned-out tail of a tidal debris
+// stream can end up with literally zero neighbors within its kernel
+// support even at h=uHMax (measured: ~0.3% of particles, rho exactly 0.0,
+// ~30t after pericenter once the stream has stretched over 100+ length
+// units) -- rho=0 then makes csound=sqrt(Gamma*pressure/rho) a literal
+// 0/0 = NaN, which poisons every OTHER particle's force the very next
+// step (Forces() loops over all N, so one NaN position contaminates the
+// whole buffer within one frame). Flooring rho alone is not enough to fix
+// this: P/rho^2 ~ rho^(Gamma-2) actually *diverges* as rho->0 for
+// Gamma<2 (true here, Gamma=5/3), so a naive floor silently replaces a
+// crash with a large spurious pressure kick instead. The physically
+// correct treatment is that a particle with no real neighbors should feel
+// no SPH pressure force at all (it still feels gravity, which doesn't
+// depend on rho) -- so pressure/soundspeed are set to exactly 0 below
+// that floor rather than computed from a floored rho, and Forces() must
+// skip the P/rho^2 term entirely below the same floor (next function).
+const float kRhoFloor = 1e-8;
+
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(uN)) return;
@@ -122,13 +140,13 @@ void main() {
     float rho = 0.0;
     for (int it = 0; it < uHIters; ++it) {
         rho = gatherDensity(ri, h, i);
-        h = clamp(uEta * pow(mi / rho, 1.0 / 3.0), uHMin, uHMax);
+        h = clamp(uEta * pow(mi / rho, 1.0 / 3.0), uHMin, uHMax); // rho==0 -> mi/rho=+inf -> clamps to uHMax, no NaN
     }
     rho = gatherDensity(ri, h, i); // final density consistent with the converged h
 
     hArr[i] = h;
-    float pressure = uK * pow(rho, uGamma);
-    float csound = sqrt(uGamma * pressure / rho);
+    float pressure = (rho > kRhoFloor) ? uK * pow(rho, uGamma) : 0.0;
+    float csound = (rho > kRhoFloor) ? sqrt(uGamma * pressure / rho) : 0.0;
     rhoPress[i] = vec4(rho, pressure, csound, 0.0);
 }
 )";
@@ -159,6 +177,13 @@ uniform float uViscBeta;
 uniform int uBhType;
 uniform float uBhMass;
 uniform float uBhRs;
+
+// See Density()'s kRhoFloor comment: a particle with no real SPH neighbors
+// (rho==0, measured in the far-stretched tail of a tidal debris stream)
+// must contribute exactly zero pressure/viscosity force -- P/rho^2 diverges
+// as rho->0 for Gamma<2 (true here), so skipping the term below the floor
+// is required for correctness, not just a NaN-avoidance patch.
+const float kRhoFloor = 1e-8;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -200,18 +225,22 @@ void main() {
             float rhoj = rhoPress[j].x;
             float Pj = rhoPress[j].y;
 
+            float rhobar = 0.5 * (rhoi + rhoj);
             float piVisc = 0.0;
-            vec3 vij = vi - vel[j].xyz;
-            float vijDotRij = dot(vij, rij);
-            if (vijDotRij < 0.0) {
-                float cj = rhoPress[j].z;
-                float mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
-                float cbar = 0.5 * (ci + cj);
-                float rhobar = 0.5 * (rhoi + rhoj);
-                piVisc = (-uViscAlpha * cbar * mu + uViscBeta * mu * mu) / rhobar;
+            if (rhobar > kRhoFloor) {
+                vec3 vij = vi - vel[j].xyz;
+                float vijDotRij = dot(vij, rij);
+                if (vijDotRij < 0.0) {
+                    float cj = rhoPress[j].z;
+                    float mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
+                    float cbar = 0.5 * (ci + cj);
+                    piVisc = (-uViscAlpha * cbar * mu + uViscBeta * mu * mu) / rhobar;
+                }
             }
 
-            a -= mj * (Pi / (rhoi * rhoi) + Pj / (rhoj * rhoj) + piVisc) * gradW;
+            float PiOverRho2 = (rhoi > kRhoFloor) ? Pi / (rhoi * rhoi) : 0.0;
+            float PjOverRho2 = (rhoj > kRhoFloor) ? Pj / (rhoj * rhoj) : 0.0;
+            a -= mj * (PiOverRho2 + PjOverRho2 + piVisc) * gradW;
         }
     }
     acc[i] = vec4(a, 0.0);

@@ -76,6 +76,7 @@ bool SelfTest() {
     constexpr int H_ITERS = 3;
     constexpr int BH_TYPE = 2; // Paczynski-Wiita -- exercises more new code than the point-mass case
     constexpr double BH_MASS = 500.0, BH_RS = 0.1;
+    constexpr double RHO_FLOOR = 1e-8; // see kernels.hpp Density()/Forces() -- P/rho^2 diverges as rho->0
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> posDist(-1.0, 1.0);
@@ -107,8 +108,8 @@ bool SelfTest() {
         rho = gatherDensity(i, h);
         hRef[i] = h;
         rhoRef[i] = rho;
-        pressRef[i] = K * std::pow(rho, GAMMA);
-        csRef[i] = std::sqrt(GAMMA * pressRef[i] / rho);
+        pressRef[i] = (rho > RHO_FLOOR) ? K * std::pow(rho, GAMMA) : 0.0;
+        csRef[i] = (rho > RHO_FLOOR) ? std::sqrt(GAMMA * pressRef[i] / rho) : 0.0;
     }
     std::vector<glm::dvec3> accRef(N, glm::dvec3(0.0));
     for (int i = 0; i < N; ++i) {
@@ -126,18 +127,20 @@ bool SelfTest() {
             const double dWdr = RefKernelDwDr(r, hij);
             if (dWdr == 0.0) continue;
             const glm::dvec3 gradW = (r > 0.0) ? (dWdr / r) * rij : glm::dvec3(0.0);
+            const double rhobar = 0.5 * (rhoRef[i] + rhoRef[j]);
             double piVisc = 0.0;
-            const glm::dvec3 vij = glm::dvec3(vel[i]) - glm::dvec3(vel[j]);
-            const double vijDotRij = glm::dot(vij, rij);
-            if (vijDotRij < 0.0) {
-                const double mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
-                const double cbar = 0.5 * (csRef[i] + csRef[j]);
-                const double rhobar = 0.5 * (rhoRef[i] + rhoRef[j]);
-                piVisc = (-VISC_A * cbar * mu + VISC_B * mu * mu) / rhobar;
+            if (rhobar > RHO_FLOOR) {
+                const glm::dvec3 vij = glm::dvec3(vel[i]) - glm::dvec3(vel[j]);
+                const double vijDotRij = glm::dot(vij, rij);
+                if (vijDotRij < 0.0) {
+                    const double mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
+                    const double cbar = 0.5 * (csRef[i] + csRef[j]);
+                    piVisc = (-VISC_A * cbar * mu + VISC_B * mu * mu) / rhobar;
+                }
             }
-            accRef[i] -= static_cast<double>(posMass[j].w) *
-                         (pressRef[i] / (rhoRef[i] * rhoRef[i]) + pressRef[j] / (rhoRef[j] * rhoRef[j]) + piVisc) *
-                         gradW;
+            const double piOverRho2 = (rhoRef[i] > RHO_FLOOR) ? pressRef[i] / (rhoRef[i] * rhoRef[i]) : 0.0;
+            const double pjOverRho2 = (rhoRef[j] > RHO_FLOOR) ? pressRef[j] / (rhoRef[j] * rhoRef[j]) : 0.0;
+            accRef[i] -= static_cast<double>(posMass[j].w) * (piOverRho2 + pjOverRho2 + piVisc) * gradW;
         }
     }
 

@@ -23,10 +23,20 @@ boosted onto a parabolic orbit around a fixed black hole point mass
 (`tools/make_orbit_ic.py`) and run through pericenter
 (`decks/encounter_beta3.toml`). The result: the star stretches into the
 classic curved tidal debris stream, visible within one frame of pericenter
-passage -- see the movie.
+passage -- see the movie. Running longer (`decks/encounter_beta3_long.toml`,
+50 dynamical times) shows something more: about half the star's mass is
+actually bound to the black hole, and that debris measurably falls back --
+swinging past the black hole again, closer than the original pericenter --
+right around the analytically-predicted return time. That is the literal
+"feeding" this whole project is about.
 
 ```sh
 python tools/make_movie.py out/encounter_beta3
+# --half-extent crops out the far unbound majority to see the close-in
+# disruption/fallback; --gamma (default 0.4) lifts the fallback stream's
+# very dilute debris out of nearly-black on the log color scale
+python tools/make_movie.py out/encounter_beta3_long --half-extent 40 \
+    --out out/encounter_beta3_long/movie_zoom.mp4
 ```
 
 ## Physics
@@ -113,6 +123,28 @@ two-body problem alone, no self-gravity/pressure): reaches the intended
 `r_p` to 6 significant figures, specific energy conserved to `1.6e-12`
 (machine precision for a value that should be exactly 0) -- see the
 derivation and check in the tool's own docstring/module.
+
+**A real crash found running the encounter longer (50 dynamical times, to
+see fallback -- see Validation below): zero-density particles.** A tidal
+stream stretched over 100+ length units eventually leaves a small number of
+particles (~0.3% at the point this hit) with literally zero neighbors
+within their kernel support, even at `h=h_max` -- `rho=0`. That alone is
+fine, but `csound = sqrt(Gamma*pressure/rho)` is then a literal `0/0 = NaN`,
+and because `Forces()` loops over all `N` particles for every particle's
+force, one NaN position poisons *every* particle's computed force the very
+next step (measured: all 4000 particles NaN within a single frame of the
+first isolated particle appearing). Flooring `rho` alone is not the fix:
+`P/rho^2 ~ rho^(Gamma-2)` actually *diverges* as `rho->0` for `Gamma<2`
+(true here, `Gamma=5/3`), so a naive floor silently trades a crash for a
+large spurious pressure kick. The correct treatment -- a particle with no
+real neighbors should feel zero SPH pressure/viscosity force (it still
+feels gravity, which doesn't depend on `rho`) -- needs pressure/soundspeed
+set to exactly `0` below a density floor (`kRhoFloor=1e-8`) rather than
+computed from a floored `rho`, with the same floor applied again in
+`Forces()` to skip the `P/rho^2` terms and the viscosity `1/rhobar` term.
+Rerunning the same 50-dynamical-time deck after the fix: zero NaN, energy
+conservation still `0.05%` of the peak orbital energy scale (see
+Validation).
 
 ## GPU compute shaders (`src/kernels.hpp`)
 
@@ -258,13 +290,41 @@ quantity actually spans during the run, not to its value at an arbitrary
 starting instant**, especially when that instant is itself a near-cancellation
 of much larger terms.
 
+## Validation: fallback (`decks/encounter_beta3_long.toml`, same encounter, extended to 50 dynamical times)
+
+Checking `star_verify_n1.5`'s own settled-star final frame for specific
+orbital energy relative to the black hole (`eps = 0.5*v^2 - G*M_bh/r`, star
+self-gravity/pressure ignored -- a fine approximation once `M_bh`
+dominates) found **~54% of the star's mass is actually bound** (`eps<0`),
+with periods (Kepler's third law from `eps`) ranging `18.85` (most tightly
+bound single particle) to a median of `264` (code time units). The
+prediction: the earliest possible return is around
+`t_pericenter + 18.85 = 2.82 + 18.85 = 21.7`.
+
+| check | result |
+|---|---|
+| onset of fallback | the minimum particle-BH separation, which climbs smoothly outward from `t=15` to `18.85` (the last validated point of the shorter run), starts crashing back down around `t=21` -- matching the predicted `21.7` |
+| depth of return passages | multiple later passages come back *closer* than the original pericenter (`r_min=2.56` at `t=39`, vs. the original `r_p=3.33`) -- real, repeated close encounters, not a one-off |
+| NaN/blowup check (post-fix) | none over the full 1000-frame run -- the zero-density fix above (found by *this* run) holds |
+| energy conservation | `0.05%` of the peak orbital energy scale (`~591` code units), same as the shorter run |
+
+The bulk of the star's mass (the unbound majority) keeps receding to
+hundreds of length units, which forces `tools/make_movie.py`'s default
+auto-fit view so wide that the close-in fallback action becomes a few
+barely-visible pixels next to the black hole marker -- `--half-extent 40`
+(crop to the interesting region) and the default `--gamma 0.4` (perceptual
+lift so the fallback stream's very dilute debris, ~1e-4 vs. the intact
+star's ~2 peak density, doesn't render as near-black) together make it
+actually visible; see `out/encounter_beta3_long/movie_zoom.mp4`.
+
 ## Progress
 
 - [x] `tools/lane_emden.py` -- polytropic stellar structure, validated against tabulated Lane-Emden benchmarks (n=0,1,1.5,3, ~1e-7) and the hydrostatic-equilibrium ODE itself (~2e-4)
 - [x] `tools/make_star_ic.py` -- Monte-Carlo IC sampling, validated radial density recovery against the analytic profile
 - [x] `src/kernels.hpp` self-gravity + adaptive-h SPH compute shaders, validated against an independent CPU reference (`--selftest`)
 - [x] `src/TdeSim` leapfrog integration + damped relaxation + undamped verification, validated per the table above
-- [x] external black hole potential (point-mass done + validated; Paczynski-Wiita implemented + selftest-validated, not yet used in a full encounter run) + `tools/make_orbit_ic.py` (parabolic orbit placement, validated) + the actual encounter (`decks/encounter_beta3.toml`, validated per the table above) + `tools/make_movie.py` (BH marker, tight framing)
+- [x] external black hole potential (point-mass done + validated; Paczynski-Wiita implemented + selftest-validated, not yet used in a full encounter run) + `tools/make_orbit_ic.py` (parabolic orbit placement, validated) + the actual encounter (`decks/encounter_beta3.toml`, validated per the table above) + `tools/make_movie.py` (BH marker, tight framing, `--half-extent`/`--gamma`)
+- [x] fallback: extended the encounter to 50 dynamical times (`decks/encounter_beta3_long.toml`), found and fixed a real zero-density-particle NaN crash along the way (see Physics above), confirmed bound debris (~54% of the star's mass) actually returns and re-passes the black hole closer than the original pericenter, matching the predicted return time -- validated per the table above
 - [ ] close the ~10-30% bulk density calibration gap (see the star-relaxation Validation above) -- lower priority, doesn't block the items below
-- [ ] fallback-rate diagnostics (dM/dt vs. t) compared to the classic t^(-5/3) law -- the natural next step now that a real disruption run exists
+- [ ] proper fallback-rate diagnostics: dM/dt vs. t from the bound debris's energy distribution, compared to the classic t^(-5/3) law (the qualitative fallback is now confirmed above; this would make it quantitative)
 - [ ] Paczynski-Wiita encounter run (relativistic apsidal precession/plunge) as a bridge toward Tier 2
