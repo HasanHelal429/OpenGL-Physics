@@ -1,9 +1,10 @@
 """
 Turn a headless 06_tidal_disruption run into a movie: a 2D (x,y) scatter of
-the SPH particles, colored by density on a fixed log scale so brightness is
-comparable frame to frame, with a time label.
+the SPH particles, colored by density on a fixed log scale (gamma-lifted --
+see colorize() below) so brightness is comparable frame to frame, with a
+time label.
 
-    python make_movie.py <results_dir> [--fps 30] [--stride 1] [--out movie.mp4]
+    python make_movie.py <results_dir> [--fps 30] [--stride 1] [--gamma 0.4] [--out movie.mp4]
 
 Reads manifest.json + frames/pos_mass_*.npy + frames/rho_press_*.npy. Uses
 imageio (bundled ffmpeg via imageio-ffmpeg, not the system PATH) so this
@@ -23,7 +24,6 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import LogNorm
 except ImportError:
     sys.exit("make_movie: needs numpy + matplotlib")
 
@@ -38,6 +38,14 @@ def main():
     ap.add_argument("results_dir")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--stride", type=int, default=1)
+    ap.add_argument("--half-extent", type=float, default=None,
+                    help="override the auto-fit axis half-width -- e.g. to zoom in on a "
+                         "black hole encounter's disruption/fallback and crop out a far "
+                         "escaping majority that would otherwise force a much wider frame")
+    ap.add_argument("--gamma", type=float, default=0.4,
+                    help="density brightness curve on the log scale; <1 lifts dim/thinned-out "
+                         "debris (e.g. fallback streams, orders of magnitude below the intact "
+                         "star's peak density) out of near-invisibility")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -63,9 +71,24 @@ def main():
     # not something a fixed 2D view can hide.
     all_pos = np.stack([np.load(f) for f in pos_frames])
     all_rho = np.stack([np.load(f)[:, 0] for f in rho_frames])
-    half_extent = float(np.max(np.abs(all_pos[..., :2]))) * 1.08
-    rho_min = max(float(all_rho[all_rho > 0].min()), float(all_rho.max()) * 1e-4)
+    half_extent = args.half_extent if args.half_extent is not None \
+        else float(np.max(np.abs(all_pos[..., :2]))) * 1.08
+    rho_min = max(float(all_rho[all_rho > 0].min()), float(all_rho.max()) * 1e-6)
     rho_max = float(all_rho.max())
+
+    # Gamma-lifted log color mapping (not a plain LogNorm): a tidal debris
+    # stream can be orders of magnitude more dilute than the intact star
+    # (measured: returning fallback material ~1e-4 vs. the star's ~2 peak),
+    # which a plain log scale still renders as near-black -- exactly the
+    # material a longer/fallback-focused run exists to show. gamma<1 lifts
+    # the dim end, same idea as 05_tdse_gpu's density view.
+    log_min, log_max = np.log10(rho_min), np.log10(rho_max)
+    cmap = plt.get_cmap("magma")
+
+    def colorize(rho):
+        rho_c = np.clip(rho, rho_min, rho_max)
+        t = (np.log10(rho_c) - log_min) / (log_max - log_min)
+        return cmap(np.clip(t, 0.0, 1.0) ** args.gamma)
 
     fig, ax = plt.subplots(figsize=(6, 6), dpi=130)
     fig.patch.set_facecolor("black")
@@ -81,8 +104,7 @@ def main():
 
     pm0 = np.load(pos_frames[0])
     rp0 = np.load(rho_frames[0])
-    scat = ax.scatter(pm0[:, 0], pm0[:, 1], c=rp0[:, 0], s=3.5, cmap="magma",
-                       norm=LogNorm(vmin=rho_min, vmax=rho_max), linewidths=0)
+    scat = ax.scatter(pm0[:, 0], pm0[:, 1], color=colorize(rp0[:, 0]), s=3.5, linewidths=0)
     txt = ax.text(0.03, 0.96, "", transform=ax.transAxes, color="w", va="top",
                   fontsize=9, family="monospace")
 
@@ -94,7 +116,7 @@ def main():
         pm = np.load(pos_frames[i])
         rp = np.load(rho_frames[i])
         scat.set_offsets(pm[:, :2])
-        scat.set_array(rp[:, 0])
+        scat.set_facecolor(colorize(rp[:, 0]))
         t = i * args.stride * substeps * dt
         txt.set_text(f"{manifest.get('title','')}\nt = {t:.2f}   frame {i*args.stride}/{manifest.get('frames','?')}")
         return scat, txt
