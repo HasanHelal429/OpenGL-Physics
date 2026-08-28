@@ -155,6 +155,28 @@ void main() {
 )";
 }
 
+// Un-transpose + fftshift the diagnostic FFT result for display: reads
+// psihat in the transposed, DC-at-origin layout (binding 0, index kxIdx*N+kyIdx)
+// and writes it row-major with DC at the grid centre (binding 1, index y*N+x).
+inline std::string FftShift(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(std430, binding = 0) readonly buffer Src { vec2 src[]; };  // [kxIdx*N + kyIdx]
+layout(std430, binding = 1) writeonly buffer Dst { vec2 dst[]; }; // [y*N + x], centred
+
+void main() {
+    int x = int(gl_GlobalInvocationID.x);
+    int y = int(gl_GlobalInvocationID.y);
+    if (x >= N || y >= N) return;
+    int kxIdx = (x + N / 2) % N;
+    int kyIdx = (y + N / 2) % N;
+    dst[y * N + x] = src[kxIdx * N + kyIdx];
+}
+)";
+}
+
 // Pointwise complex multiply: a[i] <- a[i] * b[i]  (binding 0 *= binding 1).
 inline std::string CMul(int n) {
     return R"(#version 460 core
