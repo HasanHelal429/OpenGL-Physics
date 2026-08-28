@@ -36,6 +36,34 @@ public:
     void OnViewInput(const fw::ViewInput& in) override;
     void OnKey(int key, int action) override;
 
+    struct RelaxOptions {
+        int states = 1;
+        int steps = 2000;
+        double dtau = 0.01;
+        const std::vector<float>* extraPotential = nullptr;  // added to V0 (e.g. V_Hartree)
+        bool quiet = false;
+    };
+    struct RelaxResult {
+        std::vector<std::vector<std::complex<float>>> states;  // K normalized eigenstates
+        std::vector<double> energies;                          // ascending
+    };
+    // Imaginary-time relaxation to the `states` lowest eigenstates of
+    // -1/2 grad^2 + V0 (+ extraPotential). Uses the grid/FFT set up by Configure.
+    RelaxResult Relax(const RelaxOptions& opt);
+
+    // Self-consistent Poisson-Schrodinger (Phase G4): relax K states in
+    // V_ext + V_H, fill `electrons`, solve Poisson, mix, iterate. Writes results
+    // to outDir. Returns 0 on success.
+    int RunScf(const fw::Deck& deck, const RelaxOptions& relaxOpt, int electrons,
+               const std::string& outDir);
+
+    // FFT-Poisson: nabla^2 V_H = -coupling * (rho - <rho>), periodic. rho and
+    // the returned V_H are CPU grids [y*n+x]. Uses the GPU FFT.
+    std::vector<float> PoissonSolve(const std::vector<float>& rho, double coupling);
+
+    const Grid& GridInfo() const { return m_grid; }
+    const std::vector<float>& StaticPotential() const { return m_vCpu; }
+
 private:
     // A time-dependent drive term (see kernels::BuildVprop): type 0 = tilt, 1 = gate.
     struct DriveTerm {
@@ -48,6 +76,7 @@ private:
     void UploadInitial();
     void BuildPropagators(const fw::Deck& deck);
     void RebuildVprop(double t);
+    void ComputeMeanField();   // rho=|psi|^2 -> FFT-Poisson -> m_vhartree
     void RunStep(double t0);
     void RunStepMagnetic(double t0);
     void Rotate(double alpha);       // exp(i alpha L_z): rotate psi(phi) -> psi(phi + alpha)
@@ -70,6 +99,8 @@ private:
     bool m_hasDrives = false;
     double m_B = 0.0;          // uniform magnetic field (symmetric gauge)
     bool m_hasMagnetic = false;
+    bool m_hasMeanfield = false;
+    double m_mfCoupling = 0.0;
 
     // GPU state (all vec2 complex, row-major, except m_potential which is float).
     GLuint m_psi = 0;
@@ -80,6 +111,7 @@ private:
     GLuint m_twiddle = 0; // length N
     GLuint m_potential = 0;   // static external potential V0 (float), also BuildVprop input
     GLuint m_cap = 0;         // absorbing rate W (float), BuildVprop input
+    GLuint m_vhartree = 0;    // Hartree potential V_H (float); zero unless [meanfield]
     GLuint m_stat = 0;        // 1 uint: max |psi|^2 for the interactive view
     GLuint m_currentBuf = 0;  // vec2 probability current j
     GLuint m_statJ = 0;       // 1 uint: max |j|^2
@@ -94,6 +126,9 @@ private:
     fw::ComputeShader m_fftshift;
     fw::ComputeShader m_buildVprop;
     fw::ComputeShader m_shearPhase;
+    fw::ComputeShader m_mfRho;
+    fw::ComputeShader m_poissonMul;
+    fw::ComputeShader m_extractReal;
 
     // Interactive view.
     fw::Shader m_view;

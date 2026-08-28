@@ -155,6 +155,60 @@ void main() {
 )";
 }
 
+// Mean-field (Hartree) helpers.
+// Density: write rho = |psi|^2 into a complex buffer (imag = 0) for the FFT.
+inline std::string MeanFieldRho(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer Psi { vec2 psi[]; };
+layout(std430, binding = 1) writeonly buffer Rho { vec2 rho[]; };
+void main() {
+    int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= N || y >= N) return;
+    vec2 p = psi[y * N + x];
+    rho[y * N + x] = vec2(dot(p, p), 0.0);
+}
+)";
+}
+// Poisson multiply in k-space: V_hat(k) = coupling * rho_hat(k) / k^2 (k=0 -> 0).
+// Data is rho_hat in the transposed [kxIdx*N + kyIdx] layout.
+inline std::string PoissonMul(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer Data { vec2 data[]; };
+uniform float uCoupling;
+uniform float uKxScale;   // 2*pi / lx
+uniform float uKyScale;   // 2*pi / ly
+void main() {
+    int a = int(gl_GlobalInvocationID.y);   // kx index
+    int b = int(gl_GlobalInvocationID.x);   // ky index
+    if (a >= N || b >= N) return;
+    int fa = (a <= N / 2) ? a : a - N;
+    int fb = (b <= N / 2) ? b : b - N;
+    float kx = uKxScale * float(fa), ky = uKyScale * float(fb);
+    float k2 = kx * kx + ky * ky;
+    int i = a * N + b;
+    data[i] = k2 > 1e-12 ? data[i] * (uCoupling / k2) : vec2(0.0);
+}
+)";
+}
+// Copy the real part of a complex buffer into a float buffer.
+inline std::string ExtractReal(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) readonly buffer Src { vec2 src[]; };
+layout(std430, binding = 1) writeonly buffer Dst { float dst[]; };
+void main() {
+    int x = int(gl_GlobalInvocationID.x), y = int(gl_GlobalInvocationID.y);
+    if (x >= N || y >= N) return;
+    dst[y * N + x] = src[y * N + x].x;
+}
+)";
+}
+
 // Fourier-shift phase for one shear of the 3-shear rotation. Data is in
 // half-transformed layout [row][col=freq bin]; this multiplies element (r, c)
 // by exp(-i * k(c) * uAmount * coord(r)), which shifts row r by -uAmount*coord(r)
@@ -198,6 +252,7 @@ layout(local_size_x = 16, local_size_y = 16) in;
 layout(std430, binding = 0) readonly buffer V0 { float v0[]; };
 layout(std430, binding = 1) readonly buffer Cap { float wcap[]; };
 layout(std430, binding = 2) writeonly buffer Vp { vec2 vprop[]; };
+layout(std430, binding = 3) readonly buffer VH { float vh[]; };   // Hartree potential (0 if unused)
 
 uniform float uDt;
 uniform float uTime;
@@ -218,7 +273,7 @@ void main() {
     float x = uX0 + (float(i) + 0.5) * uDx;
     float y = uY0 + (float(j) + 0.5) * uDy;
 
-    float V = v0[k];
+    float V = v0[k] + vh[k];
     for (int d = 0; d < uDriveCount; ++d) {
         if (uDriveType[d] == 0) {           // tilt: E0 sin(w t + phi) env(t) (dx*x + dy*y)
             float E0 = uDriveA[d].x, w = uDriveA[d].y, phi = uDriveA[d].z, ramp = uDriveA[d].w;

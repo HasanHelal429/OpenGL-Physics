@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <random>
 #include <stdexcept>
 
 namespace tdse {
@@ -171,9 +173,9 @@ void main() { FragColor = vec4(uColor, vA * 0.9); }
 } // namespace
 
 TdseSim::~TdseSim() {
-    GLuint bufs[] = {m_psi,       m_tmp,   m_spec,       m_vprop, m_kprop,  m_twiddle, m_potential,
-                     m_cap,       m_stat,  m_currentBuf, m_statJ, m_kdisp,  m_statK};
-    glDeleteBuffers(13, bufs);
+    GLuint bufs[] = {m_psi,   m_tmp,   m_spec,  m_vprop,      m_kprop, m_twiddle, m_potential,
+                     m_cap,   m_vhartree, m_stat, m_currentBuf, m_statJ, m_kdisp,  m_statK};
+    glDeleteBuffers(14, bufs);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
     if (m_arrowVao) glDeleteVertexArrays(1, &m_arrowVao);
 }
@@ -246,6 +248,9 @@ void TdseSim::Configure(const fw::Deck& deck) {
     }
     m_hasDrives = !m_drives.empty();
 
+    m_hasMeanfield = deck.GetBool("meanfield.enabled", false);
+    m_mfCoupling = deck.GetDouble("meanfield.coupling", 1.0);
+
     // Momentum-view window: a few times the spread expected from the initial
     // momentum, packet width, and the deepest/highest part of the potential.
     {
@@ -264,6 +269,9 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_fftshift = fw::ComputeShader::FromSource(kernels::FftShift(n));
     m_buildVprop = fw::ComputeShader::FromSource(kernels::BuildVprop(n));
     m_shearPhase = fw::ComputeShader::FromSource(kernels::ShearPhase(n));
+    m_mfRho = fw::ComputeShader::FromSource(kernels::MeanFieldRho(n));
+    m_poissonMul = fw::ComputeShader::FromSource(kernels::PoissonMul(n));
+    m_extractReal = fw::ComputeShader::FromSource(kernels::ExtractReal(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
     m_arrows = fw::Shader::FromSource(kArrowVert, kArrowFrag);
     glGenVertexArrays(1, &m_vao);
@@ -291,6 +299,12 @@ void TdseSim::CreateBuffers() {
     mk(m_twiddle, static_cast<GLsizeiptr>(n) * 2 * sizeof(float));
     mk(m_potential, static_cast<GLsizeiptr>(n) * n * sizeof(float));
     mk(m_cap, static_cast<GLsizeiptr>(n) * n * sizeof(float));
+    mk(m_vhartree, static_cast<GLsizeiptr>(n) * n * sizeof(float));
+    {
+        const std::vector<float> zeros(static_cast<size_t>(n) * n, 0.0f);
+        glNamedBufferSubData(m_vhartree, 0, static_cast<GLsizeiptr>(zeros.size() * sizeof(float)),
+                             zeros.data());
+    }
     mk(m_stat, sizeof(uint32_t));
     mk(m_currentBuf, cplx);
     mk(m_statJ, sizeof(uint32_t));
@@ -368,7 +382,42 @@ void TdseSim::RebuildVprop(double t) {
     fw::ComputeShader::BindBuffer(0, m_potential);
     fw::ComputeShader::BindBuffer(1, m_cap);
     fw::ComputeShader::BindBuffer(2, m_vprop);
+    fw::ComputeShader::BindBuffer(3, m_vhartree);
     m_buildVprop.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void TdseSim::ComputeMeanField() {
+    const int n = m_grid.n;
+    const GLuint groups = static_cast<GLuint>(n / 16);
+
+    // rho = |psi|^2 -> m_spec (complex, imag 0)
+    m_mfRho.Use();
+    fw::ComputeShader::BindBuffer(0, m_psi);
+    fw::ComputeShader::BindBuffer(1, m_spec);
+    m_mfRho.Dispatch(groups, groups, 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    Fft(m_spec, false);
+    TransposeBuf(m_spec, m_tmp);
+    Fft(m_tmp, false);  // m_tmp = rho_hat [kxIdx][kyIdx]
+
+    m_poissonMul.Use();
+    m_poissonMul.SetFloat("uCoupling", static_cast<float>(m_mfCoupling));
+    m_poissonMul.SetFloat("uKxScale", static_cast<float>(2.0 * kPi / m_grid.lx));
+    m_poissonMul.SetFloat("uKyScale", static_cast<float>(2.0 * kPi / m_grid.ly));
+    fw::ComputeShader::BindBuffer(0, m_tmp);
+    m_poissonMul.Dispatch(groups, groups, 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    Fft(m_tmp, true);
+    TransposeBuf(m_tmp, m_spec);
+    Fft(m_spec, true);  // m_spec = V_H (real part)
+
+    m_extractReal.Use();
+    fw::ComputeShader::BindBuffer(0, m_spec);
+    fw::ComputeShader::BindBuffer(1, m_vhartree);
+    m_extractReal.Dispatch(groups, groups, 1);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 }
 
@@ -403,8 +452,10 @@ void TdseSim::CMulBuf(GLuint dst, GLuint by) {
 
 void TdseSim::RunStep(double t0) {
     // Time-dependent potential: both half-kicks of this step use V at the
-    // midpoint t0 + dt/2 (2nd-order accurate).
-    if (m_hasDrives) RebuildVprop(t0 + 0.5 * m_dt);
+    // midpoint t0 + dt/2 (2nd-order accurate). The Hartree potential is also
+    // refreshed here from the current density.
+    if (m_hasMeanfield) ComputeMeanField();
+    if (m_hasDrives || m_hasMeanfield) RebuildVprop(t0 + 0.5 * m_dt);
     CMulBuf(m_psi, m_vprop);      // half potential kick
     Fft(m_psi, false);            // FFT over x   -> psi[y][kx]
     TransposeBuf(m_psi, m_tmp);   // tmp[kx][y]
@@ -457,7 +508,8 @@ void TdseSim::Rotate(double alpha) {
 }
 
 void TdseSim::RunStepMagnetic(double t0) {
-    if (m_hasDrives) RebuildVprop(t0 + 0.5 * m_dt);
+    if (m_hasMeanfield) ComputeMeanField();
+    if (m_hasDrives || m_hasMeanfield) RebuildVprop(t0 + 0.5 * m_dt);
     const double half = -m_B * m_dt / 4.0;  // exp(-i M dt/2), M = -(B/2) L_z
     CMulBuf(m_psi, m_vprop);   // half U kick (V incl. diamagnetic term)
     Rotate(half);              // half L_z rotation
@@ -768,6 +820,216 @@ void TdseSim::OnKey(int key, int action) {
             break;
         default: break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Imaginary-time relaxation (Phase G1)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A few real solid-harmonic factors to seed states of different symmetry.
+double SeedPoly(int k, double x, double y) {
+    switch (k % 6) {
+        case 0: return 1.0;
+        case 1: return x;
+        case 2: return y;
+        case 3: return x * y;
+        case 4: return x * x - y * y;
+        default: return x * (x * x - 3.0 * y * y);
+    }
+}
+
+} // namespace
+
+TdseSim::RelaxResult TdseSim::Relax(const RelaxOptions& opt) {
+    const int n = m_grid.n;
+    const size_t nn = static_cast<size_t>(n) * n;
+    const int K = std::clamp(opt.states, 1, 12);
+    const double dtau = opt.dtau;
+    const double cell = m_grid.dx() * m_grid.dy();
+
+    // Effective potential = static V0 (+ optional extra, e.g. V_Hartree).
+    std::vector<float> veff = m_vCpu;
+    if (opt.extraPotential && opt.extraPotential->size() == nn) {
+        for (size_t i = 0; i < nn; ++i) veff[i] += (*opt.extraPotential)[i];
+    }
+
+    // Real imaginary-time propagators: exp(-V dtau/2) and exp(-k^2 dtau/2)
+    // (the kinetic one in the transposed [kxIdx][kyIdx] layout).
+    std::vector<float> vpr(nn * 2, 0.0f), kpr(nn * 2, 0.0f);
+    for (size_t i = 0; i < nn; ++i) vpr[2 * i] = static_cast<float>(std::exp(-veff[i] * dtau * 0.5));
+    for (int a = 0; a < n; ++a) {
+        const double kx = m_grid.kx(a);
+        for (int b = 0; b < n; ++b) {
+            const double ky = m_grid.ky(b);
+            kpr[2 * (static_cast<size_t>(a) * n + b)] =
+                static_cast<float>(std::exp(-0.5 * (kx * kx + ky * ky) * dtau));
+        }
+    }
+    GLuint vpropR = 0, kpropR = 0;
+    glCreateBuffers(1, &vpropR);
+    glCreateBuffers(1, &kpropR);
+    glNamedBufferData(vpropR, static_cast<GLsizeiptr>(vpr.size() * sizeof(float)), vpr.data(), GL_STATIC_DRAW);
+    glNamedBufferData(kpropR, static_cast<GLsizeiptr>(kpr.size() * sizeof(float)), kpr.data(), GL_STATIC_DRAW);
+
+    std::vector<GLuint> sb(K, 0);
+    for (int k = 0; k < K; ++k) {
+        glCreateBuffers(1, &sb[k]);
+        glNamedBufferData(sb[k], static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), nullptr,
+                          GL_DYNAMIC_DRAW);
+    }
+
+    // Seed: the deck's initial state modulated by a symmetry polynomial + noise.
+    std::mt19937 rng(1234);
+    std::uniform_real_distribution<float> rnd(-1.0f, 1.0f);
+    std::vector<std::vector<std::complex<float>>> cpu(K, std::vector<std::complex<float>>(nn));
+    for (int k = 0; k < K; ++k) {
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                const size_t idx = static_cast<size_t>(j) * n + i;
+                const double p = SeedPoly(k, m_grid.x(i), m_grid.y(j));
+                const std::complex<float> base = m_initial[idx];
+                cpu[k][idx] = base * static_cast<float>(p) +
+                              base * std::complex<float>(0.02f * rnd(rng), 0.02f * rnd(rng));
+            }
+        }
+    }
+
+    auto orthonormalize = [&]() {
+        for (int k = 0; k < K; ++k) {
+            for (int j = 0; j < k; ++j) {
+                std::complex<double> ov = 0.0;
+                for (size_t i = 0; i < nn; ++i)
+                    ov += std::conj(std::complex<double>(cpu[j][i])) * std::complex<double>(cpu[k][i]);
+                const std::complex<float> c(static_cast<float>(ov.real() * cell),
+                                            static_cast<float>(ov.imag() * cell));
+                for (size_t i = 0; i < nn; ++i) cpu[k][i] -= c * cpu[j][i];
+            }
+            double nrm = 0.0;
+            for (size_t i = 0; i < nn; ++i) nrm += std::norm(cpu[k][i]);
+            const float s = nrm > 0.0 ? static_cast<float>(1.0 / std::sqrt(nrm * cell)) : 1.0f;
+            for (size_t i = 0; i < nn; ++i) cpu[k][i] *= s;
+        }
+    };
+    orthonormalize();
+    for (int k = 0; k < K; ++k)
+        glNamedBufferSubData(sb[k], 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), cpu[k].data());
+
+    auto propReal = [&](GLuint buf) {
+        CMulBuf(buf, vpropR);
+        Fft(buf, false);
+        TransposeBuf(buf, m_tmp);
+        Fft(m_tmp, false);
+        CMulBuf(m_tmp, kpropR);
+        Fft(m_tmp, true);
+        TransposeBuf(m_tmp, buf);
+        Fft(buf, true);
+        CMulBuf(buf, vpropR);
+    };
+
+    for (int step = 0; step < opt.steps; ++step) {
+        for (int k = 0; k < K; ++k) propReal(sb[k]);
+        glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+        for (int k = 0; k < K; ++k)
+            glGetNamedBufferSubData(sb[k], 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
+                                    cpu[k].data());
+        orthonormalize();
+        for (int k = 0; k < K; ++k)
+            glNamedBufferSubData(sb[k], 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)),
+                                 cpu[k].data());
+        if (!opt.quiet && (step % 100 == 0 || step == opt.steps - 1)) {
+            std::printf("\rrelax %d/%d   ", step + 1, opt.steps);
+            std::fflush(stdout);
+        }
+    }
+    if (!opt.quiet) std::printf("\n");
+
+    // Energies: E_k = <T> + <V>  (FD kinetic, periodic).
+    RelaxResult res;
+    res.states.resize(K);
+    res.energies.resize(K);
+    const double dx = m_grid.dx(), dy = m_grid.dy();
+    for (int k = 0; k < K; ++k) {
+        double T = 0.0, V = 0.0;
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                const std::complex<double> p(cpu[k][static_cast<size_t>(j) * n + i]);
+                const auto at = [&](int ii, int jj) {
+                    return std::complex<double>(cpu[k][static_cast<size_t>((jj + n) % n) * n + ((ii + n) % n)]);
+                };
+                const std::complex<double> gx = (at(i + 1, j) - at(i, j)) / dx;
+                const std::complex<double> gy = (at(i, j + 1) - at(i, j)) / dy;
+                T += 0.5 * (std::norm(gx) + std::norm(gy));
+                V += veff[static_cast<size_t>(j) * n + i] * std::norm(p);
+            }
+        }
+        res.energies[k] = (T + V) * cell;
+        res.states[k] = std::move(cpu[k]);
+    }
+
+    glDeleteBuffers(1, &vpropR);
+    glDeleteBuffers(1, &kpropR);
+    glDeleteBuffers(K, sb.data());
+
+    // Restore m_psi to the deck's initial state (relax clobbered nothing shared,
+    // but be tidy in case the caller keeps using the sim).
+    UploadInitial();
+    return res;
+}
+
+std::vector<float> TdseSim::PoissonSolve(const std::vector<float>& rho, double coupling) {
+    const int n = m_grid.n;
+    const size_t nn = static_cast<size_t>(n) * n;
+
+    // rho -> zero mean, upload as complex.
+    double mean = 0.0;
+    for (float r : rho) mean += r;
+    mean /= static_cast<double>(nn);
+    std::vector<std::complex<float>> buf(nn);
+    for (size_t i = 0; i < nn; ++i) buf[i] = std::complex<float>(static_cast<float>(rho[i] - mean), 0.0f);
+    glNamedBufferSubData(m_spec, 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), buf.data());
+
+    Fft(m_spec, false);
+    TransposeBuf(m_spec, m_tmp);
+    Fft(m_tmp, false);  // m_tmp = rho-hat, layout [kxIdx][kyIdx]
+
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    std::vector<std::complex<float>> hat(nn);
+    glGetNamedBufferSubData(m_tmp, 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), hat.data());
+
+    // V_hat(k) = coupling * rho_hat(k) / k^2,  V_hat(0) = 0.
+    for (int a = 0; a < n; ++a) {
+        const double kx = m_grid.kx(a);
+        for (int b = 0; b < n; ++b) {
+            const double ky = m_grid.ky(b);
+            const double k2 = kx * kx + ky * ky;
+            const size_t idx = static_cast<size_t>(a) * n + b;
+            hat[idx] = k2 > 1e-12 ? hat[idx] * static_cast<float>(coupling / k2)
+                                  : std::complex<float>(0.0f, 0.0f);
+        }
+    }
+    glNamedBufferSubData(m_tmp, 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), hat.data());
+
+    Fft(m_tmp, true);
+    TransposeBuf(m_tmp, m_spec);
+    Fft(m_spec, true);  // m_spec = V_H (real part)
+
+    glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
+    glGetNamedBufferSubData(m_spec, 0, static_cast<GLsizeiptr>(nn * sizeof(std::complex<float>)), buf.data());
+    std::vector<float> vh(nn);
+    for (size_t i = 0; i < nn; ++i) vh[i] = buf[i].real();
+    return vh;
+}
+
+int TdseSim::RunScf(const fw::Deck& deck, const RelaxOptions& relaxOpt, int electrons,
+                    const std::string& outDir) {
+    (void)deck;
+    (void)relaxOpt;
+    (void)electrons;
+    (void)outDir;
+    std::fprintf(stderr, "--scf: not yet implemented (Phase G4)\n");
+    return 3;
 }
 
 } // namespace tdse
