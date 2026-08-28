@@ -342,14 +342,50 @@ lift so the fallback stream's very dilute debris, ~1e-4 vs. the intact
 star's ~2 peak density, doesn't render as near-black) together make it
 actually visible; see `out/encounter_beta3_long/movie_zoom.mp4`.
 
+## Validation: Paczynski-Wiita encounter (`decks/encounter_beta3_pw.toml`)
+
+Same star, same orbit (`r_t=10`, `r_p=3.333`, `r_0=30`, `beta=3`) as
+`decks/encounter_beta3.toml` -- only the black hole's force law changes,
+`"point"` (Newtonian) -> `"paczynski_wiita"` (`a=-G*M_bh/(r-r_s)^2`), with
+`r_s=0.3333` so the ISCO (`=3*r_s=1.0`) sits comfortably inside pericenter
+(`~3.3x` the ISCO: close enough for the extra pull to matter, far enough
+the star swings past rather than plunging in). A direct, apples-to-apples
+comparison isolates exactly what the pseudo-relativistic potential changes:
+
+| check | Newtonian | Paczynski-Wiita |
+|---|---|---|
+| peak kinetic energy at pericenter | `296` | `374` (+26%) |
+| deepest star-BH potential energy | `-296` | `-375` |
+| closest single-particle approach | `2.52` | `2.10` |
+| energy conservation (drift / peak orbital energy scale) | `0.11%` | `0.15%` |
+| thermal energy peak (compressional heating at pericenter) | `0.670` at `t=2.95` | `0.677` at `t=2.85` |
+
+The deeper effective potential well accelerates the star measurably more
+through pericenter (higher peak KE, closer approach for the leading edge)
+and the post-pericenter trajectory visibly diverges from the Newtonian
+run afterward -- see `tools/compare_encounters.py`'s output
+(`out/encounter_beta3_pw/comparison.png`) and the movie
+(`out/encounter_beta3_pw/movie.mp4`). Energy conservation is slightly
+worse than the Newtonian run (`0.15%` vs `0.11%`) since `1/(r-r_s)^2`'s
+steeper gradient near the BH is more demanding on the leapfrog integrator
+at the same `dt` -- still well within an acceptable range at this
+resolution. No NaN/blowup; qualitative disruption (tidal stream) still
+visible within one frame of pericenter, same as the Newtonian case.
+
+```sh
+python tools/compare_encounters.py out/encounter_beta3 out/encounter_beta3_pw \
+    --labels "Newtonian,Paczynski-Wiita" --out out/encounter_beta3_pw/comparison.png
+python tools/make_movie.py out/encounter_beta3_pw
+```
+
 ## Progress
 
 - [x] `tools/lane_emden.py` -- polytropic stellar structure, validated against tabulated Lane-Emden benchmarks (n=0,1,1.5,3, ~1e-7) and the hydrostatic-equilibrium ODE itself (~2e-4)
 - [x] `tools/make_star_ic.py` -- Monte-Carlo IC sampling, validated radial density recovery against the analytic profile
 - [x] `src/kernels.hpp` self-gravity + adaptive-h SPH compute shaders, validated against an independent CPU reference (`--selftest`)
 - [x] `src/TdeSim` leapfrog integration + damped relaxation + undamped verification, validated per the table above
-- [x] external black hole potential (point-mass done + validated; Paczynski-Wiita implemented + selftest-validated, not yet used in a full encounter run) + `tools/make_orbit_ic.py` (parabolic orbit placement, validated) + the actual encounter (`decks/encounter_beta3.toml`, validated per the table above) + `tools/make_movie.py` (BH marker, tight framing, `--half-extent`/`--gamma`)
+- [x] external black hole potential (point-mass and Paczynski-Wiita, both validated including a full encounter run each) + `tools/make_orbit_ic.py` (parabolic orbit placement, validated) + the actual encounter (`decks/encounter_beta3.toml`, validated per the table above) + `tools/make_movie.py` (BH marker, tight framing, `--half-extent`/`--gamma`)
 - [x] fallback: extended the encounter to 50 dynamical times (`decks/encounter_beta3_long.toml`), found and fixed a real zero-density-particle NaN crash along the way (see Physics above), confirmed bound debris (~54% of the star's mass) actually returns and re-passes the black hole closer than the original pericenter, matching the predicted return time -- validated per the table above
 - [x] closed the ~10-30% bulk density calibration gap -- was the self-term exclusion, not a resolution/EOS mismatch (see Physics + star-relaxation Validation above)
 - [x] quantitative fallback-rate diagnostics (`tools/fallback_rate.py`): dM/dt vs. t from the bound debris's frozen-in orbital energy, compared to the classic t^(-5/3) law -- see Validation above
-- [ ] Paczynski-Wiita encounter run (relativistic apsidal precession/plunge) as a bridge toward Tier 2
+- [x] Paczynski-Wiita encounter run (`decks/encounter_beta3_pw.toml`), compared directly against the Newtonian point-mass run (`tools/compare_encounters.py`) -- deeper effective potential gives measurably higher peak KE and closer approach, validated per the table above -- a bridge toward Tier 2

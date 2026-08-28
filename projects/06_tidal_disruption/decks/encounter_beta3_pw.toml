@@ -1,0 +1,36 @@
+title = "Tidal disruption -- n=1.5 star, M_bh=1000 M_star, beta=3, Paczynski-Wiita gravity"
+
+# Same star, same orbit (r_t=10, r_p=3.333, r_0=30) as decks/encounter_beta3.toml
+# -- only the black hole's force law changes, Newtonian point mass ->
+# Paczynski-Wiita (a = -G*M/(r-r_s)^2), so this is a direct apples-to-apples
+# comparison of how a pseudo-relativistic potential changes the encounter.
+# r_s=0.3333 puts the ISCO (=3*r_s=1.0, see kernels.hpp's Forces() comment)
+# comfortably inside the pericenter (3.333, ~3.3x the ISCO) -- close enough
+# for PW's extra pull near the BH to matter, far enough that the star swings
+# past instead of plunging straight in.
+[star]
+ic_file = "ic/star_n1.5_encounter_beta3.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[blackhole]
+enabled = true
+type = "paczynski_wiita"
+mass = 1000.0
+schwarzschild_radius = 0.3333
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 300
