@@ -72,10 +72,19 @@ void TdeSim::Configure(const fw::Deck& deck) {
     m_viscBeta = deck.GetDouble("sph.visc_beta", 2.0);
     m_damping = deck.GetDouble("time.damping", 0.0);
 
+    if (deck.GetBool("blackhole.enabled", false)) {
+        const std::string type = deck.GetString("blackhole.type", "point");
+        m_bhType = (type == "paczynski_wiita") ? 2 : 1;
+        m_bhMass = deck.GetDouble("blackhole.mass", 1000.0);
+        m_bhRs = deck.GetDouble("blackhole.schwarzschild_radius", 0.0);
+    } else {
+        m_bhType = 0;
+    }
+
     m_dt = deck.GetDouble("time.dt", 1e-3);
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 1);
 
-    m_diagNames = {"kinetic", "thermal", "potential", "energy", "virial_2T_over_W",
+    m_diagNames = {"kinetic", "thermal", "potential", "potential_bh", "energy", "virial_2T_over_W",
                    "com_x", "com_y", "com_z", "com_speed"};
 
     m_density = fw::ComputeShader::FromSource(kernels::Density());
@@ -143,6 +152,9 @@ void TdeSim::ComputeDensityAndForces() {
     m_forces.SetFloat("uSoftening2", static_cast<float>(m_softening * m_softening));
     m_forces.SetFloat("uViscAlpha", static_cast<float>(m_viscAlpha));
     m_forces.SetFloat("uViscBeta", static_cast<float>(m_viscBeta));
+    m_forces.SetInt("uBhType", m_bhType);
+    m_forces.SetFloat("uBhMass", static_cast<float>(m_bhMass));
+    m_forces.SetFloat("uBhRs", static_cast<float>(m_bhRs));
     fw::ComputeShader::BindBuffer(0, m_posMass);
     fw::ComputeShader::BindBuffer(1, m_vel);
     fw::ComputeShader::BindBuffer(2, m_acc);
@@ -220,9 +232,22 @@ void TdeSim::Snapshot(fw::OutputWriter& writer) {
             potential -= m_G * m_posMassCpu[i].w * m_posMassCpu[j].w / r;
         }
     }
+    double potentialBh = 0.0;
+    if (m_bhType != 0) {
+        for (int i = 0; i < m_n; ++i) {
+            const double r = glm::length(glm::dvec3(m_posMassCpu[i]));
+            const double m = m_posMassCpu[i].w;
+            if (m_bhType == 1) {
+                potentialBh -= m_G * m_bhMass * m / std::sqrt(r * r + m_softening * m_softening);
+            } else {
+                const double dr = std::max(r - m_bhRs, m_softening);
+                potentialBh -= m_G * m_bhMass * m / dr;
+            }
+        }
+    }
     const glm::dvec3 comVel = comP / totalMass;
     com /= totalMass;
-    const double energy = kinetic + thermal + potential;
+    const double energy = kinetic + thermal + potential + potentialBh;
     const double virial = (potential != 0.0) ? 2.0 * kinetic / std::abs(potential) : 0.0;
 
     writer.WriteField("pos_mass", m_posMassCpu.data(), fw::NpyDtype::F4, m_n, 4);
@@ -232,6 +257,7 @@ void TdeSim::Snapshot(fw::OutputWriter& writer) {
     writer.WriteScalar("kinetic", kinetic);
     writer.WriteScalar("thermal", thermal);
     writer.WriteScalar("potential", potential);
+    writer.WriteScalar("potential_bh", potentialBh);
     writer.WriteScalar("energy", energy);
     writer.WriteScalar("virial_2T_over_W", virial);
     writer.WriteScalar("com_x", com.x);

@@ -67,6 +67,12 @@ private:
     double m_viscBeta = 2.0;
     double m_damping = 0.0;   // relaxation-only velocity damping rate, 1/time; 0 = off
 
+    // Black hole: fixed point mass at the origin. 0 = off, 1 = Newtonian
+    // point mass, 2 = Paczynski-Wiita.
+    int m_bhType = 0;
+    double m_bhMass = 0.0;
+    double m_bhRs = 0.0;
+
     std::string m_title = "Tidal Disruption -- SPH star";
     std::vector<std::string> m_diagNames;
 
