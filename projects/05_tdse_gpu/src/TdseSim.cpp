@@ -1081,7 +1081,7 @@ int TdseSim::RunScf(const fw::Deck& deck, const RelaxOptions& relaxOpt, int elec
     for (size_t i = 0; i < nn; ++i) vTot[i] = m_vCpu[i] + vH[i];
 
     fw::SimInfo info;
-    info.title = "Poisson-Schrodinger (self-consistent)";
+    info.title = deck.GetString("title", "Poisson-Schrodinger (self-consistent)");
     info.gridNx = n;
     info.gridNy = n;
     info.lx = m_grid.lx;
