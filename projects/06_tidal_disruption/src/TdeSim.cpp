@@ -287,12 +287,31 @@ void TdeSim::Render(int fbWidth, int fbHeight) {
     double rhoMax = 1e-30;
     for (int i = 0; i < m_n; ++i) rhoMax = std::max(rhoMax, static_cast<double>(m_rhoPressCpu[i].x));
 
+    // ParticleCloud's point size is perspective-correct (a fixed world-space
+    // radius shrinks on screen as the camera pulls back), which is right for
+    // watching the compact relaxed star up close but makes an encounter's
+    // particles vanish to sub-pixel once zoomed out far enough to see the
+    // whole orbit (tens to hundreds of length units). Scaling world-space
+    // size by the current camera distance (calibrated against the initial
+    // distance=4 setup below, where 0.02 already looked right for the
+    // compact star) keeps the on-screen size roughly constant across zoom
+    // levels instead.
+    const float sizeScale = m_camera.distance / 4.0f;
+    const float starSize = 0.02f * sizeScale;
+
     std::vector<fw::ParticleInstance> particles(m_n);
     for (int i = 0; i < m_n; ++i) {
         const float t = static_cast<float>(std::pow(m_rhoPressCpu[i].x / rhoMax, 0.35)); // gamma-lift for dim outskirts
         particles[i].position = glm::vec3(m_posMassCpu[i]);
         particles[i].color = glm::vec4(0.3f + 0.7f * t, 0.5f * (1.0f - t) + 0.2f, 1.0f - 0.6f * t, 1.0f);
-        particles[i].size = 0.02f;
+        particles[i].size = starSize;
+    }
+    if (m_bhType != 0) {
+        fw::ParticleInstance bh;
+        bh.position = glm::vec3(0.0f); // fixed at the origin, see Forces()'s black-hole comment
+        bh.color = glm::vec4(1.0f, 0.95f, 0.8f, 1.0f); // bright warm white, distinct from the star's magma tones
+        bh.size = 3.0f * starSize;
+        particles.push_back(bh);
     }
     m_particles->SetParticles(particles);
 
