@@ -99,6 +99,11 @@ void TdeSim::Configure(const fw::Deck& deck) {
     m_camera.target = glm::vec3(0.0f);
     m_camera.distance = 4.0f;
     m_camera.pitch = 20.0f;
+
+    // See TdeSim.hpp's comment on m_particles: must be constructed here,
+    // not as a default-constructed member, since a valid GL context is
+    // only guaranteed to exist once Configure() runs.
+    m_particles = std::make_unique<fw::ParticleCloud>();
 }
 
 void TdeSim::CreateBuffers() {
@@ -289,13 +294,13 @@ void TdeSim::Render(int fbWidth, int fbHeight) {
         particles[i].color = glm::vec4(0.3f + 0.7f * t, 0.5f * (1.0f - t) + 0.2f, 1.0f - 0.6f * t, 1.0f);
         particles[i].size = 0.02f;
     }
-    m_particles.SetParticles(particles);
+    m_particles->SetParticles(particles);
 
     glViewport(0, 0, fbWidth, fbHeight);
     glClearColor(0.02f, 0.02f, 0.04f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     const float aspect = static_cast<float>(fbWidth) / static_cast<float>(std::max(fbHeight, 1));
-    m_particles.Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), static_cast<float>(fbHeight));
+    m_particles->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), static_cast<float>(fbHeight));
 }
 
 void TdeSim::OnViewInput(const fw::ViewInput& in) {
