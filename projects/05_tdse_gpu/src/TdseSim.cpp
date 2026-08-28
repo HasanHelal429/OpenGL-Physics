@@ -171,9 +171,9 @@ void main() { FragColor = vec4(uColor, vA * 0.9); }
 } // namespace
 
 TdseSim::~TdseSim() {
-    GLuint bufs[] = {m_psi,       m_tmp,  m_spec,       m_vprop, m_kprop,
-                     m_twiddle,   m_potential, m_stat,  m_currentBuf, m_statJ};
-    glDeleteBuffers(10, bufs);
+    GLuint bufs[] = {m_psi,   m_tmp,        m_spec,  m_vprop,      m_kprop,  m_twiddle,
+                     m_potential, m_stat,  m_currentBuf, m_statJ, m_kdisp,  m_statK};
+    glDeleteBuffers(12, bufs);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
     if (m_arrowVao) glDeleteVertexArrays(1, &m_arrowVao);
 }
@@ -204,11 +204,22 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_vCpu = BuildPotential(m_grid, deck);
     m_initial = BuildInitial(m_grid, deck);
 
+    // Momentum-view window: a few times the spread expected from the initial
+    // momentum, packet width, and the deepest/highest part of the potential.
+    {
+        const double k0 = std::hypot(deck.GetDouble("initial.kx", 0.0),
+                                     deck.GetDouble("initial.ky", 0.0));
+        const double sigma = std::max(0.2, deck.GetDouble("initial.sigma", 1.5));
+        m_kMax = kPi * n / m_grid.lx;
+        m_kView = std::clamp(1.6 * k0 + 5.0 / sigma + 3.0, 3.0, 0.9 * m_kMax);
+    }
+
     m_fft = fw::ComputeShader::FromSource(kernels::Fft1D(n));
     m_transpose = fw::ComputeShader::FromSource(kernels::Transpose(n));
     m_cmul = fw::ComputeShader::FromSource(kernels::CMul(n));
     m_reduceMax = fw::ComputeShader::FromSource(kernels::ReduceMax(n));
     m_currentProg = fw::ComputeShader::FromSource(kernels::Current(n));
+    m_fftshift = fw::ComputeShader::FromSource(kernels::FftShift(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
     m_arrows = fw::Shader::FromSource(kArrowVert, kArrowFrag);
     glGenVertexArrays(1, &m_vao);
@@ -238,6 +249,8 @@ void TdseSim::CreateBuffers() {
     mk(m_stat, sizeof(uint32_t));
     mk(m_currentBuf, cplx);
     mk(m_statJ, sizeof(uint32_t));
+    mk(m_kdisp, cplx);
+    mk(m_statK, sizeof(uint32_t));
 
     glNamedBufferSubData(m_potential, 0, static_cast<GLsizeiptr>(n) * n * sizeof(float), m_vCpu.data());
 }
@@ -339,6 +352,15 @@ void TdseSim::Step(int substeps) {
     }
 }
 
+void TdseSim::ComputeSpectrumInto(GLuint dst) {
+    const GLsizeiptr bytes = static_cast<GLsizeiptr>(m_grid.n) * m_grid.n * 2 * sizeof(float);
+    glMemoryBarrier(GL_SHADER_STORAGE_BARRIER_BIT | GL_BUFFER_UPDATE_BARRIER_BIT);
+    glCopyNamedBufferSubData(m_psi, m_spec, 0, 0, bytes);
+    Fft(m_spec, false);
+    TransposeBuf(m_spec, dst);
+    Fft(dst, false);  // dst = psi-hat, layout [kxIdx][kyIdx]
+}
+
 void TdseSim::ComputeCurrent() {
     const GLuint groups = static_cast<GLuint>(m_grid.n / 16);
     m_currentProg.Use();
@@ -390,15 +412,23 @@ void TdseSim::Snapshot(fw::OutputWriter& writer) {
     const double N2 = norm * cell;
     const double invN = N2 > 0.0 ? 1.0 / N2 : 0.0;
 
+    // Autocorrelation A(t) = <psi(0)|psi(t)> -- its |.| shows revivals, its
+    // time-Fourier transform is the energy spectrum weighted by |<n|psi0>|^2.
+    double aRe = 0.0, aIm = 0.0;
+    for (size_t k = 0; k < m_scratch.size(); ++k) {
+        const std::complex<float> p0 = m_initial[k];
+        const std::complex<float> p = m_scratch[k];
+        aRe += double(p0.real()) * p.real() + double(p0.imag()) * p.imag();
+        aIm += double(p0.real()) * p.imag() - double(p0.imag()) * p.real();
+    }
+    aRe *= cell;
+    aIm *= cell;
+
     // Kinetic energy and momentum, spectrally exact: 2D FFT of psi (into scratch
     // buffers that Step() also uses transiently) then sum against k.
     double T = 0.0, px = 0.0, py = 0.0;
     {
-        const GLsizeiptr bytes = static_cast<GLsizeiptr>(n) * n * 2 * sizeof(float);
-        glCopyNamedBufferSubData(m_psi, m_spec, 0, 0, bytes);
-        Fft(m_spec, false);
-        TransposeBuf(m_spec, m_tmp);
-        Fft(m_tmp, false); // m_tmp = psi-hat, layout [kxIdx][kyIdx]
+        ComputeSpectrumInto(m_tmp);  // m_tmp = psi-hat, layout [kxIdx][kyIdx]
 
         std::vector<std::complex<float>> hat(static_cast<size_t>(n) * n);
         glMemoryBarrier(GL_BUFFER_UPDATE_BARRIER_BIT);
@@ -438,6 +468,9 @@ void TdseSim::Snapshot(fw::OutputWriter& writer) {
     put("kinetic", T);
     put("potential_energy", V);
     put("energy", T + V);
+    put("autocorr_re", aRe);
+    put("autocorr_im", aIm);
+    put("autocorr_abs", std::sqrt(aRe * aRe + aIm * aIm));
 
     if (m_writeCurrent) {
         ComputeCurrent();
@@ -468,28 +501,45 @@ fw::SimInfo TdseSim::Info() const {
 
 void TdseSim::Render(int fbWidth, int fbHeight) {
     const int n = m_grid.n;
-    const float base = static_cast<float>(std::min(fbWidth, fbHeight)) /
-                       static_cast<float>(std::max(m_grid.lx, m_grid.ly));
-    const float pixPerUnit = base * m_zoom;
-
-    float vref = 0.0f;
-    for (float v : m_vCpu) vref = std::max(vref, std::abs(v));
-
-    // Peak |psi|^2 this frame -> the view auto-scales brightness to it.
+    const GLuint groups = static_cast<GLuint>(n / 16);
     const uint32_t zero = 0;
-    glNamedBufferSubData(m_stat, 0, sizeof(zero), &zero);
+
+    // Pick what fills the screen: real-space psi, or (K) the momentum density.
+    GLuint srcBuf = m_psi;
+    GLuint statBuf = m_stat;
+    double boxX = m_grid.lx, boxY = m_grid.ly;
+    float vref = 0.0f;
+    if (m_showMomentum) {
+        ComputeSpectrumInto(m_tmp);
+        m_fftshift.Use();
+        fw::ComputeShader::BindBuffer(0, m_tmp);
+        fw::ComputeShader::BindBuffer(1, m_kdisp);
+        m_fftshift.Dispatch(groups, groups, 1);
+        fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+        srcBuf = m_kdisp;
+        statBuf = m_statK;
+        boxX = 2.0 * 3.14159265358979323846 * n / m_grid.lx;  // full kx range
+        boxY = 2.0 * 3.14159265358979323846 * n / m_grid.ly;
+    } else {
+        for (float v : m_vCpu) vref = std::max(vref, std::abs(v));
+    }
+
+    const float pixPerUnit = static_cast<float>(std::min(fbWidth, fbHeight)) /
+                             static_cast<float>(std::max(boxX, boxY)) * m_zoom;
+
+    glNamedBufferSubData(statBuf, 0, sizeof(zero), &zero);
     m_reduceMax.Use();
-    fw::ComputeShader::BindBuffer(0, m_psi);
-    fw::ComputeShader::BindBuffer(1, m_stat);
-    m_reduceMax.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+    fw::ComputeShader::BindBuffer(0, srcBuf);
+    fw::ComputeShader::BindBuffer(1, statBuf);
+    m_reduceMax.Dispatch(groups, groups, 1);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     glDisable(GL_DEPTH_TEST);
     m_view.Use();
     m_view.SetVec2("uRes", glm::vec2(fbWidth, fbHeight));
     m_view.SetInt("uN", n);
-    m_view.SetFloat("uLx", static_cast<float>(m_grid.lx));
-    m_view.SetFloat("uLy", static_cast<float>(m_grid.ly));
+    m_view.SetFloat("uLx", static_cast<float>(boxX));
+    m_view.SetFloat("uLy", static_cast<float>(boxY));
     m_view.SetFloat("uPixPerUnit", pixPerUnit);
     m_view.SetVec2("uPanPix", m_panPix);
     m_view.SetInt("uMode", m_mode);
@@ -497,15 +547,15 @@ void TdseSim::Render(int fbWidth, int fbHeight) {
     m_view.SetFloat("uGamma", m_gamma);
     m_view.SetFloat("uVref", vref);
 
-    fw::ComputeShader::BindBuffer(0, m_psi);
+    fw::ComputeShader::BindBuffer(0, srcBuf);
     fw::ComputeShader::BindBuffer(1, m_potential);
-    fw::ComputeShader::BindBuffer(2, m_stat);
+    fw::ComputeShader::BindBuffer(2, statBuf);
 
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
 
-    if (m_showCurrent) {
+    if (m_showCurrent && !m_showMomentum) {
         ComputeCurrent();
         const uint32_t z = 0;
         glNamedBufferSubData(m_statJ, 0, sizeof(z), &z);
@@ -549,7 +599,7 @@ void TdseSim::OnViewInput(const fw::ViewInput& in) {
     }
     if (in.scrollDelta != 0.0) {
         m_zoom *= std::exp(0.12f * static_cast<float>(in.scrollDelta));
-        m_zoom = std::clamp(m_zoom, 0.2f, 20.0f);
+        m_zoom = std::clamp(m_zoom, 0.2f, 80.0f);
     }
 }
 
@@ -563,6 +613,11 @@ void TdseSim::OnKey(int key, int action) {
         case '=': m_gamma = std::min(1.4f, m_gamma + 0.05f); break; // sharpen to the core
         case '0': m_zoom = 1.0f; m_panPix = {0.0f, 0.0f}; m_gain = 1.15f; m_gamma = 0.5f; break;
         case 'J': m_showCurrent = !m_showCurrent; break;
+        case 'K':
+            m_showMomentum = !m_showMomentum;
+            m_zoom = m_showMomentum ? static_cast<float>(m_kMax / m_kView) : 1.0f;
+            m_panPix = {0.0f, 0.0f};
+            break;
         default: break;
     }
 }

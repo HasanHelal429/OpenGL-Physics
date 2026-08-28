@@ -66,12 +66,15 @@ private:
     GLuint m_stat = 0;        // 1 uint: max |psi|^2 for the interactive view
     GLuint m_currentBuf = 0;  // vec2 probability current j
     GLuint m_statJ = 0;       // 1 uint: max |j|^2
+    GLuint m_kdisp = 0;       // vec2 psi-hat, centred, for the momentum view
+    GLuint m_statK = 0;       // 1 uint: max |psi-hat|^2
 
     fw::ComputeShader m_fft;
     fw::ComputeShader m_transpose;
     fw::ComputeShader m_cmul;
     fw::ComputeShader m_reduceMax;
     fw::ComputeShader m_currentProg;
+    fw::ComputeShader m_fftshift;
 
     // Interactive view.
     fw::Shader m_view;
@@ -85,6 +88,11 @@ private:
     glm::vec2 m_panPix{0.0f, 0.0f};
     bool m_showCurrent = false;
     bool m_writeCurrent = false;
+    bool m_showMomentum = false;
+    double m_kMax = 1.0;   // Nyquist |kx| = pi n / lx
+    double m_kView = 1.0;  // half-window shown in momentum mode
+
+    void ComputeSpectrumInto(GLuint dst);  // 2D FFT of psi -> dst (transposed [kxIdx][kyIdx])
 
     // CPU mirrors.
     std::vector<std::complex<float>> m_initial;
