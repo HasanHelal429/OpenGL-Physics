@@ -1,0 +1,27 @@
+title = "Star equilibrium verification -- n=1.5, N=4000, damping OFF, starting from the settled state"
+
+# Starts from star_relax_n1.5.toml's own settled final frame (frame 0199,
+# extracted to ic/star_n1.5_relaxed.bin) with damping = 0: the real test of
+# whether relaxation actually worked is whether the star stays put *without*
+# the artificial damping that produced this state, not just that damping
+# suppressed the ring-down.
+[star]
+ic_file = "ic/star_n1.5_relaxed.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[time]
+dt = 0.005
+substeps_per_frame = 10
+frames = 200

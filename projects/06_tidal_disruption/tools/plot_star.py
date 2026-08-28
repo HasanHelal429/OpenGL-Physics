@@ -79,6 +79,13 @@ def main():
     ax[3].semilogy(profile["r"], profile["rho"], "k-", label="Lane-Emden analytic")
     ax[3].semilogy(r0, rho0, "o", label=f"SPH, frame {first} (t={t[0]:.2f})")
     ax[3].semilogy(r1, rho1, "s", label=f"SPH, frame {last} (t={t[-1]:.2f})")
+    # The analytic curve hits exactly 0 at the surface, which would otherwise
+    # stretch the log axis over ~20 decades and flatten the 10-60% bulk/edge
+    # deviations that are the actual point of this panel -- clip to the
+    # range the data spans instead.
+    y_lo = 0.5 * min(rho0.min(), rho1.min())
+    y_hi = 1.5 * max(rho0.max(), rho1.max())
+    ax[3].set_ylim(y_lo, y_hi)
     ax[3].set_title("radial density profile"); ax[3].set_xlabel("r"); ax[3].legend(fontsize=8)
 
     fig.suptitle(os.path.basename(os.path.abspath(d)))

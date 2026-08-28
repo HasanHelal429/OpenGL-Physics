@@ -13,6 +13,7 @@
 //   binding 1  Vel       vec4(vx, vy, vz, _)
 //   binding 2  Acc       vec4(ax, ay, az, _)          -- gravity + SPH, summed in one pass
 //   binding 3  RhoPress  vec4(rho, pressure, soundspeed, _)
+//   binding 4  H         float smoothing length, per particle (adaptive)
 //
 // All kernels are one-thread-per-particle with a uN bounds check (particle
 // count need not be a multiple of the workgroup size, unlike the FFT's
@@ -20,6 +21,24 @@
 // spline's gradient is exactly zero at r=0, and gravity's own softened
 // numerator (ri-rj) is exactly zero when i==j, so both loops can safely
 // include j==i.
+//
+// Adaptive smoothing length. A single fixed h under-resolves the star's
+// outer envelope (where particles are sparse) relative to its dense core --
+// the free-surface density excess documented in README.md's first
+// validation pass. Standard fix: solve h_i per particle from
+// h_i = eta*(m_i/rho_i)^(1/3) (Springel & Hernquist 2002's ansatz: h such
+// that the kernel's ~(4/3)pi(2h)^3 support volume holds a roughly constant
+// effective neighbor count, eta~1.2 -> ~40-60 neighbors in 3D for the cubic
+// spline). rho_i(h_i) itself depends on h_i, so Density() iterates a small
+// fixed-point loop per particle (warm-started from last step's h_i, which
+// changes slowly frame to frame) entirely inside one shader invocation --
+// each particle's solve is independent, ideal for one-thread-per-particle.
+// A density DEPENDS on h "gather"-style (rho_i uses only h_i) as usual for
+// this iteration; but Forces() uses the symmetrized pair length
+// h_ij = 0.5*(h_i+h_j) for both the kernel gradient AND artificial
+// viscosity, so the same W(r,h_ij) is used for both directions of a pair
+// and F_ij = -F_ji exactly (momentum conservation to machine precision, as
+// before) despite h_i != h_j in general.
 
 namespace tde::kernels {
 
@@ -53,32 +72,61 @@ layout(std430, binding = 0) readonly buffer PosMass { vec4 posMass[]; };
 layout(std430, binding = 1) buffer Vel { vec4 vel[]; };
 layout(std430, binding = 2) buffer Acc { vec4 acc[]; };
 layout(std430, binding = 3) buffer RhoPress { vec4 rhoPress[]; };
+layout(std430, binding = 4) buffer HBuf { float hArr[]; };
 
 uniform int uN;
 )";
 }
 
-// Pass 1: density (kernel-weighted mass sum) + EOS pressure + sound speed,
-// all rho-local so they can be written in the same pass. Polytropic EOS
+// Pass 1: adaptive smoothing length + density (kernel-weighted mass sum,
+// "gather" form: rho_i uses only h_i) + EOS pressure + sound speed. h_i is
+// solved by a short fixed-point loop, warm-started from last step's value
+// (see kernels.hpp's header comment for the ansatz and why Forces() uses a
+// different, symmetrized h for the pair interaction). Polytropic EOS
 // P = K*rho^Gamma matches the Lane-Emden profile the initial conditions were
 // sampled from (tools/make_star_ic.py), so a correctly-sampled star starts
 // (approximately) in hydrostatic equilibrium.
 inline std::string Density() {
     return CommonHeader() + SphKernelGlsl + R"(
-uniform float uH;
 uniform float uK;
 uniform float uGamma;
+uniform float uEta;
+uniform int uHIters;
+uniform float uHMin;
+uniform float uHMax;
+
+// Excludes j==i: W(0,h) is nonzero (unlike the force kernel's gradient,
+// which vanishes at r=0), so a naive self-inclusive sum adds a spurious
+// m_i/(pi*h^3) term. That's negligible at a large fixed h, but once h
+// adapts down toward the true local spacing this self-term becomes 15-30%
+// of the total -- a real, measured bias (bin-averaged density running
+// 25-30% high through the star's bulk), not a rounding-level effect. Fixed
+// by never letting a particle see itself as its own neighbor.
+float gatherDensity(vec3 ri, float h, uint selfIdx) {
+    float rho = 0.0;
+    for (uint j = 0u; j < uint(uN); ++j) {
+        if (j == selfIdx) continue;
+        float r = length(ri - posMass[j].xyz);
+        rho += posMass[j].w * kernelW(r, h);
+    }
+    return rho;
+}
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(uN)) return;
 
     vec3 ri = posMass[i].xyz;
+    float mi = posMass[i].w;
+    float h = hArr[i];
     float rho = 0.0;
-    for (uint j = 0u; j < uint(uN); ++j) {
-        float r = length(ri - posMass[j].xyz);
-        rho += posMass[j].w * kernelW(r, uH);
+    for (int it = 0; it < uHIters; ++it) {
+        rho = gatherDensity(ri, h, i);
+        h = clamp(uEta * pow(mi / rho, 1.0 / 3.0), uHMin, uHMax);
     }
+    rho = gatherDensity(ri, h, i); // final density consistent with the converged h
+
+    hArr[i] = h;
     float pressure = uK * pow(rho, uGamma);
     float csound = sqrt(uGamma * pressure / rho);
     rhoPress[i] = vec4(rho, pressure, csound, 0.0);
@@ -88,10 +136,12 @@ void main() {
 
 // Pass 2: total acceleration = self-gravity (softened pairwise) + SPH
 // pressure gradient + Monaghan artificial viscosity. Fused into one O(N^2)
-// loop since both terms need the same pairwise iteration.
+// loop since both terms need the same pairwise iteration. Uses the
+// symmetrized pair length h_ij = 0.5*(h_i+h_j) (same value regardless of
+// which particle is "i"), so the kernel gradient -- and hence the force --
+// is exactly antisymmetric under i<->j despite h_i != h_j in general.
 inline std::string Forces() {
     return CommonHeader() + SphKernelGlsl + R"(
-uniform float uH;
 uniform float uG;
 uniform float uSoftening2;   // softening length squared
 uniform float uViscAlpha;
@@ -103,6 +153,7 @@ void main() {
 
     vec3 ri = posMass[i].xyz;
     vec3 vi = vel[i].xyz;
+    float hi = hArr[i];
     float rhoi = rhoPress[i].x;
     float Pi = rhoPress[i].y;
     float ci = rhoPress[i].z;
@@ -117,9 +168,10 @@ void main() {
         float invR3 = pow(r2 + uSoftening2, -1.5);
         a -= uG * mj * invR3 * rij;
 
-        // SPH pressure gradient + artificial viscosity
+        // SPH pressure gradient + artificial viscosity, symmetrized h
+        float hij = 0.5 * (hi + hArr[j]);
         float r = sqrt(r2);
-        float dWdr = kernelDwDr(r, uH);
+        float dWdr = kernelDwDr(r, hij);
         if (dWdr != 0.0) {
             vec3 gradW = (r > 0.0) ? (dWdr / r) * rij : vec3(0.0);
             float rhoj = rhoPress[j].x;
@@ -130,7 +182,7 @@ void main() {
             float vijDotRij = dot(vij, rij);
             if (vijDotRij < 0.0) {
                 float cj = rhoPress[j].z;
-                float mu = uH * vijDotRij / (r2 + 0.01 * uH * uH);
+                float mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
                 float cbar = 0.5 * (ci + cj);
                 float rhobar = 0.5 * (rhoi + rhoj);
                 piVisc = (-uViscAlpha * cbar * mu + uViscBeta * mu * mu) / rhobar;
@@ -144,15 +196,24 @@ void main() {
 )";
 }
 
-// Leapfrog half-kick: vel += halfDt * acc.
+// Leapfrog half-kick: vel += halfDt * acc, then an optional exponential
+// velocity damping (uDampingFactor = exp(-damping*halfDt), so 1.0 = off).
+// Used only during relaxation runs (decks/star_relax_*.toml) to let a
+// Monte-Carlo-sampled star settle into numerical equilibrium -- artificial
+// viscosity alone damps convergent/shock flows, not the smooth global
+// radial breathing mode a freshly-sampled star tends to ring at, which
+// otherwise oscillates indefinitely without growing or decaying. Off
+// (uDampingFactor=1) once the star is actually being disrupted, since real
+// tidal dynamics must not be damped.
 inline std::string Kick() {
     return CommonHeader() + R"(
 uniform float uHalfDt;
+uniform float uDampingFactor;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= uint(uN)) return;
-    vel[i].xyz += uHalfDt * acc[i].xyz;
+    vel[i].xyz = (vel[i].xyz + uHalfDt * acc[i].xyz) * uDampingFactor;
 }
 )";
 }

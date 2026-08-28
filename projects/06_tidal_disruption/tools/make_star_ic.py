@@ -76,8 +76,10 @@ def main():
           f"max rel. err={np.max(rel_err):.3f}  (Poisson noise at N={args.n}, not a bias check)")
 
     mean_spacing = args.radius / args.n ** (1.0 / 3.0)
-    print(f"suggested sph.h ~ {2.5 * mean_spacing:.4f}   suggested gravity.softening ~ {1.0 * mean_spacing:.4f}")
-    print(f"(mean interparticle spacing ~ {mean_spacing:.4f}, from R/N^(1/3))")
+    print(f"suggested sph.h_init ~ {2.5 * mean_spacing:.4f}   suggested gravity.softening ~ {0.3 * mean_spacing:.4f}")
+    print(f"(mean interparticle spacing ~ {mean_spacing:.4f}, from R/N^(1/3). Softening well below the")
+    print(f" adaptive smoothing length the run will converge to in the core -- softening comparable to")
+    print(f" or larger than the local SPH resolution measurably weakens self-gravity there, see README.md)")
 
     mass_col = np.full(args.n, args.mass / args.n, dtype=np.float32)
     vel_cols = np.zeros((args.n, 3), dtype=np.float32)

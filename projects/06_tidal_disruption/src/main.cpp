@@ -10,6 +10,7 @@
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -69,8 +70,10 @@ double RefKernelDwDr(double r, double h) {
 // documented formulas correctly.
 bool SelfTest() {
     constexpr int N = 37;
-    constexpr double H = 0.3, G = 1.0, SOFT2 = 0.01 * 0.01, K = 1.0, GAMMA = 5.0 / 3.0;
+    constexpr double G = 1.0, SOFT2 = 0.01 * 0.01, K = 1.0, GAMMA = 5.0 / 3.0;
     constexpr double VISC_A = 1.0, VISC_B = 2.0;
+    constexpr double ETA = 1.2, H_INIT = 0.3, H_MIN = 0.2 * H_INIT, H_MAX = 8.0 * H_INIT;
+    constexpr int H_ITERS = 3;
 
     std::mt19937 rng(42);
     std::uniform_real_distribution<double> posDist(-1.0, 1.0);
@@ -81,15 +84,29 @@ bool SelfTest() {
         vel[i] = glm::vec4(posDist(rng) * 0.1, posDist(rng) * 0.1, posDist(rng) * 0.1, 0.0f);
     }
 
-    // CPU reference.
-    std::vector<double> rhoRef(N, 0.0), pressRef(N), csRef(N);
-    for (int i = 0; i < N; ++i) {
+    // CPU reference: same adaptive-h fixed-point iteration as Density(),
+    // same symmetrized-h pair force as Forces() (see kernels.hpp).
+    std::vector<double> hRef(N, H_INIT), rhoRef(N), pressRef(N), csRef(N);
+    auto gatherDensity = [&](int i, double h) {
+        double rho = 0.0;
         for (int j = 0; j < N; ++j) {
-            const glm::dvec3 rij = glm::dvec3(posMass[i]) - glm::dvec3(posMass[j]);
-            rhoRef[i] += posMass[j].w * RefKernelW(glm::length(rij), H);
+            if (j == i) continue; // see kernels.hpp Density()'s comment on the self-term bias
+            const double r = glm::length(glm::dvec3(posMass[i]) - glm::dvec3(posMass[j]));
+            rho += posMass[j].w * RefKernelW(r, h);
         }
-        pressRef[i] = K * std::pow(rhoRef[i], GAMMA);
-        csRef[i] = std::sqrt(GAMMA * pressRef[i] / rhoRef[i]);
+        return rho;
+    };
+    for (int i = 0; i < N; ++i) {
+        double h = hRef[i], rho = 0.0;
+        for (int it = 0; it < H_ITERS; ++it) {
+            rho = gatherDensity(i, h);
+            h = std::clamp(ETA * std::cbrt(static_cast<double>(posMass[i].w) / rho), H_MIN, H_MAX);
+        }
+        rho = gatherDensity(i, h);
+        hRef[i] = h;
+        rhoRef[i] = rho;
+        pressRef[i] = K * std::pow(rho, GAMMA);
+        csRef[i] = std::sqrt(GAMMA * pressRef[i] / rho);
     }
     std::vector<glm::dvec3> accRef(N, glm::dvec3(0.0));
     for (int i = 0; i < N; ++i) {
@@ -98,15 +115,16 @@ bool SelfTest() {
             const double r2 = glm::dot(rij, rij);
             accRef[i] -= G * static_cast<double>(posMass[j].w) * std::pow(r2 + SOFT2, -1.5) * rij;
 
+            const double hij = 0.5 * (hRef[i] + hRef[j]);
             const double r = std::sqrt(r2);
-            const double dWdr = RefKernelDwDr(r, H);
+            const double dWdr = RefKernelDwDr(r, hij);
             if (dWdr == 0.0) continue;
             const glm::dvec3 gradW = (r > 0.0) ? (dWdr / r) * rij : glm::dvec3(0.0);
             double piVisc = 0.0;
             const glm::dvec3 vij = glm::dvec3(vel[i]) - glm::dvec3(vel[j]);
             const double vijDotRij = glm::dot(vij, rij);
             if (vijDotRij < 0.0) {
-                const double mu = H * vijDotRij / (r2 + 0.01 * H * H);
+                const double mu = hij * vijDotRij / (r2 + 0.01 * hij * hij);
                 const double cbar = 0.5 * (csRef[i] + csRef[j]);
                 const double rhobar = 0.5 * (rhoRef[i] + rhoRef[j]);
                 piVisc = (-VISC_A * cbar * mu + VISC_B * mu * mu) / rhobar;
@@ -120,30 +138,36 @@ bool SelfTest() {
     // GPU.
     fw::ComputeShader density = fw::ComputeShader::FromSource(tde::kernels::Density());
     fw::ComputeShader forces = fw::ComputeShader::FromSource(tde::kernels::Forces());
-    GLuint bufPosMass = 0, bufVel = 0, bufAcc = 0, bufRhoPress = 0;
+    GLuint bufPosMass = 0, bufVel = 0, bufAcc = 0, bufRhoPress = 0, bufH = 0;
     glCreateBuffers(1, &bufPosMass);
     glCreateBuffers(1, &bufVel);
     glCreateBuffers(1, &bufAcc);
     glCreateBuffers(1, &bufRhoPress);
+    glCreateBuffers(1, &bufH);
     glNamedBufferData(bufPosMass, N * sizeof(glm::vec4), posMass.data(), GL_STATIC_DRAW);
     glNamedBufferData(bufVel, N * sizeof(glm::vec4), vel.data(), GL_STATIC_DRAW);
     glNamedBufferData(bufAcc, N * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
     glNamedBufferData(bufRhoPress, N * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    const std::vector<float> hSeed(N, static_cast<float>(H_INIT));
+    glNamedBufferData(bufH, N * sizeof(float), hSeed.data(), GL_DYNAMIC_DRAW);
 
     const GLuint groups = static_cast<GLuint>((N + tde::kernels::kWorkgroupSize - 1) / tde::kernels::kWorkgroupSize);
     density.Use();
     density.SetInt("uN", N);
-    density.SetFloat("uH", static_cast<float>(H));
     density.SetFloat("uK", static_cast<float>(K));
     density.SetFloat("uGamma", static_cast<float>(GAMMA));
+    density.SetFloat("uEta", static_cast<float>(ETA));
+    density.SetInt("uHIters", H_ITERS);
+    density.SetFloat("uHMin", static_cast<float>(H_MIN));
+    density.SetFloat("uHMax", static_cast<float>(H_MAX));
     fw::ComputeShader::BindBuffer(0, bufPosMass);
     fw::ComputeShader::BindBuffer(3, bufRhoPress);
+    fw::ComputeShader::BindBuffer(4, bufH);
     density.Dispatch(groups);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     forces.Use();
     forces.SetInt("uN", N);
-    forces.SetFloat("uH", static_cast<float>(H));
     forces.SetFloat("uG", static_cast<float>(G));
     forces.SetFloat("uSoftening2", static_cast<float>(SOFT2));
     forces.SetFloat("uViscAlpha", static_cast<float>(VISC_A));
@@ -152,25 +176,30 @@ bool SelfTest() {
     fw::ComputeShader::BindBuffer(1, bufVel);
     fw::ComputeShader::BindBuffer(2, bufAcc);
     fw::ComputeShader::BindBuffer(3, bufRhoPress);
+    fw::ComputeShader::BindBuffer(4, bufH);
     forces.Dispatch(groups);
     fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
 
     std::vector<glm::vec4> rhoPressGpu(N), accGpu(N);
+    std::vector<float> hGpu(N);
     glGetNamedBufferSubData(bufRhoPress, 0, N * sizeof(glm::vec4), rhoPressGpu.data());
     glGetNamedBufferSubData(bufAcc, 0, N * sizeof(glm::vec4), accGpu.data());
+    glGetNamedBufferSubData(bufH, 0, N * sizeof(float), hGpu.data());
     glDeleteBuffers(1, &bufPosMass);
     glDeleteBuffers(1, &bufVel);
     glDeleteBuffers(1, &bufAcc);
     glDeleteBuffers(1, &bufRhoPress);
+    glDeleteBuffers(1, &bufH);
 
-    double rhoErr = 0.0, accErr = 0.0;
+    double hErr = 0.0, rhoErr = 0.0, accErr = 0.0;
     for (int i = 0; i < N; ++i) {
+        hErr = std::max(hErr, std::abs(hGpu[i] - hRef[i]) / hRef[i]);
         rhoErr = std::max(rhoErr, std::abs(rhoPressGpu[i].x - rhoRef[i]) / rhoRef[i]);
         const glm::dvec3 da = glm::dvec3(accGpu[i]) - accRef[i];
         accErr = std::max(accErr, glm::length(da) / glm::length(accRef[i]));
     }
-    std::printf("selftest: max relative error  rho=%.3e  accel=%.3e\n", rhoErr, accErr);
-    const bool ok = rhoErr < 1e-4 && accErr < 1e-3;
+    std::printf("selftest: max relative error  h=%.3e  rho=%.3e  accel=%.3e\n", hErr, rhoErr, accErr);
+    const bool ok = hErr < 1e-4 && rhoErr < 1e-4 && accErr < 1e-3;
     std::printf("selftest: %s\n", ok ? "PASS" : "FAIL");
     return ok;
 }
