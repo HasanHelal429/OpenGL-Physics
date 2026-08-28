@@ -19,6 +19,13 @@ vcpkg_installed/
 # ImGui runtime state (window layout), written next to wherever an app runs from
 imgui.ini
 
+# Simulation run output (headless results, live recordings, screenshots)
+screenshots/
+recordings/
+/out/
+*.results/
+frames_png/
+
 # OS
 Thumbs.db
 .DS_Store

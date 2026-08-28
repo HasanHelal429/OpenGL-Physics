@@ -1,0 +1,36 @@
+title = "2D TDSE - rectangular barrier tunneling"
+
+[grid]
+n = 512
+lx = 60.0
+ly = 40.0
+
+[time]
+dt = 0.002
+substeps_per_frame = 10
+frames = 400
+
+[initial]
+type = "gaussian"
+x0 = -14.0
+y0 = 0.0
+sigma = 2.0
+kx = 5.0
+ky = 0.0
+
+[boundary]
+type = "cap"
+cap_width = 6.0
+cap_strength = 4.0
+
+# Mean kinetic energy ~ kx^2/2 = 12.5; barrier is a bit higher, so most of the
+# packet reflects and a measurable tail tunnels.
+[[potential]]
+type = "barrier"
+x0 = 0.0
+width = 1.0
+height = 16.0
+
+[output]
+diagnostics = ["norm", "energy", "kinetic", "potential_energy", "x_mean", "px_mean", "transmission"]
+transmission_x = 2.0
