@@ -57,9 +57,15 @@ cmake --build --preset release --target 05_tdse_gpu
 # interactive: window + HUD
 #   mouse drag = pan, wheel = zoom, 0 = reset view
 #   m = cycle view (phase-colored density / magma density / Re ψ)
-#   [ ] = brightness gain,  - = = density gamma (lower shows fainter tails)
-#   F12 = screenshot
+#   j = probability-current arrows,  k = momentum-space |ψ̂|²
+#   [ ] = brightness gain,  - = = density gamma,  F12 = screenshot
 05_tdse_gpu --interactive --deck decks/double_slit.toml
+
+# imaginary-time relaxation: the K lowest eigenstates of -1/2 grad^2 + V
+05_tdse_gpu --relax --deck <f.toml> --out <dir> --states 6 [--relax-steps N]
+
+# self-consistent Poisson-Schrodinger
+05_tdse_gpu --scf --deck <f.toml> --out <dir> --states 6 --electrons 3
 
 # FFT kernel self-test
 05_tdse_gpu --selftest
@@ -78,21 +84,27 @@ python tools/plot_diagnostics.py out/tunneling            # -> validation panels
 title = "..."
 [grid]      n = 512   lx = 60.0   ly = 40.0        # n a power of two, <= 2048
 [time]      dt = 0.002   substeps_per_frame = 10   frames = 400
-[initial]   type = "gaussian"    # or "hermite_gauss" {nx, ny, omega}
-            x0 = -14  y0 = 0  sigma = 2  kx = 5  ky = 0
+[initial]   type = "gaussian"    # gaussian | hermite_gauss {nx,ny,omega} | superposition
+            x0 = -14  y0 = 0  sigma = 2  kx = 5  ky = 0    # sigma_x / sigma_y also ok
 [boundary]  type = "cap"         # or "periodic"
             cap_width = 6  cap_strength = 4
-[[potential]]  type = "barrier"  # free | harmonic | barrier | double_slit | well | coulomb
+[[potential]]  type = "barrier"  # free|harmonic|barrier|double_slit|well|coulomb|box
                x0 = 0  width = 1.0  height = 16.0
+[magnetic]  B = 2.0              # uniform field, symmetric gauge (optional)
+[[drive]]   type = "tilt"        # tilt | gate -- time-dependent V(t) (optional)
+            amplitude = 1.0  omega = 3.0  dir_x = 1.0
+[meanfield] enabled = true  coupling = 4.0    # Hartree self-repulsion (optional)
+[scf]       tol = 3e-3  max_iter = 24  mix = 0.35     # --scf only
 [output]    diagnostics = ["norm", "energy", "x_mean", "px_mean", "transmission"]
             transmission_x = 2.0
 ```
 
-`[[potential]]` blocks superpose. Diagnostic column names: `norm`, `energy`,
-`kinetic`, `potential_energy`, `x_mean`/`y_mean`, `x_var`/`y_var`,
-`px_mean`/`py_mean`, `transmission`. Kinetic energy and momentum are computed
-spectrally (an extra FFT per snapshot), so energy conservation is exact to
-float precision rather than limited by a finite-difference estimator.
+`[[potential]]` blocks superpose; `harmonic` also takes `omega_x`/`omega_y`.
+Diagnostic column names: `norm`, `energy`, `kinetic`, `potential_energy`,
+`x_mean`/`y_mean`, `x_var`/`y_var`, `px_mean`/`py_mean`, `Lz`, `transmission`,
+`autocorr_re`/`autocorr_im`/`autocorr_abs`. Kinetic energy and momentum are
+computed spectrally (an extra FFT per snapshot), so energy conservation is
+exact to float precision.
 
 ## Validation (`decks/`)
 
