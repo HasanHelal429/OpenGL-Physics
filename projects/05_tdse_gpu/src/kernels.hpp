@@ -155,6 +155,37 @@ void main() {
 )";
 }
 
+// Fourier-shift phase for one shear of the 3-shear rotation. Data is in
+// half-transformed layout [row][col=freq bin]; this multiplies element (r, c)
+// by exp(-i * k(c) * uAmount * coord(r)), which shifts row r by -uAmount*coord(r)
+// along the transformed axis. coord(r) = uCoordOrigin + (r+0.5)*uCoordStep,
+// k(c) = uKScale * (c <= N/2 ? c : c - N).
+inline std::string ShearPhase(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(
+layout(local_size_x = 16, local_size_y = 16) in;
+layout(std430, binding = 0) buffer Data { vec2 data[]; };
+
+uniform float uAmount;
+uniform float uCoordOrigin;
+uniform float uCoordStep;
+uniform float uKScale;
+
+void main() {
+    int r = int(gl_GlobalInvocationID.y);
+    int c = int(gl_GlobalInvocationID.x);
+    if (r >= N || c >= N) return;
+    float coord = uCoordOrigin + (float(r) + 0.5) * uCoordStep;
+    int fi = (c <= N / 2) ? c : c - N;
+    float k = uKScale * float(fi);
+    float ph = -k * uAmount * coord;
+    float cs = cos(ph), sn = sin(ph);
+    vec2 z = data[r * N + c];
+    data[r * N + c] = vec2(z.x * cs - z.y * sn, z.x * sn + z.y * cs);
+}
+)";
+}
+
 // Build the half-kick multiplier Vprop = exp(-i (V0 + sum drives(x,t)) dt/2) *
 // exp(-W dt/2) from the static external potential (binding 0), the absorbing
 // rate W (binding 1), and up to 4 time-dependent drive terms. Dispatched once

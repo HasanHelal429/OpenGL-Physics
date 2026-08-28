@@ -49,6 +49,9 @@ private:
     void BuildPropagators(const fw::Deck& deck);
     void RebuildVprop(double t);
     void RunStep(double t0);
+    void RunStepMagnetic(double t0);
+    void Rotate(double alpha);       // exp(i alpha L_z): rotate psi(phi) -> psi(phi + alpha)
+    void ShearApply(GLuint buf, double amount, double origin, double step, double kscale);
     void Fft(GLuint buffer, bool inverse);
     void TransposeBuf(GLuint src, GLuint dst);
     void CMulBuf(GLuint dst, GLuint by);
@@ -65,6 +68,8 @@ private:
     double m_time = 0.0;
     std::vector<DriveTerm> m_drives;
     bool m_hasDrives = false;
+    double m_B = 0.0;          // uniform magnetic field (symmetric gauge)
+    bool m_hasMagnetic = false;
 
     // GPU state (all vec2 complex, row-major, except m_potential which is float).
     GLuint m_psi = 0;
@@ -88,6 +93,7 @@ private:
     fw::ComputeShader m_currentProg;
     fw::ComputeShader m_fftshift;
     fw::ComputeShader m_buildVprop;
+    fw::ComputeShader m_shearPhase;
 
     // Interactive view.
     fw::Shader m_view;

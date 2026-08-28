@@ -204,6 +204,21 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_vCpu = BuildPotential(m_grid, deck);
     m_initial = BuildInitial(m_grid, deck);
 
+    // Uniform magnetic field, symmetric gauge: H = -1/2 grad^2 - (B/2) L_z +
+    // (B^2/8) r^2 + V. The diamagnetic term folds into the static potential;
+    // the L_z term is a per-step rotation of psi (see RunStepMagnetic).
+    m_B = deck.GetDouble("magnetic.B", 0.0);
+    m_hasMagnetic = std::abs(m_B) > 1e-12;
+    if (m_hasMagnetic) {
+        const double c = m_B * m_B / 8.0;
+        for (int j = 0; j < n; ++j) {
+            for (int i = 0; i < n; ++i) {
+                const double x = m_grid.x(i), y = m_grid.y(j);
+                m_vCpu[static_cast<size_t>(j) * n + i] += static_cast<float>(c * (x * x + y * y));
+            }
+        }
+    }
+
     for (const auto& d : deck.GetTables("drive")) {
         if (m_drives.size() == 4) break;
         DriveTerm t;
@@ -248,6 +263,7 @@ void TdseSim::Configure(const fw::Deck& deck) {
     m_currentProg = fw::ComputeShader::FromSource(kernels::Current(n));
     m_fftshift = fw::ComputeShader::FromSource(kernels::FftShift(n));
     m_buildVprop = fw::ComputeShader::FromSource(kernels::BuildVprop(n));
+    m_shearPhase = fw::ComputeShader::FromSource(kernels::ShearPhase(n));
     m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
     m_arrows = fw::Shader::FromSource(kArrowVert, kArrowFrag);
     glGenVertexArrays(1, &m_vao);
@@ -400,9 +416,66 @@ void TdseSim::RunStep(double t0) {
     CMulBuf(m_psi, m_vprop);      // half potential kick
 }
 
+void TdseSim::ShearApply(GLuint buf, double amount, double origin, double step, double kscale) {
+    const int n = m_grid.n;
+    m_shearPhase.Use();
+    m_shearPhase.SetFloat("uAmount", static_cast<float>(amount));
+    m_shearPhase.SetFloat("uCoordOrigin", static_cast<float>(origin));
+    m_shearPhase.SetFloat("uCoordStep", static_cast<float>(step));
+    m_shearPhase.SetFloat("uKScale", static_cast<float>(kscale));
+    fw::ComputeShader::BindBuffer(0, buf);
+    m_shearPhase.Dispatch(static_cast<GLuint>(n / 16), static_cast<GLuint>(n / 16), 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+// exp(i alpha L_z): rotate psi(r, phi) -> psi(r, phi + alpha), via the exact
+// unitary 3-shear decomposition R(-alpha) = Sx(t) Sy(s) Sx(t) with
+// t = tan(alpha/2), s = -sin(alpha), each shear a Fourier phase shift.
+void TdseSim::Rotate(double alpha) {
+    const double twoPi = 2.0 * kPi;
+    const double t = std::tan(0.5 * alpha);
+    const double s = -std::sin(alpha);
+    const double dx = m_grid.dx(), dy = m_grid.dy();
+    const double ox = -0.5 * m_grid.lx, oy = -0.5 * m_grid.ly;
+    const double ksx = twoPi / m_grid.lx, ksy = twoPi / m_grid.ly;
+
+    auto shearX = [&](double a) {           // psi(x - a*y, y)
+        Fft(m_psi, false);
+        ShearApply(m_psi, a, oy, dy, ksx);
+        Fft(m_psi, true);
+    };
+    auto shearY = [&](double a) {           // psi(x, y - a*x)
+        TransposeBuf(m_psi, m_tmp);
+        Fft(m_tmp, false);
+        ShearApply(m_tmp, a, ox, dx, ksy);
+        Fft(m_tmp, true);
+        TransposeBuf(m_tmp, m_psi);
+    };
+    shearX(t);
+    shearY(s);
+    shearX(t);
+}
+
+void TdseSim::RunStepMagnetic(double t0) {
+    if (m_hasDrives) RebuildVprop(t0 + 0.5 * m_dt);
+    const double half = -m_B * m_dt / 4.0;  // exp(-i M dt/2), M = -(B/2) L_z
+    CMulBuf(m_psi, m_vprop);   // half U kick (V incl. diamagnetic term)
+    Rotate(half);              // half L_z rotation
+    Fft(m_psi, false);
+    TransposeBuf(m_psi, m_tmp);
+    Fft(m_tmp, false);
+    CMulBuf(m_tmp, m_kprop);
+    Fft(m_tmp, true);
+    TransposeBuf(m_tmp, m_psi);
+    Fft(m_psi, true);
+    Rotate(half);
+    CMulBuf(m_psi, m_vprop);   // half U kick
+}
+
 void TdseSim::Step(int substeps) {
     for (int s = 0; s < substeps; ++s) {
-        RunStep(m_time);
+        if (m_hasMagnetic) RunStepMagnetic(m_time);
+        else RunStep(m_time);
         m_time += m_dt;
         ++m_stepsDone;
     }
@@ -468,6 +541,23 @@ void TdseSim::Snapshot(fw::OutputWriter& writer) {
     const double N2 = norm * cell;
     const double invN = N2 > 0.0 ? 1.0 / N2 : 0.0;
 
+    // <L_z> = Integral Im[conj(psi) (x d/dy - y d/dx) psi]  (central diff, periodic).
+    double lz = 0.0;
+    for (int j = 0; j < n; ++j) {
+        for (int i = 0; i < n; ++i) {
+            const std::complex<double> p = {m_scratch[static_cast<size_t>(j) * n + i].real(),
+                                            m_scratch[static_cast<size_t>(j) * n + i].imag()};
+            const auto at = [&](int ii, int jj) {
+                const auto& z = m_scratch[static_cast<size_t>((jj + n) % n) * n + ((ii + n) % n)];
+                return std::complex<double>(z.real(), z.imag());
+            };
+            const std::complex<double> ddx = (at(i + 1, j) - at(i - 1, j)) / (2.0 * dx);
+            const std::complex<double> ddy = (at(i, j + 1) - at(i, j - 1)) / (2.0 * dy);
+            lz += std::imag(std::conj(p) * (m_grid.x(i) * ddy - m_grid.y(j) * ddx));
+        }
+    }
+    const double Lz = lz * cell * invN;
+
     // Autocorrelation A(t) = <psi(0)|psi(t)> -- its |.| shows revivals, its
     // time-Fourier transform is the energy spectrum weighted by |<n|psi0>|^2.
     double aRe = 0.0, aIm = 0.0;
@@ -521,9 +611,11 @@ void TdseSim::Snapshot(fw::OutputWriter& writer) {
     put("py_mean", py);
     put("transmission", trans * cell * invN);
     const double V = vexp * cell * invN;
+    const double magLz = -0.5 * m_B * Lz;  // the -(B/2) L_z term of H
     put("kinetic", T);
-    put("potential_energy", V);
-    put("energy", T + V);
+    put("potential_energy", V);        // includes the (B^2/8) r^2 diamagnetic term
+    put("Lz", Lz);
+    put("energy", T + V + magLz);
     put("autocorr_re", aRe);
     put("autocorr_im", aIm);
     put("autocorr_abs", std::sqrt(aRe * aRe + aIm * aIm));
