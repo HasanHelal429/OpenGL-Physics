@@ -1,0 +1,51 @@
+title = "Interactive: feeding black hole (PW, live accretion)"
+
+# Starts with the validated "steady circular feeding" star
+# (decks/_scan_circ0p47.toml's scenario -- see README.md's Physics section
+# for how beta=0.47 was found: 0.45 barely strips anything even sustained,
+# 0.5 runs away to near-total disruption within ~2 orbits, 0.47 is the
+# narrow stable window that trickles continuously). Now on Paczynski-Wiita
+# gravity (not the Newtonian point mass used to validate it -- negligible
+# difference here since r/r_s ~ 30, PW and Newtonian agree closely outside
+# a few r_s) so the black hole has an actual horizon-like length scale
+# (schwarzschild_radius) for the new accretion mechanism to consume
+# material against and grow uBhMass live (see kernels::Accretion,
+# TdeSim::RunAccretion). Press N in the window to spawn additional stars
+# on their own orbits -- see the on-screen HUD / README's Interactive
+# section for controls.
+[star]
+ic_file = "ic/star_n1.5_circular_beta0p47.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[blackhole]
+enabled = true
+type = "paczynski_wiita"
+mass = 10.0
+schwarzschild_radius = 0.15
+accretion_radius = 0.15
+
+# Orbit parameters for stars spawned interactively with N (see TdeSim::OnKey);
+# UP/DOWN adjust beta and [ / ] adjust eccentricity live in the window,
+# starting from these. r_star is the R_star used in the spawn's own tidal-
+# radius calculation (spawned stars reuse star.ic_file's shape/mass, always
+# at this project's R_star=1 convention).
+[spawn]
+r_star = 1.0
+beta = 0.47
+eccentricity = 0.0
+
+[time]
+dt = 0.01
+substeps_per_frame = 20
