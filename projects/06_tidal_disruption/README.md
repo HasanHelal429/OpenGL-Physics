@@ -159,19 +159,68 @@ Validation).
 
 ## GPU compute shaders (`src/kernels.hpp`)
 
-One thread per particle, brute-force O(N^2) (fine at the few-thousand-particle
-scale used so far -- see `docs/BOUNDARIES.md`-style honesty: revisit with a
-tree code only if profiling actually says so):
+One thread per particle. Self-gravity stays brute-force O(N^2) -- it's
+genuinely long-range (every pair matters, no matter the distance), so there's
+no cutoff to exploit without a tree code (not attempted; see the Performance
+note below). SPH, by contrast, only interacts within a particle's own `2h`
+kernel support -- restricting that search to nearby space turns it from
+O(N^2) into ~O(N), via a spatial hash grid (below):
 
-- `Density()` -- the adaptive-`h` fixed-point loop, then kernel-weighted mass sum -> rho, then P and sound speed (all local once rho is known, so folded into the same pass).
-- `Forces()` -- fused self-gravity + black hole + SPH pressure/viscosity acceleration (one pairwise loop plus one O(N) black-hole term), using the symmetrized `h_ij`.
+- `Density()` -- the adaptive-`h` fixed-point loop, then kernel-weighted mass sum -> rho, then P and sound speed (all local once rho is known, so folded into the same pass). Grid-accelerated (see below).
+- `Forces()` -- self-gravity (still O(N^2)) + black hole (O(N)) + SPH pressure/viscosity acceleration (grid-accelerated), using the symmetrized `h_ij`.
 - `Kick()` -- leapfrog `v += halfDt*a`, then optional relaxation damping. `Drift()` -- `x += dt*v`.
+- `BuildGrid()` -- rebuilds the spatial hash grid every substep (positions move every substep); see below.
 
 `--selftest` cross-checks `Density`/`Forces` (including the adaptive-`h`
-solve and the black hole term, Paczynski-Wiita) against an independent
-double-precision CPU implementation of the same formulas (37 random
-particles): max relative error `h=1.5e-7`, `rho=2.4e-7`, `accel=5.9e-7` --
-PASS.
+solve, the black hole term (Paczynski-Wiita), and the grid) against an
+independent double-precision CPU implementation of the same formulas, in
+two cases: `small` (37 random particles, mostly sharing one grid cell -- a
+degenerate case for the grid specifically, still a real physics check) and
+`grid-multicell` (2000 particles spread over several grid cells, exercising
+the 27-neighbor-cell search, empty buckets, and hash collisions between
+genuinely different cells) -- both PASS, max relative error
+`h~4e-7`, `rho~1.2e-6`, `accel~3e-6`.
+
+### Spatial hash grid for SPH neighbor search
+
+An atomic-linked-list uniform grid (the classic technique, e.g. NVIDIA's
+CUDA "particles" sample), rebuilt every substep in `BuildGrid()`: each
+particle hashes its cell (`floor(pos/cellSize)`, cellSize fixed at `2*hMax`
+for the whole run) into a fixed-size table and atomically pushes itself onto
+that bucket's linked list (`atomicExchange` both updates the bucket's head
+and returns the previous head in one race-free op -- no separate scan or
+sort step needed at all). A query at position `ri` walks the 27
+neighboring cells (3x3x3, including its own); this is exact, not
+approximate, given the `cellSize=2*hMax` choice, and a small fixed-size
+"already visited this bucket" check inside the query handles the case where
+two of the 27 cells hash-collide with each other (confirmed to happen in
+practice, up to 6 of 27 in one test -- see `--selftest`'s `grid-multicell`
+case and git history for how this was caught and fixed).
+
+**Two earlier, more "standard" designs were tried and both measured net
+SLOWER than plain brute force at every particle count tested (4000-24000):**
+a counting-sort spatial hash (Teschner et al. 2003) needs an exclusive scan
+of per-bucket particle counts before the actual sort, and (1) doing that
+scan via a CPU readback+loop+upload forces a synchronous pipeline stall
+every single substep (the sync point, not the data volume, was the cost);
+(2) doing it as a single-GPU-thread serial loop avoided the CPU round-trip
+but was *also* slower -- a lone GPU thread has none of a CPU core's
+serial-execution advantages (high per-op memory latency, nothing to hide it
+behind). The atomic-linked-list design replaces both with one fully
+parallel pass and no scan whatsoever.
+
+**Measured result** (`decks/star_relax_n1.5.toml`-shaped systems, N copies of
+the same 4000-particle star, `--frames 10`, wall-clock): the grid is a net
+win once gravity's own O(N^2) term is large enough to matter more than the
+grid's small fixed per-substep overhead (an extra dispatch + hash-table
+clear) -- at N=24000 the grid version completed in 31s vs. 41s for plain
+brute force (~24% faster); at N=4000-12000 the two are roughly comparable
+(gravity's O(N^2) cost is small enough there that the grid's fixed overhead
+isn't yet paid back by the SPH term's improved scaling). This still
+directly addresses the original ask ("spawning several stars makes the sim
+hard to handle," see `decks/interactive_feeding.toml`'s `N`-key spawning) --
+the regime where more particles are added interactively is exactly where
+gravity's O(N^2) cost, and therefore the grid's relative benefit, grows.
 
 ## Build & run
 
@@ -187,7 +236,58 @@ cmake --build --preset release --target 06_tidal_disruption
 
 # interactive: window + HUD + orbit camera, particles colored by density
 06_tidal_disruption --interactive --deck decks/star_relax_n1.5.toml
+
+# interactive: feeding black hole -- Paczynski-Wiita gravity, live accretion
+# (the BH's mass actually grows), spawn extra stars on the fly with N
+06_tidal_disruption --interactive --deck decks/interactive_feeding.toml
 ```
+
+### Interactive: a feeding black hole (`decks/interactive_feeding.toml`)
+
+Builds on the validated "steady circular feeding" scenario from the Physics
+section below (beta=0.47, the narrow window between "nothing happens" and
+"runs away to total disruption in ~2 orbits" -- see that section), but now:
+
+- **The black hole actually grows.** `kernels::Accretion` (a new compute
+  pass, run once per substep right after the drift) kills any live particle
+  that falls within `blackhole.accretion_radius` of the origin -- its mass
+  is zeroed in place (which, for free, makes it contribute exactly nothing
+  to every other particle's density/gravity/pressure sum from then on,
+  since those are already mass-weighted) and added onto the black hole's
+  own mass, which is a live, growing value now, not the fixed deck constant
+  it used to be. Only wired up for Paczynski-Wiita (`type =
+  "paczynski_wiita"`) -- a Newtonian point mass has no horizon-like length
+  scale for an accretion radius to mean anything against. Requires
+  `[blackhole] schwarzschild_radius` set explicitly (deck default is 0);
+  `accretion_radius` defaults to the same value if not set separately.
+- **Press `N` to spawn another star** on its own orbit around the (possibly
+  already-grown) black hole -- a fresh copy of `[star] ic_file`'s own shape
+  (position/velocity relative to ITS OWN mass-weighted COM, so it's reusable
+  independent of whatever orbit that file's particles already carry),
+  rigidly boosted onto a new bound Kepler orbit computed live in C++ (same
+  math as `tools/make_orbit_ic.py`'s `bound_orbit_ic`, starting at
+  apocenter). `UP`/`DOWN` adjust the pending spawn's beta (penetration
+  factor) and `[`/`]` adjust its eccentricity, both shown live in the HUD
+  text (top-left) along with the current BH mass, total accreted mass, and
+  live particle count. Successive spawns fan out around the black hole
+  (golden-angle increment) instead of stacking at the same point. Spawned
+  stars gravitate against everything already in the scene (including each
+  other) -- the existing self-gravity sum is already O(N) over however many
+  particles are actually live, no special-casing needed -- so this is a
+  genuine (if brute-force O(N^2), see the Performance note below) N-body
+  system once more than one star is in play, not independent single-star
+  simulations sharing a screen.
+- `R` (reset) discards every spawned star and any accreted mass, returning
+  to exactly `[star] ic_file`'s single original star and the deck's original
+  BH mass.
+- **Performance**: self-gravity is still the brute-force O(N^2) sum
+  documented below (no tree code) -- each spawned star linearly increases N,
+  so gravity's cost still grows quadratically with how many you add; this is
+  a real algorithmic limit, not a bug. SPH (density/pressure/viscosity), by
+  contrast, is now grid-accelerated (see the Spatial hash grid subsection
+  below) -- roughly O(N) instead of O(N^2) -- so the remaining cost as you
+  spawn more stars is increasingly dominated by gravity specifically, not
+  the SPH term.
 
 Then, from `tools/` (needs `numpy`; `matplotlib` for `plot_star.py` --
 **use a plain Python/matplotlib install, not the `physics-sims` conda env**,
@@ -389,3 +489,6 @@ python tools/make_movie.py out/encounter_beta3_pw
 - [x] closed the ~10-30% bulk density calibration gap -- was the self-term exclusion, not a resolution/EOS mismatch (see Physics + star-relaxation Validation above)
 - [x] quantitative fallback-rate diagnostics (`tools/fallback_rate.py`): dM/dt vs. t from the bound debris's frozen-in orbital energy, compared to the classic t^(-5/3) law -- see Validation above
 - [x] Paczynski-Wiita encounter run (`decks/encounter_beta3_pw.toml`), compared directly against the Newtonian point-mass run (`tools/compare_encounters.py`) -- deeper effective potential gives measurably higher peak KE and closer approach, validated per the table above -- a bridge toward Tier 2
+- [x] bound/eccentric orbit support in `tools/make_orbit_ic.py` (`--eccentricity`, starts at apocenter), used to find a "repeated partial feeding" binary regime (beta~0.47-0.5 depending on eccentricity, see Physics above) distinct from the original one-shot parabolic disruption
+- [x] Interactive feeding black hole (`decks/interactive_feeding.toml`): real mass-accreting BH (`kernels::Accretion`, a new compute pass -- consumed particles are zeroed in place and their mass added onto a now-live `m_bhMass`, verified with a deterministic 2-particle test before trusting it against real dynamics) on Paczynski-Wiita gravity, plus live star-spawning (`N` key, `TdeSim::SpawnStar` -- reuses the loaded star's own shape/mass template, rigidly re-boosted onto a new C++-computed Kepler orbit) with `UP`/`DOWN`/`[`/`]` adjusting the pending orbit's beta/eccentricity and an on-screen HUD showing BH mass, accreted total, and particle count -- see the Interactive section above
+- [x] SPH neighbor search grid-accelerated (atomic-linked-list uniform grid, `kernels::BuildGrid`) to address particle-count scaling for the star-spawning feature above -- turns the SPH term from O(N^2) into ~O(N); self-gravity necessarily stays O(N^2) (no cutoff radius possible). Two more "standard" designs (CPU-readback exclusive scan; single-GPU-thread serial scan) were tried first and both measured net SLOWER than plain brute force due to sync/latency costs, not algorithmic complexity -- see the Spatial hash grid subsection above for what actually worked and why. Validated via `--selftest`'s new `grid-multicell` case (2000 particles, several grid cells, hash collisions between distinct cells) in addition to the original `small` case; measured ~24% faster than brute force at N=24000, roughly comparable at N=4000-12000 (grid overhead not yet paid back by SPH savings at that scale, since gravity's O(N^2) term dominates there anyway)

@@ -1,0 +1,38 @@
+title = "Circular feeding -- n=1.5 star, M_bh=10 M_star, beta=0.47 (4 orbits)"
+
+# A closer, circular (not eccentric) orbit: constant rather than periodic
+# tidal stress. Found by scanning beta on a circular orbit: 0.35/0.40 show
+# no measurable stripping even sustained over 3 orbits; 0.5 runs away to
+# ~99% disruption within ~2 orbits with the orbit visibly decaying inward
+# (unstable Roche-lobe overflow -- stripping mass grows the star's own
+# Roche-lobe-filling radius, stripping more mass); 0.47 sits in the narrow
+# stable window between them: a continuous, gently-accelerating trickle
+# (0.9%->6.5% of the star's mass over 4 orbits here, no bursts, no runaway)
+# -- see README.md's Physics section for the full scan. Reused by
+# decks/interactive_feeding.toml as the interactive scenario's starting star.
+[star]
+ic_file = "ic/star_n1.5_circular_beta0p47.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[blackhole]
+enabled = true
+type = "point"
+mass = 10.0
+
+[time]
+# period=19.50 at r=4.5839 (beta=0.47); frames*substeps_per_frame*dt=78, ~4 orbits.
+dt = 0.01
+substeps_per_frame = 20
+frames = 390
