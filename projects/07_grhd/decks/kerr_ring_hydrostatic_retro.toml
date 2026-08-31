@@ -1,0 +1,35 @@
+title = "GRHD non-equilibrium test -- detuned narrow hydrostatic ring, RETROGRADE, a=0.9M"
+
+# Retrograde sibling of decks/kerr_ring_hydrostatic.toml -- identical
+# construction (same r_in=13/r_center=15, same vphi_scale=0.9 detuning)
+# but orbiting opposite to the black hole's spin
+# (tools/make_fm_torus_ic.py --retrograde). Compares directly against the
+# prograde run to isolate frame dragging's effect on the inspiral rate.
+# Needed --exclude_below 8.0 in the IC: retrograde tori can have a second,
+# unphysical h>1 branch very close to the black hole (confirmed here,
+# r<~4.6, cleanly separated from the real ring by ln(h)<0 from r~5-12.5)
+# -- see make_fm_torus_ic.py's --exclude_below comment.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/ring_hydrostatic_a09_l90_retro.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 20
+frames = 150

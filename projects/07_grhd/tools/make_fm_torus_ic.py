@@ -36,13 +36,46 @@ def main():
     ap.add_argument("--r_max", type=float, required=True)
     ap.add_argument("--theta_min", type=float, required=True,
                      help="grid.theta_min; theta_max is fixed at pi-theta_min (KerrTorusSim's convention)")
+    ap.add_argument("--vphi_scale", type=float, default=1.0,
+                     help="multiply the equilibrium v_phi by this factor (default 1.0 = unperturbed "
+                          "equilibrium). <1 removes centrifugal support (should accrete faster); >1 "
+                          "adds excess (should push outward) -- rho/P are left at the equilibrium "
+                          "profile, only the rotation is detuned, a standard way to build a "
+                          "non-equilibrium torus test from an equilibrium one.")
+    ap.add_argument("--retrograde", action="store_true",
+                     help="orbit opposite to the black hole's spin (fishbone_moncrief.py's "
+                          "prograde=False -- flips the sign of the circular-orbit L used to set the "
+                          "torus's specific angular momentum l). Retrograde orbits have a much larger "
+                          "ISCO, so r_in/r_center that work prograde may not be valid retrograde -- "
+                          "check the printed ln(h) is positive.")
+    ap.add_argument("--exclude_below", type=float, default=None,
+                     help="treat any h>1 region at r below this radius as vacuum, not torus. "
+                          "Fishbone-Moncrief tori (this is a real property of the construction, not a "
+                          "bug in it) can have a SECOND, unphysical h>1 branch very close to the black "
+                          "hole -- confirmed for a=0.9 retrograde, r_in=13/r_center=15, where ln(h) "
+                          "rises back above 0 for r<~4.6 despite a clean ln(h)<0 gap from r~5 to ~12.5 "
+                          "separating it from the genuine torus at r~13-17.5. Always check the ln(h) "
+                          "profile (e.g. via FishboneMoncriefTorus.ln_enthalpy at several r) before "
+                          "trusting a new (a, r_in, r_center, prograde) combination doesn't have this.")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
-    if args.r_min <= 2.0 * args.M:
-        raise SystemExit(f"r_min={args.r_min} must clear the horizon region (2*M={2*args.M})")
+    # This guard used to require r_min > 2M -- a Boyer-Lindquist-era
+    # safety margin, back when KerrTorusSim used BL coordinates (which
+    # have a genuine coordinate singularity at the horizon r_+=M+sqrt(M^2-a^2)
+    # and can't be evolved through it). KerrTorusSim now uses horizon-
+    # penetrating Kerr-Schild coordinates instead (see kernels_kerr2d.hpp's
+    # header comment) -- the metric (Sigma=r^2+a^2*cos^2(theta), lapse
+    # alpha^2=Sigma/(Sigma+2Mr)) is well-defined for any r>0, including
+    # inside the horizon, so this only needs to keep r away from the true
+    # curvature singularity at r=0 (a torus deck's own r_in is always well
+    # outside the horizon anyway; this just bounds how far the domain's
+    # OWN inner edge, distinct from the torus's inner edge, can safely go).
+    if args.r_min <= 0.1:
+        raise SystemExit(f"r_min={args.r_min} must stay well clear of r=0 (the true curvature singularity)")
 
-    torus = FishboneMoncriefTorus(args.M, args.a, args.r_in, args.r_center, args.gamma)
+    torus = FishboneMoncriefTorus(args.M, args.a, args.r_in, args.r_center, args.gamma,
+                                   prograde=not args.retrograde)
     print(f"l={torus.l:.6f}  ln(h)@r_center={torus.ln_h_center:.6f}  K={torus.K:.6f}")
 
     theta_max = np.pi - args.theta_min
@@ -57,8 +90,10 @@ def main():
     for i, ri in enumerate(r):
         for j, thj in enumerate(theta):
             rho, v_phi, P = torus.primitives(ri, thj)
+            if args.exclude_below is not None and ri < args.exclude_below:
+                rho, v_phi, P = 0.0, 0.0, 0.0
             record[i, j, 0] = rho
-            record[i, j, 3] = v_phi
+            record[i, j, 3] = v_phi * args.vphi_scale
             record[i, j, 4] = P
             if rho > 0.0:
                 n_inside += 1

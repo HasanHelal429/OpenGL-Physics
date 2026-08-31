@@ -1,0 +1,38 @@
+title = "GRHD non-equilibrium test -- detuned narrow hydrostatic ring, a=0.9M"
+
+# Proper version of decks/kerr_ring_eccentric.toml: instead of an ad-hoc
+# Gaussian blob (which is not a real hydrostatic equilibrium and always
+# launches a domain-wide adjustment transient -- see this session's
+# investigation of that deck's two distinct failure modes), this is a
+# genuine Fishbone-Moncrief equilibrium torus (tools/fishbone_moncrief.py,
+# the same validated construction as decks/kerr_torus.toml), just narrow
+# (r_in=13, r_center=15, vs. the original's r_in=6/r_center=10) so it
+# behaves like a compact ring rather than a broad disk, and detuned by
+# scaling v_phi to 0.9x equilibrium (tools/make_fm_torus_ic.py
+# --vphi_scale, the same lever already validated in
+# decks/kerr_torus_underrot.toml) to break equilibrium on purpose and
+# induce a swing toward periapsis.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/ring_hydrostatic_a09_l90.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 20
+frames = 150

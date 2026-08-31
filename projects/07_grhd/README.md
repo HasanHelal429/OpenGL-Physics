@@ -1,4 +1,4 @@
-# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2b, part 2 in progress)
+# 07 — General-relativistic hydrodynamics (Tier 2, Phases 0-2b done; Kerr-Schild + non-equilibrium demos follow-on)
 
 This is Tier 2 of the tidal-disruption project (see
 `06_tidal_disruption/README.md`'s tier table): fluid on a fixed
@@ -7,6 +7,14 @@ Real GR hydro codes are grid-based finite-volume solvers in conservative
 variables, not particle methods -- a genuinely different numerical method
 from Tier 1's SPH -- so this project starts from scratch rather than
 extending `06_tidal_disruption`.
+
+**For the physics derivations and implementation walkthrough of the
+current Kerr-Schild torus solver, see `docs/SIMULATION.md`** -- a
+from-scratch, physics-first writeup (metric -> Valencia formulation ->
+con2prim -> HLLE -> the Kerr-Schild reformulation -> implementation) that
+supersedes the phase-by-phase narrative below as the reference for how
+the solver actually works today. This file remains the chronological
+development log.
 
 **Phase 0 (done): validate the fluid solver before adding a curved
 metric.** A relativistic hydro code has two pieces that are easy to get
@@ -754,15 +762,88 @@ debugging round traced the failure to.
 `t=897` (~4.4 orbits) run now completes with no NaN at all, using
 principled, validated corrections rather than papering over the symptom.
 What is NOT yet fixed: quantitative fidelity. The torus still loses ~78%
-of its mass over that run (`865.8 -> 187.4`), driven by how often the
-conserved-variable fixup above has to fire. This is now a different,
-more tractable class of problem than an unexplained crash -- likely
-needing higher spatial resolution, a less diffusive reconstruction than
-plain first-order Godunov (a slope limiter), and/or a closer look at
-*why* the fixup triggers so often at the vacuum/torus-material interface
-near `r_in` -- rather than more floor/tolerance tuning, which this round
-showed does not address it. See Progress below for the precise
-confirmed-working vs. still-open split.
+of its mass over that run (`865.8 -> 187.4`).
+
+**Follow-up investigation (mass conservation) -- the initial hypothesis
+above (that the conserved-variable fixup itself was the driver) was
+tested directly and disproven.** Added two GPU atomic-counter diagnostics
+(`fixup_count`, `floor_count` in `KerrTorusSim`'s per-frame output) to
+measure, rather than guess, how often each `ConsToPrim` branch actually
+fires:
+
+- **Doubling resolution (96x64 -> 192x128) made mass loss *worse*** (93.8%
+  vs. 78% over the same run), which already ruled out "insufficient
+  resolution / needs a slope limiter" as the primary story -- a
+  genuinely under-resolved diffusive scheme should *improve* with more
+  cells, not degrade.
+- **`fixup_count` and the mass-loss rate are anti-correlated, not
+  correlated.** Over a 20-frame (`t=0..114`) run, `fixup_count` fell
+  130x (423,642 -> 3,157 per frame) while the mass-loss rate *rose* then
+  plateaued high (0.25 -> ~19 per frame); loss-per-fixup-event grew
+  4 orders of magnitude (7e-9 -> 5e-3) over the same window. A true
+  driver should track the loss rate, not move opposite to it -- this
+  rules the momentum fixup out.
+- **`floor_count` (the vacuum density-floor branch, which *does* overwrite
+  `D` directly) fires hard only in the first substep (2,194 of 6,144
+  cells, i.e. `--substeps 1 --frames 2` from the pristine analytic IC)
+  and then drops to exactly zero for the rest of a normal run** -- a
+  one-time discretization-settling transient (the analytic torus sampled
+  onto a finite grid isn't a bit-exact discrete equilibrium at its sharp
+  vacuum/torus surface), not an ongoing sink. Algebraically, both floor
+  branches also reconstruct `D` from the *same* `D` they started from
+  (`D_new = sqrtg*rho_new*u^t_new` reduces to `D` exactly given how
+  `rho_new`/`u^t_new` are derived) -- so neither is a mass-creating or
+  mass-destroying operation by construction, consistent with the
+  measured near-zero (`~3e-9` relative) mass change over a single RK2
+  substep from the pristine equilibrium.
+- **Tried scaling down the HLL wave-speed bound** (`fPhoton`, currently
+  the *exact photon speed* `sqrt(-g_tt/g_rr)` -- a deliberately
+  conservative, but far larger than the fluid's actual `v_r,v_theta`
+  (~0.1-0.5) or sound speed, choice that makes this an effectively
+  Rusanov/local-Lax-Friedrichs flux) by an ad-hoc `x0.3`, expecting less
+  artificial dissipation to *reduce* mass loss. It did the opposite:
+  mass loss got worse (55.9% remaining vs. 64.5% at the same `t=114.4`
+  in the unmodified run) and both `fixup_count` and `floor_count` stopped
+  decaying to zero and stayed persistently nonzero for the whole run.
+  This rules out "too much artificial viscosity" as the story, and
+  instead points to the *opposite*: the wide photon-speed bound is
+  currently damping/suppressing a real draining or (numerically-seeded)
+  instability process in this axisymmetric torus, and reducing that
+  damping -- exactly like increasing resolution -- lets more of it
+  through. (Change reverted; this was a diagnostic-only experiment,
+  confirmed via `--selftest` afterward.)
+
+**Current understanding**: the sustained mass loss is not attributable to
+either `ConsToPrim` branch, and is not simple excess numerical diffusion
+in the flux scheme (less of it made things worse, not better). The two
+independent facts that *do* point the same way -- finer resolution loses
+more mass, and less flux dissipation loses more mass -- are the signature
+of a real (possibly numerically-seeded, since there is no explicit
+viscosity in ideal GRHD and this axisymmetric 2D setup cannot capture the
+true, non-axisymmetric Papaloizou-Pringle instability of constant-l
+tori) draining/accretion process through the inner vacuum boundary that
+the flux scheme's dissipation happens to be partially suppressing, not a
+discrete implementation bug of the kind found and fixed above. This is a
+harder, more open-ended problem (disk stability/transport, not a
+one-line fix) than the five bugs above -- see Progress below.
+
+**Second follow-up (mass conservation) -- resolved, not a mystery
+process after all.** The investigation above correctly ruled out the
+`ConsToPrim` branches and "too much dissipation," but stopped short of
+actually measuring where the mass was going. A later session built a
+genuine accretion-rate diagnostic (`inner_boundary_flux_cum`/
+`outer_boundary_flux_cum`, a direct time-integral of the same HLLE flux
+`EulerStep` already uses, RK2-consistent) and checked it against the
+actual total-mass change. They match to 0.02-0.05% for a=0.9, 0.5, and
+0.998: **the mass loss is real accretion through the inner boundary**,
+not numerical diffusion, not a fixup artifact, and not an unexplained
+draining process -- the "resolution/dissipation both make it worse"
+result above makes sense in hindsight too, since both changes let more
+of the *real* inflow through rather than diffusing across the boundary.
+This was independently re-derived and re-confirmed after also
+reformulating the whole solver in Kerr-Schild coordinates (see
+`docs/SIMULATION.md`), so it holds for the current solver, not just the
+Boyer-Lindquist version this investigation was run on originally.
 
 ## Progress
 
@@ -773,5 +854,8 @@ confirmed-working vs. still-open split.
 - [x] Phase 2a: Kerr restricted to the equatorial plane (an exact invariant submanifold, keeping the grid 1D-in-r), conserved variables/flux/source rederived for frame dragging and cross-checked against an independently-derived circular-orbit solution; validated per the table above; caught two further mistakes (a shift sign error, a missing factor in the specific-energy formula) before they reached code
 - [x] Phase 2b, part 1: Fishbone-Moncrief equilibrium torus analytic construction (`tools/fishbone_moncrief.py`), rederived from the Euler equation after a commonly-quoted shortcut failed its own consistency check; validated per the table above (curl-free acceleration field, zero radial force at the geodesic/pressure-maximum radius, correct torus shape); caught two further mistakes (a wrong potential shortcut/Euler-equation sign, a `u_t_of_l` transcription bug) before trusting it
 - [x] Phase 2b, part 2 (crash fixed): dynamical solver extended to genuine 2D `(r,theta)` structure (3-component velocity primitive recovery, 2D flux divergence, source terms on both `Sr`/`Stheta`) -- GPU compute shaders, validated against an independent CPU reference (`--selftest`). Found and fixed FIVE real bugs total in getting a full `t=897` (~4.4-orbit) run to complete with zero NaN: (1) wrong volume-element weighting `sqrt(gamma)` vs. the correct `sqrt(-g)`; (2) floor cells not being re-enforced every step; (3) the primitive-recovery Newton solve had no upper bound/step damping and a float32-broken epsilon; (4) confirmed via an iteration-count experiment that some conserved states have no valid solution at all (a genuine failed inversion, not a convergence problem) and derived the exact solvability condition; (5) a full vacuum reset on failed inversion avoided the crash but erased 97% of the torus's mass, so replaced it with a minimal conserved-variable rescue (bisection to the smallest momentum reduction that restores physicality) -- see Physics above for the full story, including the crash visualization command
-- [ ] Phase 2b, part 2 (remaining): the crash is gone, but quantitative fidelity is not there yet -- ~78% mass loss over the same `t=897` run, driven by how often the fixup above still has to fire (likely needs higher resolution and/or a less diffusive reconstruction scheme, not further floor/tolerance tuning -- that was tried and confirmed not to help). Full multi-orbit mass conservation is the remaining bar for "Phase 2b done"
+- [x] Phase 2b, part 2 (mass-loss question RESOLVED, not a bug): built a genuine horizon/boundary accretion-rate diagnostic (`KerrTorusSim`'s `inner_boundary_flux_cum`/`outer_boundary_flux_cum`, a direct RK2-consistent time-integral of the same HLLE flux `EulerStep` already uses) and checked actual total-mass change against it. For the a=0.9 torus (and a=0.5, a=0.998) the match is 0.02-0.05% -- **the mass loss is real accretion through the inner boundary, not a numerical leak.** (a=0.0 is the one exception: its `total_mass` is dominated by a genuine floor-injection artifact and should not be trusted directly -- plausibly because a=0's `r_in=6` sits exactly at the Schwarzschild ISCO, a degenerate Fishbone-Moncrief choice the other spins don't share.) See `out/accretion_balance*.png` (regenerable, gitignored) and `docs/SIMULATION.md` sec. 9 for the current, still-open item this reframes (the NaN blowup itself, not conservation).
+- [x] Kerr-Schild reformulation: the whole torus solver (metric, ADM 3+1 split, primitive velocity convention, con2prim, source terms, HLLE wave speeds, IC transform) rederived and reimplemented in horizon-penetrating Kerr-Schild coordinates, replacing Boyer-Lindquist's coordinate singularity at the horizon (which forced an artificial inner boundary well outside it). Two more real bugs caught the same adversarial way as the earlier five: a missing `beta_i*u^t` term in the covariant velocity and a wrong con2prim shortcut, both formulas that are exactly correct in the simpler BL special case (`beta_r=0`) but silently wrong in general -- caught by a 4D-normalization check passing while a round-trip check failed, not by rereading the algebra. Full derivation story in `docs/SIMULATION.md`.
+- [x] Spin scan (a=0, 0.5, 0.9, 0.998) and a family of non-equilibrium demos built on the validated solver -- a free-falling blob, under/over-rotating detuned tori, Bondi accretion ported onto Kerr-Schild (cross-validated at a=0 against the independent 1D Schwarzschild Bondi solver to ~2%), and detuned narrow "ring" tori (prograde vs. retrograde comparison, a two-ring collision) built from the same Fishbone-Moncrief construction rather than an ad-hoc profile, after an ad-hoc Gaussian-blob ring was found to launch its own far-from-equilibrium transient and fail well before periapsis dynamics could be observed. See `docs/SIMULATION.md` and `tools/make_*_ic.py`/`decks/kerr_*.toml` for the full set.
+- [ ] Still open: a genuine near-horizon numerical instability, confirmed via three independent setups (a torus with `r_min` inside the horizon, and a free-falling blob with `r_min` inside the horizon, twice) to fail almost immediately (t~9-36) whenever the grid's inner boundary sits inside the horizon, regardless of rotation or what physical flow is happening -- a general property of the floor/vacuum region there, not yet root-caused. Also open: the equilibrium torus itself still eventually destabilizes (NaN) near `r_min` even when `r_min` is safely outside the horizon (r=4M), just later than before the Kerr-Schild reformulation -- not yet root-caused either.
 - [ ] Phase 3: an actual fluid blob disrupted near/inside a Kerr black hole's tidal field -- the Tier 2 payoff

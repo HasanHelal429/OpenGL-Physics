@@ -1,0 +1,44 @@
+title = "GRHD non-equilibrium test -- free-falling blob, a=0.9M"
+
+# NOT an equilibrium test (unlike decks/kerr_torus*.toml). A single
+# pressure-supported-only-by-itself gas blob (tools/make_blob_ic.py) starts
+# at rest (zero angular momentum) at r0=15M and simply falls inward under
+# gravity. Watch inner_boundary_flux_cum (tools/plot_accretion.py) for the
+# infall signature: near-zero, then a single sharp pulse as the blob
+# crosses r_min, then back to near-zero.
+#
+# r_min=1.0 (inside the horizon, r_+~1.436) was tried first and failed by
+# t~9.5 -- WAY before the blob (starting at r0=15) could plausibly have
+# fallen that far, and with max_abs_vtheta spiking to 0.5 right before,
+# pointing at the floor/vacuum region sitting near r_min itself, not
+# anything the blob caused. That's the same near-horizon instability
+# decks/kerr_torus_rmin1p2.toml hit, now confirmed independently in a
+# completely different (non-rotating) setup -- real evidence it's a
+# general property of an inside-the-horizon r_min, not something specific
+# to rotation or the torus. r_min=4.0 (the validated baseline) sidesteps
+# it so the actual infall demonstration can complete; the r_min=1.0
+# failure itself is the more interesting result, not a bug to hide.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/blob_a09.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 50
+frames = 400

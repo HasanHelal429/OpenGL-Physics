@@ -40,6 +40,13 @@ def main():
     ap.add_argument("--frame_start", type=int, default=None)
     ap.add_argument("--frame_end", type=int, default=None)
     ap.add_argument("--out", default=None)
+    ap.add_argument("--scale", choices=["log", "linear"], default="log",
+                     help="log (default) shows faint/spread-out material alongside a dense peak in one "
+                          "frame, at the cost of making total mass hard to read off by eye (a wide-spread, "
+                          "low-density state can look similarly \"lit up\" as a compact, high-density one). "
+                          "linear makes brightness track density directly -- better for judging how much "
+                          "mass is actually present, at the cost of a compact high-density feature washing "
+                          "out anything an order of magnitude fainter.")
     args = ap.parse_args()
 
     d = args.results_dir
@@ -77,10 +84,17 @@ def main():
     rho_min = max(float(finite.min()) if finite.size else 1e-8, 1e-8)
     rho_max = max(float(finite.max()) if finite.size else 1.0, rho_min * 10)
 
-    from matplotlib.colors import LogNorm
     cmap = plt.get_cmap("inferno").copy()
     cmap.set_bad("white")  # NaN cells render as solid white -- unmistakable in the movie
-    norm = LogNorm(vmin=rho_min, vmax=rho_max)
+    if args.scale == "log":
+        from matplotlib.colors import LogNorm
+        norm = LogNorm(vmin=rho_min, vmax=rho_max)
+    else:
+        from matplotlib.colors import Normalize
+        # vmin=0 (not rho_min): on a linear scale the floor value (~1e-8) is
+        # indistinguishable from 0 anyway, and starting at 0 makes color
+        # directly proportional to density -- the whole point of --scale linear.
+        norm = Normalize(vmin=0.0, vmax=rho_max)
 
     fig, ax = plt.subplots(figsize=(7, 7), dpi=120)
     fig.patch.set_facecolor("black")

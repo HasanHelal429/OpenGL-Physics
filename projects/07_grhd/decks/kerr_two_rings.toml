@@ -1,0 +1,33 @@
+title = "GRHD non-equilibrium test -- two-ring collision, a=0.9M"
+
+# Two independent Fishbone-Moncrief rings (tools/make_two_ring_ic.py): an
+# outer one (r_in=13/r_center=15) detuned to 0.9x equilibrium rotation --
+# the same construction as decks/kerr_ring_hydrostatic.toml, which
+# migrates inward from r~15 toward r~6 over t~0-120 -- and an inner one
+# (r_in=8/r_center=9.5) left at EXACT equilibrium (should stay put on its
+# own). As the outer ring migrates in, it should reach and collide with
+# the stationary inner one -- genuine two-body hydrodynamic interaction.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/two_rings_a09.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 20
+frames = 150

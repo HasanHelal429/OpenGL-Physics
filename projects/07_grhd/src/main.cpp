@@ -623,54 +623,65 @@ bool SelfTestKerrEquatorial() {
 // running practice (see feedback_gr_derivation_methodology) of never
 // trusting a second, independent transcription of curved-spacetime
 // formulas without a direct comparison.
-struct Metric2DRef { double gtt, gtphi, grr, gthth, gphiphi; };
-Metric2DRef Metric2DAt(double r, double theta, double M, double a) {
+// Kerr-Schild (KS) metric + ADM bundle -- mirrors kernels_kerr2d.hpp's
+// metricBundleAt() and tools/kerr_schild_ref.py's metric_bundle_ks()
+// exactly. See kernels_kerr2d.hpp's header comment for the full
+// derivation/verification story.
+struct MetricBundle2DRef {
+    double gtt, gtr, gtphi, grr, grphi, gthth, gphiphi;
+    double alpha, betaUpR;
+    double gammaUpRr, gammaUpRphi, gammaUpPhiphi, gammaUpThth;
+};
+MetricBundle2DRef MetricBundle2DAt(double r, double theta, double M, double a) {
     const double s = std::sin(theta), c = std::cos(theta);
     const double sin2 = s * s, cos2 = c * c;
     const double Sigma = r * r + a * a * cos2;
-    const double Delta = r * r - 2.0 * M * r + a * a;
-    const double A = (r * r + a * a) * (r * r + a * a) - a * a * Delta * sin2;
-    Metric2DRef m;
-    m.gtt = -(1.0 - 2.0 * M * r / Sigma);
-    m.gtphi = -2.0 * M * a * r * sin2 / Sigma;
-    m.grr = Sigma / Delta;
-    m.gthth = Sigma;
-    m.gphiphi = A * sin2 / Sigma;
-    return m;
+    const double twoMrOverSigma = 2.0 * M * r / Sigma;
+    MetricBundle2DRef b;
+    b.gtt = -(1.0 - twoMrOverSigma);
+    b.gtr = twoMrOverSigma;
+    b.gtphi = -a * sin2 * twoMrOverSigma;
+    b.grr = 1.0 + twoMrOverSigma;
+    b.grphi = -a * sin2 * (1.0 + twoMrOverSigma);
+    b.gthth = Sigma;
+    b.gphiphi = sin2 * (Sigma + a * a * sin2 * (1.0 + twoMrOverSigma));
+    b.alpha = std::sqrt(Sigma / (Sigma + 2.0 * M * r));
+    b.betaUpR = 2.0 * M * r / (Sigma + 2.0 * M * r);
+    const double det2 = b.grr * b.gphiphi - b.grphi * b.grphi;
+    b.gammaUpRr = b.gphiphi / det2;
+    b.gammaUpRphi = -b.grphi / det2;
+    b.gammaUpPhiphi = b.grr / det2;
+    b.gammaUpThth = 1.0 / b.gthth;
+    return b;
 }
 double SqrtNegG2D(double r, double theta, double M, double a) {
-    const Metric2DRef m = Metric2DAt(r, theta, M, a);
-    return m.gthth * std::sin(theta); // sqrt(-g) = Sigma*sin(theta), NOT sqrt(gamma) -- see kernels_kerr2d.hpp
+    const MetricBundle2DRef b = MetricBundle2DAt(r, theta, M, a);
+    return b.gthth * std::sin(theta); // sqrt(-g) = Sigma*sin(theta), same identity as BL
 }
-void Zamo2DRef(double r, double theta, double M, double a, double& alpha, double& betaPhiUp, double& gammaRr,
-               double& gammaThth, double& gammaPhiphi, double& gTphi) {
-    const Metric2DRef m = Metric2DAt(r, theta, M, a);
-    const double Delta = r * r - 2.0 * M * r + a * a;
-    const double sin2 = std::sin(theta) * std::sin(theta);
-    const double A = (r * r + a * a) * (r * r + a * a) - a * a * Delta * sin2;
-    alpha = std::sqrt(m.gthth * Delta / A);
-    betaPhiUp = m.gtphi / m.gphiphi;
-    gammaRr = m.grr;
-    gammaThth = m.gthth;
-    gammaPhiphi = m.gphiphi;
-    gTphi = m.gtphi;
-}
+
+// (rho,v^r,v^th,v^phi,P) -> W,h,u^t,u^r,u^th,u^phi,u_r,u_th,u_phi,E. v^i
+// is the GENERAL coordinate-frame Valencia velocity (KS's spatial metric
+// is not diagonal, unlike BL's) -- mirrors kernels_kerr2d.hpp's
+// kinematics2D() and tools/kerr_schild_ref.py's kinematics_ks() exactly.
 void Kinematics2DRef(const glm::dvec4& prim, double P, double r, double theta, double M, double a, double gamma,
                       double& W, double& h, double& ut, double& ur, double& uth, double& uPhiContra,
                       double& urCov, double& uthCov, double& uPhiCov, double& E) {
     const double rho = prim.x, vr = prim.y, vth = prim.z, vphi = prim.w;
-    double alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi;
-    Zamo2DRef(r, theta, M, a, alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi);
-    W = 1.0 / std::sqrt(std::clamp(1.0 - vr * vr - vth * vth - vphi * vphi, 1e-10, 1.0));
+    const MetricBundle2DRef b = MetricBundle2DAt(r, theta, M, a);
+    const double v2 = b.grr * vr * vr + b.gthth * vth * vth + b.gphiphi * vphi * vphi + 2.0 * b.grphi * vr * vphi;
+    W = 1.0 / std::sqrt(std::clamp(1.0 - v2, 1e-10, 1.0));
     h = 1.0 + gamma * P / ((gamma - 1.0) * rho);
-    ut = W / alpha;
-    ur = W * vr / std::sqrt(gammaRr);
-    uth = W * vth / std::sqrt(gammaThth);
-    uPhiContra = W * vphi / std::sqrt(gammaPhiphi) - W * betaPhiUp / alpha;
-    urCov = W * std::sqrt(gammaRr) * vr;
-    uthCov = W * std::sqrt(gammaThth) * vth;
-    uPhiCov = W * std::sqrt(gammaPhiphi) * vphi;
-    E = W * (alpha - gTphi * vphi / std::sqrt(gammaPhiphi));
+    ut = W / b.alpha;
+    ur = W * (vr - b.betaUpR / b.alpha);
+    uth = W * vth;
+    uPhiContra = W * vphi; // beta^phi=0 always for KS
+
+    const double betaR = b.grr * b.betaUpR;
+    const double betaPhi = b.grphi * b.betaUpR;
+    urCov = b.grr * ur + b.grphi * uPhiContra + betaR * ut;
+    uPhiCov = b.grphi * ur + b.gphiphi * uPhiContra + betaPhi * ut;
+    uthCov = b.gthth * uth;
+    E = -(b.gtt * ut + b.gtr * ur + b.gtphi * uPhiContra);
 }
 
 // Returns (D,Sr,Sth,tau,L) and (Fr_D,Fr_Sr,Fr_Sth,Fr_tau,Fr_L),
@@ -705,26 +716,57 @@ void SideState2DRef(const glm::dvec4& prim, double P, double r, double theta, do
     Fthl = sqrtg * rho * h * uth * uPhiCov;
 }
 
+// Newton iteration on h -- mirrors kernels_kerr2d.hpp's ConsToPrim() and
+// tools/kerr_schild_ref.py's cons_to_prim_ks() exactly, including the
+// quadratic-in-u^t solve that replaced the old W=sqrt(1+K/h^2) shortcut
+// (see that shader's comment for why the shortcut is wrong once
+// beta^r!=0).
+double ComputeK2DRef(double kappaR, double kappaTh, double kappaPhi, const MetricBundle2DRef& b) {
+    return b.gammaUpRr * kappaR * kappaR + b.gammaUpThth * kappaTh * kappaTh
+         + b.gammaUpPhiphi * kappaPhi * kappaPhi + 2.0 * b.gammaUpRphi * kappaR * kappaPhi;
+}
+void SolveUtAndU2DRef(double h, double kappaR, double kappaTh, double kappaPhi, double K, const MetricBundle2DRef& b,
+                       double& ut, double& ur, double& uth, double& uphi) {
+    const double Xr = (b.gammaUpRr * kappaR + b.gammaUpRphi * kappaPhi) / h;
+    const double Xphi = (b.gammaUpRphi * kappaR + b.gammaUpPhiphi * kappaPhi) / h;
+    const double Xth = (b.gammaUpThth * kappaTh) / h;
+
+    const double Acoef = b.gtt - b.betaUpR * b.gtr;
+    const double Bcoef = (-b.betaUpR * kappaR
+                          + b.gammaUpPhiphi * b.gtphi * kappaPhi + b.gammaUpRphi * b.gtphi * kappaR
+                          + b.gammaUpRphi * b.gtr * kappaPhi + b.gammaUpRr * b.gtr * kappaR) / h;
+    const double Ccoef = K / (h * h) + 1.0;
+    const double disc = std::max(Bcoef * Bcoef - 4.0 * Acoef * Ccoef, 0.0);
+    const double root1 = (-Bcoef + std::sqrt(disc)) / (2.0 * Acoef);
+    const double root2 = (-Bcoef - std::sqrt(disc)) / (2.0 * Acoef);
+    ut = (root1 > 0.0) ? root1 : root2;
+
+    ur = Xr - b.betaUpR * ut;
+    uphi = Xphi;
+    uth = Xth;
+}
+
 glm::dvec4 RecoverPrimitivesKerr2DRef(double D, double Sr, double Sth, double L, double tau, double pGuess, double r,
-                                       double theta, double M, double a, double gamma, int iters) {
-    double alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi;
-    Zamo2DRef(r, theta, M, a, alpha, betaPhiUp, gammaRr, gammaThth, gammaPhiphi, gTphi);
+                                       double theta, double M, double a, double gamma, int iters, double& pOut) {
+    const MetricBundle2DRef b = MetricBundle2DAt(r, theta, M, a);
     const double sqrtg = SqrtNegG2D(r, theta, M, a);
-    const double kappaR = Sr / D, kappaTh = Sth / D, lam = L / D;
-    const double K = kappaR * kappaR / gammaRr + kappaTh * kappaTh / gammaThth + lam * lam / gammaPhiphi;
+    const double kappaR = Sr / D, kappaTh = Sth / D, kappaPhi = L / D;
+    const double K = ComputeK2DRef(kappaR, kappaTh, kappaPhi, b);
 
     auto residual = [&](double h) {
-        const double W0 = std::sqrt(1.0 + K / (h * h));
-        const double rho0 = D * alpha / (sqrtg * W0);
+        double ut0, ur0, uth0, uphi0;
+        SolveUtAndU2DRef(h, kappaR, kappaTh, kappaPhi, K, b, ut0, ur0, uth0, uphi0);
+        const double W0 = b.alpha * ut0;
+        const double rho0 = D * b.alpha / (sqrtg * W0);
         const double P0 = (gamma - 1.0) * rho0 * (h - 1.0) / gamma;
-        const double Q0 = (tau + D + sqrtg * P0) / D;
-        return Q0 / h - (W0 * alpha - gTphi * lam / (h * gammaPhiphi));
+        const double E0 = -(b.gtt * ut0 + b.gtr * ur0 + b.gtphi * uphi0);
+        return (tau + D + sqrtg * P0) / D / h - E0;
     };
     // Same safeguards as kernels_kerr2d.hpp's ConsToPrim (float32-safe
     // floor + damped Newton step) -- see that shader's comment for why
     // both are needed, not just a smaller epsilon.
     const double kHFloor = 1.0 + 1e-4;
-    const double rhoGuess = D * alpha / (sqrtg * std::sqrt(1.0 + K));
+    const double rhoGuess = D * b.alpha / (sqrtg * std::sqrt(1.0 + K));
     double h = std::max(1.0 + gamma * std::max(pGuess, 1e-12) / ((gamma - 1.0) * rhoGuess), kHFloor);
     for (int it = 0; it < iters; ++it) {
         const double f0 = residual(h);
@@ -737,20 +779,45 @@ glm::dvec4 RecoverPrimitivesKerr2DRef(double D, double Sr, double Sth, double L,
             h = std::max(h - step, kHFloor);
         }
     }
-    const double W = std::sqrt(1.0 + K / (h * h));
-    const double rho = D * alpha / (sqrtg * W);
-    const double vr = kappaR / (h * W * std::sqrt(gammaRr));
-    const double vth = kappaTh / (h * W * std::sqrt(gammaThth));
-    const double vphi = lam / (h * W * std::sqrt(gammaPhiphi));
+    double utF, urF, uthF, uphiF;
+    SolveUtAndU2DRef(h, kappaR, kappaTh, kappaPhi, K, b, utF, urF, uthF, uphiF);
+    const double W = b.alpha * utF;
+    const double rho = D * b.alpha / (sqrtg * W);
+    const double vr = urF / W + b.betaUpR / b.alpha;
+    const double vth = uthF / W;
+    const double vphi = uphiF / W;
     const double eps = (h - 1.0) / gamma;
     const double P = (gamma - 1.0) * rho * eps;
+    pOut = P;
     return glm::dvec4(rho, vr, vth, vphi);
 }
 
 glm::dvec4 HlleFluxKerr2DRef(const glm::dvec4& fluxL, const glm::dvec4& UL, const glm::dvec4& fluxR,
-                              const glm::dvec4& UR, double s) {
-    const double sL = -s, sR = s;
+                              const glm::dvec4& UR, double sL, double sR) {
     return (sR * fluxL - sL * fluxR + sL * sR * (UR - UL)) / (sR - sL);
+}
+
+// CPU mirror of kernels_kerr2d.hpp's minmod()/ComputeSlopes() -- see that
+// shader's comment. Same boundary clamping (iM=max(i-1,0) etc.) so a
+// domain-edge cell's slope comes out exactly 0, same as the GPU.
+double Minmod2DRef(double a, double b) {
+    if (a * b <= 0.0) return 0.0;
+    return (a > 0.0) ? std::min(a, b) : std::max(a, b);
+}
+
+// CPU mirror of kernels_kerr2d.hpp's soundSpeed2()/charSpeedsLocal() --
+// see that shader's comment and tools/wave_speed_check.py for the
+// derivation and independent verification.
+double SoundSpeed2Ref(double rho, double P, double h, double gamma) { return gamma * P / (rho * h); }
+
+void CharSpeedsLocalRef(double vx, double vy, double vz, double cs2, double& lamMinus, double& lamPlus) {
+    const double v2 = vx * vx + vy * vy + vz * vz;
+    const double denom = 1.0 - v2 * cs2;
+    const double disc = std::max(cs2 * (1.0 - v2) * ((1.0 - v2 * cs2) - vx * vx * (1.0 - cs2)), 0.0);
+    const double root = std::sqrt(disc);
+    const double centerTerm = vx * (1.0 - cs2);
+    lamPlus = (centerTerm + root) / denom;
+    lamMinus = (centerTerm - root) / denom;
 }
 
 // N random mildly-relativistic cells spread over a 2D (r,theta) patch,
@@ -767,8 +834,7 @@ bool SelfTestKerrTorus() {
 
     std::mt19937 rng(23);
     std::uniform_real_distribution<double> rhoDist(0.5, 2.0);
-    std::uniform_real_distribution<double> vDist(-0.15, 0.15);
-    std::uniform_real_distribution<double> vphiDist(0.1, 0.35);
+    std::uniform_real_distribution<double> vHatDist(-0.3, 0.3);
     std::uniform_real_distribution<double> pDist(0.02, 0.15);
 
     std::vector<glm::dvec4> prim0(N);
@@ -778,9 +844,30 @@ bool SelfTestKerrTorus() {
     for (int i = 0; i < NR; ++i) {
         for (int j = 0; j < NTH; ++j) {
             const int idx = i * NTH + j;
-            rCell[idx] = R_MIN + (i + 0.5) * DR;
-            thCell[idx] = TH_MIN + (j + 0.5) * DTH;
-            const double rho = rhoDist(rng), vr = vDist(rng), vth = vDist(rng), vphi = vphiDist(rng), p = pDist(rng);
+            const double r = R_MIN + (i + 0.5) * DR;
+            const double theta = TH_MIN + (j + 0.5) * DTH;
+            rCell[idx] = r;
+            thCell[idx] = theta;
+            const double rho = rhoDist(rng), p = pDist(rng);
+            // KS's v^i is a coordinate-frame (not orthonormal) velocity --
+            // gamma_thth, gamma_phiphi ~ r^2, so a "physical-scale" speed
+            // of order 0.1-0.5 corresponds to a much SMALLER coordinate
+            // v^i (unlike the old BL orthonormal convention, where v^i
+            // itself was bounded by 1). Sample physical-scale components
+            // and divide by sqrt(gamma_ii) to get a plausible coordinate
+            // magnitude, then cap the exact quadratic form (including the
+            // gamma_rphi cross term) if it still exceeds 0.81 -- mirrors
+            // tools/kerr_schild_ref.py's _sample_physical_state exactly.
+            const MetricBundle2DRef b = MetricBundle2DAt(r, theta, M, A);
+            double vr = vHatDist(rng) / std::sqrt(b.grr);
+            double vth = vHatDist(rng) / std::sqrt(b.gthth);
+            double vphi = (0.1 + 0.25 * std::uniform_real_distribution<double>(0.0, 1.0)(rng)) / std::sqrt(b.gphiphi);
+            double v2 = b.grr * vr * vr + b.gthth * vth * vth + b.gphiphi * vphi * vphi + 2.0 * b.grphi * vr * vphi;
+            constexpr double kCap = 0.81;
+            if (v2 > kCap) {
+                const double s = std::sqrt(kCap / v2);
+                vr *= s; vth *= s; vphi *= s;
+            }
             prim0[idx] = glm::dvec4(rho, vr, vth, vphi);
             p0[idx] = p;
             glm::dvec4 U, Fr, Fth;
@@ -793,9 +880,31 @@ bool SelfTestKerrTorus() {
     }
 
     std::vector<glm::dvec4> primRef(N);
+    std::vector<double> pRef(N);
     for (int idx = 0; idx < N; ++idx) {
         primRef[idx] = RecoverPrimitivesKerr2DRef(cons[idx].x, cons[idx].y, cons[idx].z, consL[idx], cons[idx].w,
-                                                   p0[idx], rCell[idx], thCell[idx], M, A, GAMMA, ITERS);
+                                                   p0[idx], rCell[idx], thCell[idx], M, A, GAMMA, ITERS, pRef[idx]);
+    }
+
+    // MinMod-limited reconstruction slopes, CPU mirror of
+    // kernels_kerr2d.hpp's ComputeSlopes() -- see that shader's comment.
+    std::vector<glm::dvec4> slopeR(N), slopeTh(N);
+    std::vector<double> slopeRP(N), slopeThP(N);
+    for (int i = 0; i < NR; ++i) {
+        for (int j = 0; j < NTH; ++j) {
+            const int idx = i * NTH + j;
+            const int iM = std::max(i - 1, 0), iP = std::min(i + 1, NR - 1);
+            const int jM = std::max(j - 1, 0), jP = std::min(j + 1, NTH - 1);
+            const glm::dvec4& cC = primRef[idx];
+            const glm::dvec4& cIm = primRef[iM * NTH + j]; const glm::dvec4& cIp = primRef[iP * NTH + j];
+            const glm::dvec4& cJm = primRef[i * NTH + jM]; const glm::dvec4& cJp = primRef[i * NTH + jP];
+            slopeR[idx] = glm::dvec4(Minmod2DRef(cC.x - cIm.x, cIp.x - cC.x), Minmod2DRef(cC.y - cIm.y, cIp.y - cC.y),
+                                      Minmod2DRef(cC.z - cIm.z, cIp.z - cC.z), Minmod2DRef(cC.w - cIm.w, cIp.w - cC.w));
+            slopeTh[idx] = glm::dvec4(Minmod2DRef(cC.x - cJm.x, cJp.x - cC.x), Minmod2DRef(cC.y - cJm.y, cJp.y - cC.y),
+                                       Minmod2DRef(cC.z - cJm.z, cJp.z - cC.z), Minmod2DRef(cC.w - cJm.w, cJp.w - cC.w));
+            slopeRP[idx] = Minmod2DRef(pRef[idx] - pRef[iM * NTH + j], pRef[iP * NTH + j] - pRef[idx]);
+            slopeThP[idx] = Minmod2DRef(pRef[idx] - pRef[i * NTH + jM], pRef[i * NTH + jP] - pRef[idx]);
+        }
     }
 
     // r-direction fluxes: (NR+1)*NTH interfaces.
@@ -805,15 +914,45 @@ bool SelfTestKerrTorus() {
             const int iL = (i == 0) ? 0 : (i - 1), iR = (i == NR) ? (NR - 1) : i;
             const double rFace = R_MIN + i * DR;
             const double theta = TH_MIN + (j + 0.5) * DTH;
-            const Metric2DRef m = Metric2DAt(rFace, theta, M, A);
-            const double s = std::sqrt(-m.gtt / m.grr);
+            const MetricBundle2DRef b = MetricBundle2DAt(rFace, theta, M, A);
+            // Radial photon speeds (ASYMMETRIC for KS -- see
+            // kernels_kerr2d.hpp's FluxesR comment): g_rr*v^2+2*g_tr*v+g_tt=0.
+            const double photonDisc = std::max(b.gtr * b.gtr - b.grr * b.gtt, 0.0);
+            const double photonRoot = std::sqrt(photonDisc);
+            const double vPhotonOut = (-b.gtr + photonRoot) / b.grr;
+            const double vPhotonIn = (-b.gtr - photonRoot) / b.grr;
+            const glm::dvec4 primL = primRef[iL * NTH + j] + 0.5 * slopeR[iL * NTH + j];
+            const glm::dvec4 primR = primRef[iR * NTH + j] - 0.5 * slopeR[iR * NTH + j];
+            const double PL = pRef[iL * NTH + j] + 0.5 * slopeRP[iL * NTH + j];
+            const double PR = pRef[iR * NTH + j] - 0.5 * slopeRP[iR * NTH + j];
             glm::dvec4 UL, UR, FrL, FrR, FthDummyL, FthDummyR;
             double UlL, UlR, FrlL, FrlR, FthlDummyL, FthlDummyR;
-            SideState2DRef(primRef[iL * NTH + j], p0[iL * NTH + j], rFace, theta, M, A, GAMMA, UL, UlL, FrL, FrlL,
-                            FthDummyL, FthlDummyL);
-            SideState2DRef(primRef[iR * NTH + j], p0[iR * NTH + j], rFace, theta, M, A, GAMMA, UR, UlR, FrR, FrlR,
-                            FthDummyR, FthlDummyR);
-            fluxRRef[i * NTH + j] = HlleFluxKerr2DRef(FrL, UL, FrR, UR, s);
+            SideState2DRef(primL, PL, rFace, theta, M, A, GAMMA, UL, UlL, FrL, FrlL, FthDummyL, FthlDummyL);
+            SideState2DRef(primR, PR, rFace, theta, M, A, GAMMA, UR, UlR, FrR, FrlR, FthDummyR, FthlDummyR);
+
+            const double sqrtGammaRR = std::sqrt(b.grr);
+            const double hL = 1.0 + GAMMA * PL / ((GAMMA - 1.0) * primL.x);
+            const double hR = 1.0 + GAMMA * PR / ((GAMMA - 1.0) * primR.x);
+            const double cs2L = SoundSpeed2Ref(primL.x, PL, hL, GAMMA);
+            const double cs2R = SoundSpeed2Ref(primR.x, PR, hR, GAMMA);
+            // Local-orthonormal projection onto the r-direction (r,phi
+            // not orthogonal in KS -- see kernels_kerr2d.hpp's comment).
+            const double v2L = b.grr*primL.y*primL.y + b.gthth*primL.z*primL.z + b.gphiphi*primL.w*primL.w
+                              + 2.0*b.grphi*primL.y*primL.w;
+            const double vRHatL = sqrtGammaRR*primL.y + (b.grphi/sqrtGammaRR)*primL.w;
+            const double vTransL = std::sqrt(std::max(v2L - vRHatL*vRHatL, 0.0));
+            const double v2R = b.grr*primR.y*primR.y + b.gthth*primR.z*primR.z + b.gphiphi*primR.w*primR.w
+                              + 2.0*b.grphi*primR.y*primR.w;
+            const double vRHatR = sqrtGammaRR*primR.y + (b.grphi/sqrtGammaRR)*primR.w;
+            const double vTransR = std::sqrt(std::max(v2R - vRHatR*vRHatR, 0.0));
+            double lamMinusL, lamPlusL, lamMinusR, lamPlusR;
+            CharSpeedsLocalRef(vRHatL, vTransL, 0.0, cs2L, lamMinusL, lamPlusL);
+            CharSpeedsLocalRef(vRHatR, vTransR, 0.0, cs2R, lamMinusR, lamPlusR);
+            double sL = b.alpha * std::min(lamMinusL, lamMinusR) / sqrtGammaRR - b.betaUpR;
+            double sR = b.alpha * std::max(lamPlusL, lamPlusR) / sqrtGammaRR - b.betaUpR;
+            sL = std::max(sL, vPhotonIn);
+            sR = std::min(sR, vPhotonOut);
+            fluxRRef[i * NTH + j] = HlleFluxKerr2DRef(FrL, UL, FrR, UR, sL, sR);
         }
     }
     // theta-direction fluxes: NR*(NTH+1) interfaces.
@@ -823,25 +962,50 @@ bool SelfTestKerrTorus() {
             const int jL = (j == 0) ? 0 : (j - 1), jR = (j == NTH) ? (NTH - 1) : j;
             const double r = R_MIN + (i + 0.5) * DR;
             const double thFace = TH_MIN + j * DTH;
-            const Metric2DRef m = Metric2DAt(r, thFace, M, A);
-            const double s = std::sqrt(-m.gtt / m.gthth);
+            const MetricBundle2DRef b = MetricBundle2DAt(r, thFace, M, A);
+            const double fPhoton = std::sqrt(-b.gtt / b.gthth); // g_t,theta=0 for both BL and KS -- unaffected
+            const glm::dvec4 primL = primRef[i * NTH + jL] + 0.5 * slopeTh[i * NTH + jL];
+            const glm::dvec4 primR = primRef[i * NTH + jR] - 0.5 * slopeTh[i * NTH + jR];
+            const double PL = pRef[i * NTH + jL] + 0.5 * slopeThP[i * NTH + jL];
+            const double PR = pRef[i * NTH + jR] - 0.5 * slopeThP[i * NTH + jR];
             glm::dvec4 UL, UR, FrDummyL, FrDummyR, FthL, FthR;
             double UlL, UlR, FrlDummyL, FrlDummyR, FthlL, FthlR;
-            SideState2DRef(primRef[i * NTH + jL], p0[i * NTH + jL], r, thFace, M, A, GAMMA, UL, UlL, FrDummyL,
-                            FrlDummyL, FthL, FthlL);
-            SideState2DRef(primRef[i * NTH + jR], p0[i * NTH + jR], r, thFace, M, A, GAMMA, UR, UlR, FrDummyR,
-                            FrlDummyR, FthR, FthlR);
-            fluxThRef[i * (NTH + 1) + j] = HlleFluxKerr2DRef(FthL, UL, FthR, UR, s);
+            SideState2DRef(primL, PL, r, thFace, M, A, GAMMA, UL, UlL, FrDummyL, FrlDummyL, FthL, FthlL);
+            SideState2DRef(primR, PR, r, thFace, M, A, GAMMA, UR, UlR, FrDummyR, FrlDummyR, FthR, FthlR);
+
+            const double sqrtGammaThth = std::sqrt(b.gthth);
+            const double hL = 1.0 + GAMMA * PL / ((GAMMA - 1.0) * primL.x);
+            const double hR = 1.0 + GAMMA * PR / ((GAMMA - 1.0) * primR.x);
+            const double cs2L = SoundSpeed2Ref(primL.x, PL, hL, GAMMA);
+            const double cs2R = SoundSpeed2Ref(primR.x, PR, hR, GAMMA);
+            const double v2L = b.grr*primL.y*primL.y + b.gthth*primL.z*primL.z + b.gphiphi*primL.w*primL.w
+                              + 2.0*b.grphi*primL.y*primL.w;
+            const double vThHatL = sqrtGammaThth * primL.z;
+            const double vTransL = std::sqrt(std::max(v2L - vThHatL*vThHatL, 0.0));
+            const double v2R = b.grr*primR.y*primR.y + b.gthth*primR.z*primR.z + b.gphiphi*primR.w*primR.w
+                              + 2.0*b.grphi*primR.y*primR.w;
+            const double vThHatR = sqrtGammaThth * primR.z;
+            const double vTransR = std::sqrt(std::max(v2R - vThHatR*vThHatR, 0.0));
+            double lamMinusL, lamPlusL, lamMinusR, lamPlusR;
+            CharSpeedsLocalRef(vThHatL, vTransL, 0.0, cs2L, lamMinusL, lamPlusL);
+            CharSpeedsLocalRef(vThHatR, vTransR, 0.0, cs2R, lamMinusR, lamPlusR);
+            double sL = b.alpha * std::min(lamMinusL, lamMinusR) / sqrtGammaThth;
+            double sR = b.alpha * std::max(lamPlusL, lamPlusR) / sqrtGammaThth;
+            sL = std::max(sL, -fPhoton);
+            sR = std::min(sR, fPhoton);
+            fluxThRef[i * (NTH + 1) + j] = HlleFluxKerr2DRef(FthL, UL, FthR, UR, sL, sR);
         }
     }
 
     // GPU.
     fw::ComputeShader consToPrim = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::ConsToPrim());
+    fw::ComputeShader computeSlopes = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::ComputeSlopes());
     fw::ComputeShader fluxesR = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::FluxesR());
     fw::ComputeShader fluxesTheta = fw::ComputeShader::FromSource(grhd::kernels_kerr2d::FluxesTheta());
 
     GLuint bufCons = 0, bufConsL = 0, bufPrimMain = 0, bufPrimP = 0, bufFluxR = 0, bufFluxRL = 0, bufFluxTh = 0,
-           bufFluxThL = 0;
+           bufFluxThL = 0, bufFixupCount = 0, bufFloorCount = 0;
+    GLuint bufSlopeRMain = 0, bufSlopeRP = 0, bufSlopeThMain = 0, bufSlopeThP = 0;
     glCreateBuffers(1, &bufCons);
     glCreateBuffers(1, &bufConsL);
     glCreateBuffers(1, &bufPrimMain);
@@ -850,6 +1014,21 @@ bool SelfTestKerrTorus() {
     glCreateBuffers(1, &bufFluxRL);
     glCreateBuffers(1, &bufFluxTh);
     glCreateBuffers(1, &bufFluxThL);
+    glCreateBuffers(1, &bufFixupCount);
+    glCreateBuffers(1, &bufFloorCount);
+    glCreateBuffers(1, &bufSlopeRMain);
+    glCreateBuffers(1, &bufSlopeRP);
+    glCreateBuffers(1, &bufSlopeThMain);
+    glCreateBuffers(1, &bufSlopeThP);
+    glNamedBufferData(bufSlopeRMain, N * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufSlopeRP, N * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufSlopeThMain, N * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufSlopeThP, N * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    {
+        unsigned int zero = 0;
+        glNamedBufferData(bufFixupCount, sizeof(unsigned int), &zero, GL_DYNAMIC_DRAW);
+        glNamedBufferData(bufFloorCount, sizeof(unsigned int), &zero, GL_DYNAMIC_DRAW);
+    }
     glNamedBufferData(bufCons, N * sizeof(glm::vec4), cons.data(), GL_STATIC_DRAW);
     glNamedBufferData(bufConsL, N * sizeof(float), consL.data(), GL_STATIC_DRAW);
     std::vector<glm::vec4> primMainSeed(N);
@@ -891,14 +1070,28 @@ bool SelfTestKerrTorus() {
     consToPrim.SetFloat("uEntropyFloor", 0.0f);
     fw::ComputeShader::BindBuffer(0, bufCons);
     fw::ComputeShader::BindBuffer(6, bufConsL);
+    fw::ComputeShader::BindBuffer(14, bufFixupCount);
+    fw::ComputeShader::BindBuffer(15, bufFloorCount);
     fw::ComputeShader::BindBuffer(4, bufPrimMain);
     fw::ComputeShader::BindBuffer(10, bufPrimP);
     consToPrim.Dispatch(groupsN);
     fw::ComputeShader::Barrier();
 
+    setCommon(computeSlopes);
+    fw::ComputeShader::BindBuffer(4, bufPrimMain);
+    fw::ComputeShader::BindBuffer(10, bufPrimP);
+    fw::ComputeShader::BindBuffer(16, bufSlopeRMain);
+    fw::ComputeShader::BindBuffer(17, bufSlopeRP);
+    fw::ComputeShader::BindBuffer(18, bufSlopeThMain);
+    fw::ComputeShader::BindBuffer(19, bufSlopeThP);
+    computeSlopes.Dispatch(groupsN);
+    fw::ComputeShader::Barrier();
+
     setCommon(fluxesR);
     fw::ComputeShader::BindBuffer(4, bufPrimMain);
     fw::ComputeShader::BindBuffer(10, bufPrimP);
+    fw::ComputeShader::BindBuffer(16, bufSlopeRMain);
+    fw::ComputeShader::BindBuffer(17, bufSlopeRP);
     fw::ComputeShader::BindBuffer(5, bufFluxR);
     fw::ComputeShader::BindBuffer(11, bufFluxRL);
     fluxesR.Dispatch(groupsFacesR);
@@ -907,6 +1100,8 @@ bool SelfTestKerrTorus() {
     setCommon(fluxesTheta);
     fw::ComputeShader::BindBuffer(4, bufPrimMain);
     fw::ComputeShader::BindBuffer(10, bufPrimP);
+    fw::ComputeShader::BindBuffer(18, bufSlopeThMain);
+    fw::ComputeShader::BindBuffer(19, bufSlopeThP);
     fw::ComputeShader::BindBuffer(12, bufFluxTh);
     fw::ComputeShader::BindBuffer(13, bufFluxThL);
     fluxesTheta.Dispatch(groupsFacesTh);
@@ -916,8 +1111,10 @@ bool SelfTestKerrTorus() {
     glGetNamedBufferSubData(bufPrimMain, 0, N * sizeof(glm::vec4), primGpu.data());
     glGetNamedBufferSubData(bufFluxR, 0, (NR + 1) * NTH * sizeof(glm::vec4), fluxRGpu.data());
     glGetNamedBufferSubData(bufFluxTh, 0, NR * (NTH + 1) * sizeof(glm::vec4), fluxThGpu.data());
-    GLuint bufs[] = {bufCons, bufConsL, bufPrimMain, bufPrimP, bufFluxR, bufFluxRL, bufFluxTh, bufFluxThL};
-    glDeleteBuffers(8, bufs);
+    GLuint bufs[] = {bufCons,        bufConsL,       bufPrimMain,    bufPrimP,      bufFluxR,
+                     bufFluxRL,      bufFluxTh,      bufFluxThL,     bufFixupCount, bufFloorCount,
+                     bufSlopeRMain,  bufSlopeRP,     bufSlopeThMain, bufSlopeThP};
+    glDeleteBuffers(14, bufs);
 
     double primErr = 0.0, recoveryErr = 0.0, fluxErr = 0.0;
     for (int idx = 0; idx < N; ++idx) {

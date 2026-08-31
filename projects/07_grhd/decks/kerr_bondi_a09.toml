@@ -1,0 +1,36 @@
+title = "GRHD non-equilibrium test -- Bondi-like accretion on Kerr-Schild, a=0.9M"
+
+# Same construction and r_min as decks/kerr_bondi_a00.toml, only a differs --
+# an apples-to-apples spin comparison of pure radial accretion. r_min=1.0
+# (inside the a=0.9 horizon, r_+=M+sqrt(M^2-a^2)~1.436) was tried first and
+# failed at t=0: this deck's gas fills the ENTIRE domain (no vacuum floor
+# region like the torus decks have), and UploadInitial's BL->KS velocity
+# transform needs Delta=r^2-2Mr+a^2>0, which is false inside the horizon --
+# a real IC-construction bug (not a physics finding), unlike the
+# floor-region near-horizon instability decks/kerr_torus_rmin1p2.toml and
+# kerr_blob_infall.toml hit. r_min=3.0 (matching --r_safe in
+# make_kerr_bondi_ic.py) sidesteps it entirely.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 3.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.4
+
+[torus]
+ic_file = "ic/kerr_bondi_a09.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 50
+frames = 150

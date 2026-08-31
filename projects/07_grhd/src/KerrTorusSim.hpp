@@ -62,9 +62,42 @@ private:
     GLuint m_primMain = 0, m_primP = 0;
     GLuint m_fluxR = 0, m_fluxRL = 0;
     GLuint m_fluxTh = 0, m_fluxThL = 0;
+    // Piecewise-linear (MinMod) reconstruction slopes -- see
+    // kernels_kerr2d.hpp's header comment and ComputeSlopes(). Computed
+    // fresh from primMain/primP each RK2 stage, right before that stage's
+    // flux passes read them.
+    GLuint m_slopeRMain = 0, m_slopeRP = 0;
+    GLuint m_slopeThMain = 0, m_slopeThP = 0;
+    GLuint m_fixupCount = 0; // diagnostic: cells/calls the momentum fixup corrected -- see kernels_kerr2d.hpp
+    unsigned int m_fixupCountAccum = 0; // accumulated since the last Snapshot()
+    GLuint m_floorCount = 0; // diagnostic: cells/calls the vacuum density floor reset -- see kernels_kerr2d.hpp
+    unsigned int m_floorCountAccum = 0; // accumulated since the last Snapshot()
     int m_cur = 0;
 
+    // Horizon accretion-rate diagnostic: time-integral (since t=0, NOT reset
+    // each Snapshot -- directly comparable to total_mass) of the physical
+    // D-flux (rest mass) crossing the inner/outer radial boundary,
+    // integrated over theta. fluxR[i=0,*] and fluxR[i=nr,*] are already the
+    // real HLLE flux used by EulerStep -- no separate measurement needed,
+    // just read those two rows back and accumulate with the same 0.5*dt*
+    // (stage_cur + stage_stage1) weighting RK2/Heun's method itself uses
+    // (see RunOneRk2Step()), so this integral is exactly consistent with
+    // the mass change EulerStep+Combine actually produce, not an
+    // approximation of it. D (and hence this flux) is source-free (t is a
+    // Killing vector -- see docs/SIMULATION.md sec 3.2), so in exact
+    // arithmetic total_mass(t) - total_mass(0) == m_innerFluxAccum -
+    // m_outerFluxAccum + (theta-boundary flux, ~0 by construction since the
+    // domain edges there sit in the rho_floor/v=0 region -- see
+    // kernels_kerr2d.hpp's header comment on theta boundaries). Any
+    // discrepancy between the two sides is mass lost/gained OUTSIDE the
+    // flux-divergence update itself -- i.e. by the con2prim floor/fixup
+    // branches (m_floorCountAccum/m_fixupCountAccum) -- not by real
+    // accretion.
+    double m_innerFluxAccum = 0.0;
+    double m_outerFluxAccum = 0.0;
+
     fw::ComputeShader m_consToPrim;
+    fw::ComputeShader m_computeSlopes;
     fw::ComputeShader m_fluxesR;
     fw::ComputeShader m_fluxesTheta;
     fw::ComputeShader m_eulerStep;
