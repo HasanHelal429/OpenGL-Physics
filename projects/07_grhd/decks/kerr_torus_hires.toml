@@ -1,0 +1,25 @@
+title = "GRHD Tier 2 Phase 2b -- Kerr Fishbone-Moncrief torus, a=0.9M, hi-res (192x128)"
+geometry = "kerr_torus"
+
+[grid]
+nr = 192
+ntheta = 128
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a09_hires.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 596
+frames = 150

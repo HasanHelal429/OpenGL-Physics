@@ -1,0 +1,31 @@
+title = "GRHD non-equilibrium test -- under-rotating (0.9x) FM torus, a=0.9M"
+
+# Same rho(r,theta)/P(r,theta) as decks/kerr_torus.toml's equilibrium
+# Fishbone-Moncrief torus, but v_phi scaled by 0.9 (tools/make_fm_torus_ic.py's
+# --vphi_scale) -- removes some centrifugal support on purpose, breaking
+# equilibrium. Expect faster accretion onset than the a=0.9 equilibrium
+# baseline (out/kerr_torus).
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 64
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a09_underrot.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 20
+frames = 150

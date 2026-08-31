@@ -1,0 +1,28 @@
+title = "GRHD Tier 2 Phase 2b -- Kerr Fishbone-Moncrief torus, a=0.5M (spin scan)"
+
+# Spin-scan sibling of decks/kerr_torus.toml -- see kerr_torus_a00.toml's
+# header comment.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 64
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.5
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a05.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 300
+frames = 150

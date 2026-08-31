@@ -1,0 +1,31 @@
+title = "GRHD Tier 2 Phase 2b -- Kerr Fishbone-Moncrief torus, a=0.0M (spin scan)"
+
+# Spin-scan sibling of decks/kerr_torus.toml -- identical grid, r_in/r_center,
+# EOS and time stepping, only physics.a differs. Purpose: compare how spin
+# (via the ISCO location and frame dragging) affects the torus's accretion
+# onset and instability timescale -- see tools/plot_accretion.py run across
+# this whole family.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 64
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.0
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a00.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 300
+frames = 150

@@ -1,0 +1,34 @@
+title = "GRHD non-equilibrium test -- eccentric orbiting gas ring, a=0.9M"
+
+# NOT an equilibrium test. A gas ring (tools/make_blob_ic.py --l_frac 0.9,
+# a Gaussian clump in r,theta but a full ring in phi since this solver is
+# axisymmetric) starts at rest radially at r0=15M with 90% of the local
+# circular-orbit angular momentum -- not enough centrifugal support to
+# stay there, but (hopefully) enough to swing in toward a periapsis and
+# back out rather than plunge straight to the horizon. Watch
+# tools/plot_blob_trajectory.py's r(t) trace for genuine radial epicyclic
+# oscillation instead of a monotonic infall.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 32
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/ring_a09_l90.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 50
+frames = 400

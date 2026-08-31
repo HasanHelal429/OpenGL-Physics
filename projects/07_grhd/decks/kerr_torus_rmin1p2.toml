@@ -1,0 +1,34 @@
+title = "GRHD Tier 2 Phase 2b -- Kerr Fishbone-Moncrief torus, a=0.9M, r_min inside horizon (Kerr-Schild)"
+
+# Same torus as decks/kerr_torus.toml, but r_min=1.2 (inside the true
+# horizon r_+=M+sqrt(M^2-a^2)~1.436 for a=0.9M) -- only possible because
+# KerrTorusSim now uses horizon-penetrating Kerr-Schild coordinates (see
+# kernels_kerr2d.hpp's header comment). This is the actual test of
+# whether letting infalling material genuinely cross the horizon (instead
+# of hitting an artificial mid-flow "outflow" boundary at r_min=4, well
+# outside the horizon) fixes the mass-pileup instability documented in
+# the README's investigation.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 64
+r_min = 1.2
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/fm_torus_a09_rmin1p2.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 300
+frames = 150

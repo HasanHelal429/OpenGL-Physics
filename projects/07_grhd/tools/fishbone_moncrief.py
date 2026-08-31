@@ -111,9 +111,9 @@ def acceleration(r, theta, l, M, a, wrt, eps=1e-6):
 
 
 class FishboneMoncriefTorus:
-    def __init__(self, M, a, r_in, r_center, gamma):
+    def __init__(self, M, a, r_in, r_center, gamma, prograde=True):
         self.M, self.a, self.r_in, self.r_center, self.gamma = M, a, r_in, r_center, gamma
-        E_c, L_c, _ = circular_orbit(r_center, M, a)
+        E_c, L_c, _ = circular_orbit(r_center, M, a, prograde=prograde)
         self.l = L_c / E_c
 
         # a_r should vanish at r_center by construction (l chosen to match
