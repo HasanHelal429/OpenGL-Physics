@@ -118,6 +118,22 @@ convention -- see the `ComputeForces` comment in `MDSystem.cpp` for why.
 Validation below for why that separation actually matters here, not just
 as a formality).
 
+**GPU compute-shader kernels** (`src/kernels.hpp`, `md::kernels` namespace):
+a periodic-grid port of the force evaluation above, following 06/07's
+atomic-linked-list technique -- one thread per particle, `BuildGrid`
+scatters particles into a spatial grid with a single atomic-exchange pass
+(no counting-sort/scan step, see that file's header comment), `Forces`
+walks the 27 neighboring cells and applies the same shifted-force LJ
+formula. Unlike 06/07's open (non-periodic) domain, this grid is **periodic**:
+cells are a dense `uNc^3` array (not an open hash table) with explicit
+modular wraparound on the neighbor-cell offset, and pair displacements use
+the same minimum-image convention as the CPU path -- required since a
+particle near one face of the box is a real neighbor of one near the
+opposite face. **Scope**: this is a validated building block
+(`--selftest`'s `gpu` case cross-checks it against `MDSystem`'s CPU
+implementation), not a live simulation backend -- nothing else in this
+project calls it yet; see Known Simplifications.
+
 **Initial conditions.** `Scenarios::BuildFccLattice`: particles placed on an
 FCC lattice (never randomly -- an unstructured placement risks two atoms
 overlapping, which the repulsive LJ core turns into a force blow-up on the
@@ -246,6 +262,7 @@ selftest (small (brute-force fallback)):     max relative error  accel=2.016e-16
 selftest (multicell (linked-cell)):          max relative error  accel=7.777e-17  energy=9.240e-16  -- PASS
 selftest (numerical-gradient):               analytic=-2.172694  numerical=-2.172694  relerr=7.865e-11 -- PASS
 selftest (mixture (Kob-Andersen params)):    max relative error  accel=9.881e-17  energy=1.313e-15  -- PASS
+selftest (gpu (kernels.hpp vs. CPU MDSystem)): max relative error  accel=1.408e-05  energy=2.873e-06  -- PASS
 ```
 
 `mixture` (N=400, random 80:20 species assignment, Kob-Andersen sigma/
@@ -253,6 +270,23 @@ epsilon) cross-checks that `ComputeForces` looks up the right (species i,
 species j) parameters for every pair -- the other three cases already cover
 the single-species formula and neighbor-list code paths, so this one only
 needs to isolate the species-lookup logic itself.
+
+`gpu` compares `kernels.hpp`'s `BuildGrid`+`Forces` compute shaders against
+`MDSystem`'s CPU force evaluation (N=400, same random configuration fed to
+both). Its error floor is `~1e-5`, not machine precision, because the GPU
+path is float32 throughout while `MDSystem` is double -- that gap is
+exactly what a float32 sum of ~dozens of pairwise terms should look like,
+confirming the two implementations agree to the precision available, not
+that they're bit-identical. **A real bug surfaced writing this case**: the
+first version used `cellSize = cutoff` for the GPU grid, but with
+`uNc = floor(L/cutoff)` cells per axis, that leaves a strip near the far
+edge of the box uncovered -- a particle there computes a cell index outside
+`[0, uNc)`, corrupting the grid (`24.7%` accel error, not a rounding-level
+discrepancy). The fix, `cellSize = L/uNc`, is exactly what
+`MDSystem.cpp`'s CPU `BuildCellListPairs` already does -- the GPU port had
+just re-derived the same edge case CPU MD codes hit constantly, and the
+CPU-vs-GPU cross-check caught it immediately rather than it silently
+corrupting a real run.
 
 `small` (N=40, box edge deliberately < 3*cutoff) exercises `BuildCellListPairs`'s
 brute-force fallback branch; `multicell` (N=400, box several cells wide)
@@ -469,10 +503,13 @@ above is visible without an impractically long run.
   ensemble fluctuations** (see Physics above) -- Nose-Hoover fixes this for
   temperature; there is no fluctuation-correct (e.g. Parrinello-Rahman)
   barostat yet.
-- **CPU-only.** Unlike the GPU-compute-shader projects (`05`-`07`), the
-  force/neighbor-list kernels here are OpenMP-parallel CPU code, not GPU
-  compute shaders (planned as a later phase, porting the CPU implementation
-  as the `--selftest` ground truth).
+- **The GPU force kernel (`src/kernels.hpp`) is validated but not wired into
+  any actual simulation run.** `MDSim`'s live time-stepping loop is still
+  entirely CPU/OpenMP; the GPU path is single-species only, has no
+  thermostat/barostat/diagnostics support, and only exists to be
+  cross-checked by `--selftest`. A real GPU-resident time-stepping backend
+  (keeping the whole physics loop, not just one force evaluation, on the
+  GPU across many steps) is future work.
 - **`lindemann` is a one-way melting-onset detector, not a hysteresis-loop
   diagnostic by itself** (see the melting/freezing Validation above) --
   `rdf_peak` covers the two-way case, but a proper bond-orientational order
@@ -505,5 +542,10 @@ above is visible without an impractically long run.
       the actual, directly-visible mechanism behind this model's
       crystallization resistance, not just three similar-looking curves
       (see Validation above)
-- [ ] GPU compute-shader port (with a CPU-vs-GPU `--selftest` cross-check,
-      matching `06`/`07`'s pattern)
+- [x] GPU compute-shader force kernel (`src/kernels.hpp`, periodic
+      atomic-linked-list grid), validated by a `--selftest` case against
+      `MDSystem`'s CPU implementation (`~1e-5` relative error, the expected
+      float32-vs-double floor) -- caught a real edge-case bug in the
+      process (wrong grid cell size left part of the box uncovered, see
+      Validation above). Not yet wired into a live simulation backend --
+      see Known Simplifications.
