@@ -32,10 +32,11 @@ projects/            One executable per simulation. Numbered by creation order.
   04_molecular_dynamics  3D periodic Lennard-Jones MD -- Nose-Hoover/Berendsen
                        thermostats, Berendsen NPT barostat, deck-driven
                        melting/freezing temperature ramp, optional
-                       Kob-Andersen binary glass mixture, a validated (not
-                       yet live-wired) periodic GPU force kernel. Both
-                       models: the original ImGui + live-chart app, and
-                       (preferred) the Simulation/Deck/headless model --
+                       Kob-Andersen binary glass mixture, slab-in-vacuum
+                       phase coexistence, a validated (not yet live-wired)
+                       periodic GPU force kernel. Both models: the original
+                       ImGui + live-chart app, and (preferred) the
+                       Simulation/Deck/headless model --
                        see its README.
   05_tdse_gpu/        2D time-dependent Schrödinger, split-step Fourier on the
                        GPU (hand-written FFT compute shader). First project on

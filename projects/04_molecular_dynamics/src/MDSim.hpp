@@ -66,6 +66,15 @@ private:
     double m_initialL = 1.0;
     bool m_isMixture = false;
 
+    // Slab-in-vacuum coexistence mode (system.slab_fraction > 0, mutually
+    // exclusive with the mixture mode above -- see MDSim.cpp's Configure).
+    // m_slabZ1 is the ORIGINAL boundary [0, slabZ1) the condensed phase
+    // occupied at Configure() time -- fixed, not recomputed later, so
+    // vapor_fraction always means "outside where the slab started",
+    // regardless of how far the interface has since moved.
+    bool m_isSlab = false;
+    double m_slabZ1 = 0.0;
+
     std::string m_title = "Molecular Dynamics -- Lennard-Jones fluid";
     double m_dt = 0.002;
     int m_substepsPerFrame = 20;

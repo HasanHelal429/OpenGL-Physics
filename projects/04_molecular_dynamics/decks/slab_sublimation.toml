@@ -1,0 +1,50 @@
+title = "Molecular Dynamics -- solid slab in vacuum, heated through sublimation"
+
+# system.slab_fraction > 0 switches the IC from a homogeneous FCC lattice
+# to a condensed slab (density=1.00, solid-like) filling ~35% of the box
+# along z, with vacuum filling the rest -- see Scenarios::BuildSlab. Starts
+# solid (T*=0.30, matching decks/solid_fcc.toml) and ramps up to T*=0.70 --
+# well below the LJ critical temperature (Tc*=1.32, Thol et al. 2016, see
+# the main README's eos_check.py note) so genuine liquid/solid-vapor
+# coexistence is thermodynamically possible. An earlier version of this
+# deck ramped to T*=2.5, which is ABOVE Tc*: the density profile went
+# completely flat (uniform supercritical fluid filling the whole box, no
+# remaining dense region at all) rather than showing a real interface --
+# see the project README for that finding.
+[system]
+target_n = 1000
+density = 1.00
+temperature = 0.30
+slab_fraction = 0.35
+seed = 51
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "berendsen"
+target_t = 0.30
+tau = 0.5
+
+[ramp]
+enabled = true
+[[ramp.segments]]
+t0 = 0.0
+t1 = 40.0
+t_start = 0.30
+t_end = 0.70
+[[ramp.segments]]
+t0 = 40.0
+t1 = 80.0
+t_start = 0.70
+t_end = 0.70
+
+# No [barostat] section -- isotropic pressure coupling is not meaningful for
+# a slab+vacuum box, see Scenarios::BuildSlab's comment.
+
+[time]
+dt = 0.002
+substeps_per_frame = 50
+frames = 800
+neighbor_rebuild_every = 5

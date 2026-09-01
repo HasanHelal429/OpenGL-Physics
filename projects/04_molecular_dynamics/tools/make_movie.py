@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Turn a headless 04_molecular_dynamics run into a movie: a periodic (x,y)
-projection of the 3D box, particles colored by instantaneous speed (default)
-or by species for a binary-mixture run (auto-detected from a
-frames/species_0000.npy file; override with --color).
+"""Turn a headless 04_molecular_dynamics run into a movie: a periodic 2D
+projection of the 3D box (x,y by default), particles colored by
+instantaneous speed (default) or by species for a binary-mixture run
+(auto-detected from a frames/species_0000.npy file; override with --color).
 
-    python make_movie.py <results_dir> [--fps 24] [--stride 2] [--color auto|speed|species] [--out movie.mp4]
+    python make_movie.py <results_dir> [--fps 24] [--stride 2] [--color auto|speed|species] \
+        [--projection xy|xz|yz] [--out movie.mp4]
+
+--projection matters for a slab run (decks/slab_sublimation.toml): the
+condensed slab and vacuum are separated along z, so the default xy
+projection looks the same everywhere (every xy slice has the same mix of
+particles) and hides the interface entirely -- use xz or yz to actually see
+it.
 
 The box outline is drawn at each frame's OWN box_length, but the axes stay
 fixed at the run's LARGEST box_length throughout -- so a barostat run
@@ -41,9 +48,11 @@ def main():
     ap.add_argument("--fps", type=int, default=24)
     ap.add_argument("--stride", type=int, default=1, help="use every Nth frame (speeds up long runs)")
     ap.add_argument("--color", choices=["auto", "speed", "species"], default="auto")
+    ap.add_argument("--projection", choices=["xy", "xz", "yz"], default="xy")
     ap.add_argument("--point-size", type=float, default=8.0)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+    axes_idx = {"xy": (0, 1), "xz": (0, 2), "yz": (1, 2)}[args.projection]
 
     d = args.results_dir
     manifest = json.load(open(os.path.join(d, "manifest.json")))
@@ -100,8 +109,9 @@ def main():
     ax.set_axis_off()
     fig.subplots_adjust(0, 0, 1, 1)
 
+    ia, ib = axes_idx
     pos0 = np.load(pos_files[0])
-    scat = ax.scatter(pos0[:, 0], pos0[:, 1], c=colors_for(0), s=args.point_size, linewidths=0)
+    scat = ax.scatter(pos0[:, ia], pos0[:, ib], c=colors_for(0), s=args.point_size, linewidths=0)
     box_line, = ax.plot([], [], color="#7fa8d9", linewidth=1.0, alpha=0.6)
     txt = ax.text(0.03, 0.97, "", transform=ax.transAxes, color="w", va="top", fontsize=9, family="monospace")
 
@@ -109,7 +119,7 @@ def main():
 
     def update(i):
         pos = np.load(pos_files[i])
-        scat.set_offsets(pos[:, :2])
+        scat.set_offsets(pos[:, [ia, ib]])
         scat.set_facecolor(colors_for(i))
         L = box_length[i]
         box_line.set_data([0, L, L, 0, 0], [0, 0, L, L, 0])

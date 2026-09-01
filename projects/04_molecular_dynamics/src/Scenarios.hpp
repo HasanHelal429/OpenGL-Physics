@@ -24,6 +24,10 @@ struct ScenarioResult {
     // empty vector to all-species-A) -- only populated by
     // BuildFccLatticeBinary below.
     std::vector<int> species;
+    // Only set by BuildSlab below: the z-extent [0, slabZ1) the condensed
+    // phase originally occupied, in the SAME box the particles were placed
+    // in (boxLength above). 0 for every other scenario.
+    double slabZ1 = 0.0;
 };
 
 // Places particles on an FCC lattice (4-atom conventional cell) sized to
@@ -56,5 +60,23 @@ ScenarioResult BuildFccLattice(int targetN, double density, double temperature, 
 // both species the same velocity distribution at a given temperature.
 ScenarioResult BuildFccLatticeBinary(int targetN, double density, double temperature, double fractionA,
                                       unsigned seed);
+
+// A condensed-phase slab (FCC lattice at `density`) filling the box's full
+// x/y extent but only `slabFraction` of its z-extent, with VACUUM (no
+// particles at all) filling the rest of z -- for studying phase coexistence
+// (e.g. a solid or liquid slab in equilibrium with its own vapor) rather
+// than a single homogeneous phase. Still a single ordinary cubic periodic
+// box, not a new geometry: periodicity along z means the slab has two free
+// surfaces (top and bottom), which is exactly the standard "slab method"
+// used to study solid/liquid-vapor interfaces. `targetN` is the slab's
+// particle count (the vacuum region has none), so the OVERALL box density
+// N/L^3 is `density*slabFraction`, well below `density` itself.
+//
+// The barostat should stay OFF for this scenario: isotropic pressure
+// coupling would rescale the whole box (including the vacuum region) based
+// on the box-averaged virial, which has no meaningful relationship to
+// either the slab's internal pressure or a vapor pressure -- see the
+// project README.
+ScenarioResult BuildSlab(int targetN, double density, double temperature, double slabFraction, unsigned seed);
 
 } // namespace md
