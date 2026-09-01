@@ -1,0 +1,41 @@
+title = "Molecular Dynamics -- melting/freezing hysteresis (rho*=0.95, heat then cool)"
+
+# Fixed density, heat 0.10 -> 3.00 over t in [0,50], then cool back down
+# 3.00 -> 0.10 over t in [50,100]. tools/plot_melting.py plots the Lindemann
+# parameter against the (time-varying) target_t for both branches -- a
+# melting-point-vs-freezing-point gap between the two is the classic
+# superheating/supercooling hysteresis of a finite-size, finite-rate MD
+# melting run (see README's "Validation: melting/freezing hysteresis").
+[system]
+target_n = 500
+density = 0.95
+temperature = 0.10
+seed = 7
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "berendsen"
+target_t = 0.10
+tau = 0.3   # short relaxation time -- needs to actually track the ramp, not just the endpoints
+
+[ramp]
+enabled = true
+[[ramp.segments]]
+t0 = 0.0
+t1 = 50.0
+t_start = 0.10
+t_end = 3.00
+[[ramp.segments]]
+t0 = 50.0
+t1 = 100.0
+t_start = 3.00
+t_end = 0.10
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 2000
+neighbor_rebuild_every = 5

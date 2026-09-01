@@ -55,11 +55,32 @@ void MDSim::Configure(const fw::Deck& deck) {
     m_params.dt = m_dt;
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 20);
 
+    m_ramp.clear();
+    if (deck.GetBool("ramp.enabled", false)) {
+        for (const fw::Deck& seg : deck.GetTables("ramp.segments")) {
+            RampSegment r;
+            r.t0 = seg.GetDouble("t0", 0.0);
+            r.t1 = seg.GetDouble("t1", 0.0);
+            r.tStart = seg.GetDouble("t_start", m_params.targetT);
+            r.tEnd = seg.GetDouble("t_end", m_params.targetT);
+            m_ramp.push_back(r);
+        }
+    }
+    m_simTime = 0.0;
+
+    // FCC nearest-neighbor distance at this density, independent of
+    // cellsPerAxis: density = N/V = 4/a_lattice^3 for any FCC conventional
+    // cell count, so a_lattice = cbrt(4/density) always; nn distance in FCC
+    // is a_lattice/sqrt(2) (face-diagonal half-length).
+    m_nnDistance = std::cbrt(4.0 / density) / std::sqrt(2.0);
+
     m_diagNames = {"kinetic",  "potential", "potential_tail", "total_energy", "temperature",
-                   "pressure", "pressure_tail", "box_length", "density", "nh_xi", "nh_invariant"};
+                   "pressure", "pressure_tail", "box_length", "density", "nh_xi", "nh_invariant",
+                   "target_t", "lindemann", "rdf_peak"};
 
     m_system.SetParticles(m_initialPos, m_initialVel, m_initialL);
     m_system.PrimeForces(m_params);
+    m_unwrappedPos = m_initialPos;
 
     // Deferred construction -- see MDSim.hpp's member comment.
     m_particles = std::make_unique<fw::ParticleCloud>();
@@ -76,10 +97,58 @@ void MDSim::Configure(const fw::Deck& deck) {
 void MDSim::Reset() {
     m_system.SetParticles(m_initialPos, m_initialVel, m_initialL);
     m_system.PrimeForces(m_params);
+    m_unwrappedPos = m_initialPos;
+    m_simTime = 0.0;
+}
+
+void MDSim::UpdateRampTargetT() {
+    if (m_ramp.empty()) return;
+    if (m_simTime <= m_ramp.front().t0) {
+        m_params.targetT = m_ramp.front().tStart;
+        return;
+    }
+    for (const RampSegment& r : m_ramp) {
+        if (m_simTime >= r.t0 && m_simTime < r.t1) {
+            const double frac = (m_simTime - r.t0) / (r.t1 - r.t0);
+            m_params.targetT = r.tStart + (r.tEnd - r.tStart) * frac;
+            return;
+        }
+    }
+    m_params.targetT = m_ramp.back().tEnd; // past the last segment: hold
+}
+
+void MDSim::UpdateUnwrappedPositions(const std::vector<glm::dvec3>& prevPos) {
+    const std::vector<glm::dvec3>& newPos = m_system.Positions();
+    const double L = m_system.BoxLength();
+    const size_t n = newPos.size();
+    for (size_t i = 0; i < n; ++i) {
+        glm::dvec3 raw = newPos[i] - prevPos[i];
+        raw.x -= L * std::round(raw.x / L);
+        raw.y -= L * std::round(raw.y / L);
+        raw.z -= L * std::round(raw.z / L);
+        m_unwrappedPos[i] += raw;
+    }
+}
+
+double MDSim::LindemannParameter() const {
+    const size_t n = m_unwrappedPos.size();
+    if (n == 0) return 0.0;
+    double sumSq = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const glm::dvec3 d = m_unwrappedPos[i] - m_initialPos[i];
+        sumSq += glm::dot(d, d);
+    }
+    return std::sqrt(sumSq / static_cast<double>(n)) / m_nnDistance;
 }
 
 void MDSim::Step(int substeps) {
-    for (int i = 0; i < substeps; ++i) m_system.Step(m_params);
+    for (int i = 0; i < substeps; ++i) {
+        UpdateRampTargetT();
+        const std::vector<glm::dvec3> prevPos = m_system.Positions();
+        m_system.Step(m_params);
+        UpdateUnwrappedPositions(prevPos);
+        m_simTime += m_dt;
+    }
 }
 
 void MDSim::Snapshot(fw::OutputWriter& writer) {
@@ -109,6 +178,21 @@ void MDSim::Snapshot(fw::OutputWriter& writer) {
     writer.WriteScalar("density", n / (L * L * L));
     writer.WriteScalar("nh_xi", m_system.ThermostatXi());
     writer.WriteScalar("nh_invariant", m_system.NoseHooverInvariant(m_params));
+    writer.WriteScalar("target_t", m_params.targetT);
+    writer.WriteScalar("lindemann", LindemannParameter());
+
+    // Structural order parameter that, unlike lindemann above, depends only
+    // on the INSTANTANEOUS configuration (not displacement from the
+    // original lattice site) -- so it can register refreezing into a new
+    // arrangement on a cooling branch, not just the one-way melting jump
+    // lindemann catches. A tall, sharp first peak means solid- or dense-
+    // liquid-like local order; a short, smoothed-out one means a disordered
+    // fluid. Computed once per FRAME (not substep) -- see the README's
+    // melting/freezing hysteresis validation for why lindemann alone isn't
+    // enough here.
+    const std::vector<double> g = m_system.ComputeRDF(40, 2.0);
+    const double rdfPeak = g.empty() ? 0.0 : *std::max_element(g.begin(), g.end());
+    writer.WriteScalar("rdf_peak", rdfPeak);
 }
 
 fw::SimInfo MDSim::Info() const {
@@ -168,6 +252,12 @@ void MDSim::Render(int fbWidth, int fbHeight) {
         y += 20.0f;
         std::snprintf(line, sizeof(line), "Nose-Hoover xi=%.4f  invariant=%.4f", m_system.ThermostatXi(),
                       m_system.NoseHooverInvariant(m_params));
+        m_text->Draw(m_font, line, glm::vec2(12.0f, y), dim);
+    }
+    if (!m_ramp.empty()) {
+        y += 20.0f;
+        std::snprintf(line, sizeof(line), "ramp: t=%.2f  target_t=%.3f  Lindemann=%.4f", m_simTime,
+                      m_params.targetT, LindemannParameter());
         m_text->Draw(m_font, line, glm::vec2(12.0f, y), dim);
     }
 }

@@ -16,6 +16,13 @@
 
 namespace md {
 
+// One leg of a piecewise-linear thermostat.target_t(t) schedule -- see
+// MDSim::UpdateRampTargetT. Deck: [[ramp.segments]] { t0, t1, t_start, t_end }.
+struct RampSegment {
+    double t0 = 0.0, t1 = 0.0;
+    double tStart = 0.0, tEnd = 0.0;
+};
+
 // fw::Simulation wrapper around MDSystem + Scenarios::BuildFccLattice: one
 // input deck (particle count/density/temperature/thermostat/barostat/time)
 // fully specifies a reproducible run, driven by either fw::RunHeadless
@@ -37,6 +44,18 @@ public:
     void OnViewInput(const fw::ViewInput& in) override;
 
 private:
+    void UpdateRampTargetT();
+    // `prevPos` is MDSystem::Positions() (wrapped) from just before the
+    // physics step just taken; folds the frame-to-frame minimum-image
+    // displacement into m_unwrappedPos. NOTE: only exact for a fixed box --
+    // an active barostat's uniform position rescale isn't a pure
+    // translation, so it isn't correctly unwrapped by this (not used
+    // together with the ramp/Lindemann feature in this project's decks).
+    void UpdateUnwrappedPositions(const std::vector<glm::dvec3>& prevPos);
+    // rms displacement from the initial FCC lattice site / nearest-neighbor
+    // distance -- see MDSim.cpp's comment for the melting-detection idea.
+    double LindemannParameter() const;
+
     MDSystem m_system;
     MDParams m_params;
 
@@ -49,6 +68,22 @@ private:
     double m_dt = 0.002;
     int m_substepsPerFrame = 20;
     std::vector<std::string> m_diagNames;
+
+    // Optional thermostat.target_t(t) schedule (decks/melting_ramp.toml) --
+    // empty if the deck has no [ramp] section, in which case target_t stays
+    // fixed at whatever Configure() set from thermostat.target_t.
+    std::vector<RampSegment> m_ramp;
+    double m_simTime = 0.0; // this sim's own clock, advanced dt per substep in Step()
+
+    // Lindemann-parameter tracking: m_unwrappedPos reconstructs each
+    // particle's true (non-periodic-wrapped) trajectory incrementally every
+    // substep (exact as long as the box is fixed, unlike a post-hoc
+    // reconstruction from sparsely-saved frames); m_initialPos doubles as
+    // the FCC reference lattice site (the IC starts exactly on the
+    // lattice). m_nnDistance is the FCC nearest-neighbor spacing at the
+    // deck's initial density, independent of how the box later evolves.
+    std::vector<glm::dvec3> m_unwrappedPos;
+    double m_nnDistance = 1.0;
 
     // Interactive view. Deferred construction to Configure(): these
     // constructors call OpenGL functions immediately (shader compile, VAO/
