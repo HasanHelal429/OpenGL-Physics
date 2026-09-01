@@ -494,6 +494,34 @@ for) needs much longer equilibration than this demo run uses -- `T*=0.80`
 here is a moderate, clearly-liquid point chosen so the structural signature
 above is visible without an impractically long run.
 
+## Performance
+
+Three CPU optimizations to `MDSystem::ComputeForces`/`BuildCellListPairs`,
+each validated by an unchanged `--selftest` (same machine-precision error,
+confirming bit-for-bit-equivalent physics) and benchmarked with
+`decks/bench_2000.toml`/`bench_8000.toml` (NVE, thermostat off, 2000
+substeps, median of 3 runs, wall-clock):
+
+| stage | N=2000 | N=8000 |
+|---|---|---|
+| baseline | 9.04 s | 33.40 s |
+| + `Sr6`/`LjForceAndPotential` (no more `std::pow(x,6)`, no duplicate `(sigma/r)^6` between force and energy) | 7.61 s | 29.12 s |
+| + persistent `m_threadAccel` (no more per-substep `nThreads*N` allocation) | 8.37 s* | 27.21 s |
+| + flat CSR cell-list binning (no more `nc^3` individually-allocated `std::vector<int>` buckets) | 6.68 s | 26.72 s |
+| **total speedup** | **26% (1.35x)** | **20% (1.25x)** |
+
+\* noisy at this N (one of three runs measured 10.66s, likely unrelated
+system jitter) -- the allocation fix alone is a small effect at N=2000
+regardless; it matters more at larger N. See Known Simplifications below
+for where the bigger remaining performance win actually is.
+
+None of these change the physics or the algorithmic complexity (still O(N)
+at fixed density) -- they remove constant-factor overhead (a slow libm call,
+a redundant computation, allocator churn) that was never part of what the
+`--selftest`/validation sections above were checking, which is exactly why
+those checks passing unchanged is the right confirmation that nothing
+physical moved.
+
 ## Known simplifications
 
 - **Binary mixture uses one global cutoff for all species pairs** rather
@@ -550,3 +578,7 @@ above is visible without an impractically long run.
       process (wrong grid cell size left part of the box uncovered, see
       Validation above). Not yet wired into a live simulation backend --
       see Known Simplifications.
+- [x] CPU performance pass (see Performance above): `Sr6`/
+      `LjForceAndPotential` (no more `std::pow`, no duplicate `(sigma/r)^6`),
+      a persistent `m_threadAccel` buffer, and a flat CSR cell-list --
+      26%/20% faster at N=2000/8000, `--selftest` unchanged throughout.

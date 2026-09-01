@@ -159,6 +159,13 @@ private:
 
     double m_xi = 0.0;         // Nose-Hoover friction variable
     double m_xiIntegral = 0.0; // running integral(xi dt), for NoseHooverInvariant
+
+    // Per-thread force accumulation scratch for ComputeForces, kept as a
+    // persistent member instead of a fresh nThreads*N allocation every
+    // single call (i.e. every substep) -- resized only when N or the
+    // thread count actually changes. Zeroed at the start of each
+    // ComputeForces call instead.
+    std::vector<std::vector<glm::dvec3>> m_threadAccel;
 };
 
 } // namespace md
