@@ -247,6 +247,7 @@ python tools/msd.py out/liquid                    # mean-squared displacement ->
 python tools/eos_check.py out/liquid out/npt_liquid   # state-point table + NVT/NPT cross-consistency
 python tools/plot_melting.py out/melting_ramp     # lindemann/rdf_peak vs target_t, heating vs cooling
 python tools/plot_partial_rdf.py out/glass_kob_andersen   # g_AA/g_BB/g_AB for a binary mixture run
+python tools/make_movie.py out/melting_ramp --stride 4    # (x,y) projection movie, speed- or species-colored
 ```
 
 ## Validation
