@@ -16,6 +16,10 @@ relaxation transient -- see decks/liquid.toml's hot-start). Of what remains,
 the diffusive (long-time, linear) regime is fit over the LAST --fit-frac of
 that window, skipping the early ballistic (~t^2) regime where the Einstein
 relation D = slope/6 (3D) does not yet apply.
+
+compute_diffusion() below is also imported directly by
+studies/diffusion_vs_temperature/run_sweep.py -- keep its return contract
+(a dict, see its docstring) stable if you touch it.
 """
 import argparse
 import glob
@@ -24,23 +28,13 @@ import sys
 
 import numpy as np
 
-try:
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-except ImportError:
-    sys.exit("msd: needs numpy + matplotlib")
 
-
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("results_dir")
-    ap.add_argument("--skip-frac", type=float, default=0.25)
-    ap.add_argument("--fit-frac", type=float, default=0.5)
-    ap.add_argument("--out", default=None)
-    args = ap.parse_args()
-    d = args.results_dir
-
+def compute_diffusion(results_dir, skip_frac=0.25, fit_frac=0.5):
+    """Returns a dict: n_frames, n_particles, max_jump_ratio (unwrapping
+    sanity check, see module docstring), t_rel, msd (both arrays, post-skip),
+    fit_start (index into t_rel/msd), slope, intercept, D (Einstein-relation
+    self-diffusion coefficient, reduced units)."""
+    d = results_dir
     frame_ids = sorted(
         os.path.basename(p).split("_")[-1].split(".")[0]
         for p in glob.glob(os.path.join(d, "frames", "pos_*.npy"))
@@ -54,7 +48,7 @@ def main():
 
     unwrapped = np.zeros((n_frames, n, 3))
     unwrapped[0] = positions[0]
-    max_jump_over_half_box = 0.0
+    max_jump_ratio = 0.0
     for k in range(1, n_frames):
         raw_disp = positions[k] - positions[k - 1]
         Lk = L[k]
@@ -68,30 +62,62 @@ def main():
         # exceeds half the box, so min-image folds it to the WRONG small
         # value instead of the right one; `disp` itself approaching 0.5*L is
         # the real warning sign.
-        max_jump_over_half_box = max(max_jump_over_half_box, np.max(np.abs(disp)) / (0.5 * Lk))
+        max_jump_ratio = max(max_jump_ratio, np.max(np.abs(disp)) / (0.5 * Lk))
         unwrapped[k] = unwrapped[k - 1] + disp
 
     t = data["t"][:n_frames]
-    start = int(args.skip_frac * n_frames)
+    start = int(skip_frac * n_frames)
     disp0 = unwrapped[start:] - unwrapped[start]
     msd = np.mean(np.sum(disp0**2, axis=-1), axis=-1)
     t_rel = t[start:] - t[start]
 
-    fit_start = int((1.0 - args.fit_frac) * len(t_rel))
+    fit_start = int((1.0 - fit_frac) * len(t_rel))
     slope, intercept = np.polyfit(t_rel[fit_start:], msd[fit_start:], 1)
     D = slope / 6.0  # Einstein relation, 3D: MSD(t) ~ 6*D*t at long time
 
-    print(f"frames: {n_frames}  particles: {n}")
-    print(f"  max single-frame displacement / (0.5*L): {max_jump_over_half_box:.3f}"
+    return {
+        "n_frames": n_frames,
+        "n_particles": n,
+        "max_jump_ratio": max_jump_ratio,
+        "t_rel": t_rel,
+        "msd": msd,
+        "fit_start": fit_start,
+        "slope": slope,
+        "intercept": intercept,
+        "D": D,
+    }
+
+
+def main():
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        sys.exit("msd: needs numpy + matplotlib")
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("results_dir")
+    ap.add_argument("--skip-frac", type=float, default=0.25)
+    ap.add_argument("--fit-frac", type=float, default=0.5)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+    d = args.results_dir
+
+    r = compute_diffusion(d, args.skip_frac, args.fit_frac)
+    t_rel, msd, fit_start = r["t_rel"], r["msd"], r["fit_start"]
+
+    print(f"frames: {r['n_frames']}  particles: {r['n_particles']}")
+    print(f"  max single-frame displacement / (0.5*L): {r['max_jump_ratio']:.3f}"
           f"  (unwrapping assumption breaks down if this approaches 1)")
     print(f"  diffusive-regime fit over t in [{t_rel[fit_start]:.3f}, {t_rel[-1]:.3f}]"
           f" (of {t_rel[0]:.3f}..{t_rel[-1]:.3f} post-skip window)")
-    print(f"  self-diffusion coefficient D = {D:.5f}  (reduced LJ units, sigma^2/tau)")
+    print(f"  self-diffusion coefficient D = {r['D']:.5f}  (reduced LJ units, sigma^2/tau)")
 
     fig, ax = plt.subplots(figsize=(7, 5))
     ax.plot(t_rel, msd, label="MSD(t)")
-    ax.plot(t_rel[fit_start:], slope * t_rel[fit_start:] + intercept, "--",
-            label=f"linear fit -> D={D:.5f}")
+    ax.plot(t_rel[fit_start:], r["slope"] * t_rel[fit_start:] + r["intercept"], "--",
+            label=f"linear fit -> D={r['D']:.5f}")
     ax.set_xlabel("t (since post-skip start)"); ax.set_ylabel("MSD")
     ax.set_title(f"{os.path.basename(os.path.abspath(d))}: mean-squared displacement")
     ax.legend()
