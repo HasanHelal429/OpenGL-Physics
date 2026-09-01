@@ -75,6 +75,31 @@ affect the dynamics, since the actual forces stay cutoff-only. NVE
 conservation and the barostat both correctly use the raw, uncorrected
 quantities that match the forces actually being integrated.
 
+**Melting/freezing ramp** (`[ramp]`, optional): a piecewise-linear
+`thermostat.target_t(t)` schedule (`[[ramp.segments]] { t0, t1, t_start,
+t_end }`), applied fresh every substep in `MDSim::Step` regardless of which
+thermostat is active -- Nose-Hoover's `Q = dof*target_t*tau^2` recomputes
+from the current (ramped) `target_t` automatically, no extra plumbing
+needed. Two order parameters track the resulting structural state, both
+computed in `MDSim` (not `MDSystem` -- they're bookkeeping on top of the
+physics, not physics themselves):
+- `lindemann` -- rms displacement of each particle from its ORIGINAL FCC
+  lattice site (the deck's IC starts exactly on the lattice), divided by
+  the FCC nearest-neighbor distance at the deck's density. Reconstructed
+  incrementally every substep via minimum-image frame-to-frame
+  differencing (exact for a fixed box; not used together with the barostat
+  above, whose uniform rescale isn't a pure translation). This is a sharp,
+  reliable melting-*onset* detector (a stable solid stays near the classic
+  Lindemann-criterion range ~0.10-0.15) but a one-way one: once melted,
+  atoms diffuse and never return to their literal original coordinates even
+  if the system recrystallizes elsewhere, so it keeps growing for the rest
+  of any cooling branch regardless of what actually happens structurally.
+- `rdf_peak` -- the tallest bin of `MDSystem::ComputeRDF`, recomputed fresh
+  from the instantaneous configuration once per frame (cheap relative to a
+  force evaluation, not run every substep). Unlike `lindemann` this depends
+  on no history/reference position, so it's usable on both the heating
+  and cooling branches -- see Validation below for what it actually showed.
+
 **Initial conditions.** `Scenarios::BuildFccLattice`: particles placed on an
 FCC lattice (never randomly -- an unstructured placement risks two atoms
 overlapping, which the repulsive LJ core turns into a force blow-up on the
@@ -119,7 +144,27 @@ title = "..."
 Output fields (batch mode, `(N,3)` float32): `pos`, `vel`. Diagnostics:
 `kinetic`, `potential`, `potential_tail`, `total_energy`, `temperature`,
 `pressure`, `pressure_tail`, `box_length`, `density`, `nh_xi`,
-`nh_invariant` (the last two are 0 unless `thermostat.type = "nose_hoover"`).
+`nh_invariant` (the last two are 0 unless `thermostat.type = "nose_hoover"`),
+`target_t` (the instantaneous, possibly-ramped thermostat target),
+`lindemann`, `rdf_peak` (see the ramp/melting description above --
+`lindemann` is 0 and `rdf_peak` is still meaningful even without `[ramp]`).
+
+`[ramp]` (optional):
+
+```toml
+[ramp]
+enabled = true
+[[ramp.segments]]
+t0 = 0.0     # simulated time, this MDSim instance's own clock (starts at 0 on Configure()/Reset())
+t1 = 50.0
+t_start = 0.10
+t_end = 3.00
+[[ramp.segments]]
+t0 = 50.0
+t1 = 100.0
+t_start = 3.00
+t_end = 0.10
+```
 
 ## Build & run
 
@@ -149,6 +194,7 @@ python tools/plot_diagnostics.py out/liquid       # energy/temperature/pressure 
 python tools/plot_rdf.py out/liquid               # g(r) from the final frame
 python tools/msd.py out/liquid                    # mean-squared displacement -> diffusion coefficient
 python tools/eos_check.py out/liquid out/npt_liquid   # state-point table + NVT/NPT cross-consistency
+python tools/plot_melting.py out/melting_ramp     # lindemann/rdf_peak vs target_t, heating vs cooling
 ```
 
 ## Validation
@@ -297,6 +343,39 @@ not worth taking for a demo validation script). Both points sit at
 `T/Tc ~= 0.54`, deep in the liquid region, consistent with the RDF/MSD
 results above actually describing a liquid and not a supercritical fluid.
 
+### Melting/freezing hysteresis (`decks/melting_ramp.toml`, rho\*=0.95, heat 0.10->3.00 then cool back over t in [0,100])
+
+```
+melting detected: lindemann crosses 0.3 between target_t=1.617 (lindemann=0.298) and target_t=1.619 (lindemann=0.303)
+rdf_peak: initial(t=0)=15.91  final(t=100.0)=4.66  liquid-plateau min=2.20
+```
+
+`lindemann` stays in `0.09-0.21` from `target_t=0.10` up through `~1.55`
+(comfortably inside the classic ~0.10-0.15 Lindemann-criterion range for a
+stable solid, allowing for this being a small, finite, thermally-vibrating
+system rather than an infinite one), then rises sharply through `~1.6-1.9`
+and keeps climbing for the rest of the run, reaching `4.97` by the end --
+exactly the one-way behavior described in Physics above: a real melting
+event around `target_t~1.6`, but `lindemann` cannot see whatever happens on
+the cooling branch afterward, since molten atoms never return to their
+original coordinates.
+
+`rdf_peak` tells the rest of the story: it starts at `15.9` (the essentially
+perfect starting lattice), collapses to `~4.6` within the first few time
+units as thermal motion broadens the crystal's peak, continues falling
+through melting to a liquid plateau around `2.2-2.6` through most of the
+hot part of the run, then **rises again on cooling** -- back up to `4.66` by
+`t=100` (`target_t=0.10`). That rise is a real (partial) re-ordering signal,
+but `4.66` is far short of the original `15.9`: **this cooling rate outran
+recrystallization** and the run ends in a disordered/glassy configuration
+rather than cleanly refreezing into the original crystal. That is a
+legitimate, well-known MD outcome for a fast quench (LJ systems are classic
+glass formers under rapid cooling), reported here as what the run actually
+produced rather than an idealized symmetric hysteresis loop -- see
+`tools/plot_melting.py`'s docstring for the full reasoning, and its
+`melting.png` for the two order parameters plotted against `target_t` on
+both branches.
+
 ## Known simplifications
 
 - **Single species only.** No mixtures yet (planned: a binary Kob-Andersen
@@ -309,8 +388,11 @@ results above actually describing a liquid and not a supercritical fluid.
   force/neighbor-list kernels here are OpenMP-parallel CPU code, not GPU
   compute shaders (planned as a later phase, porting the CPU implementation
   as the `--selftest` ground truth).
-- **No melting/freezing demo yet** (planned: a temperature-ramp deck +
-  Lindemann-parameter diagnostic).
+- **`lindemann` is a one-way melting-onset detector, not a hysteresis-loop
+  diagnostic by itself** (see the melting/freezing Validation above) --
+  `rdf_peak` covers the two-way case, but a proper bond-orientational order
+  parameter (Steinhardt Q6, translation- *and* permutation-invariant) would
+  be a more rigorous crystallinity measure than a single RDF-peak height.
 
 ## Progress
 
@@ -328,7 +410,10 @@ results above actually describing a liquid and not a supercritical fluid.
       `0.0001` of `target_p`
 - [x] `tools/plot_diagnostics.py`, `tools/plot_rdf.py`, `tools/msd.py`,
       `tools/eos_check.py` -- all validated against real runs, see above
-- [ ] Melting/freezing demo (temperature ramp + Lindemann parameter)
+- [x] Melting/freezing demo: `[ramp]` deck-driven `target_t(t)` schedule +
+      `lindemann`/`rdf_peak` order parameters. Clean melting-onset detection
+      (`target_t~1.6`); cooling branch shows partial re-ordering but not
+      full recrystallization at this quench rate -- see Validation above
 - [ ] Binary Kob-Andersen mixture
 - [ ] GPU compute-shader port (with a CPU-vs-GPU `--selftest` cross-check,
       matching `06`/`07`'s pattern)

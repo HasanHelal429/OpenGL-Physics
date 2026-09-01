@@ -30,7 +30,8 @@ projects/            One executable per simulation. Numbered by creation order.
   01_hartree_fock/    Atomic Hartree-Fock-Slater / Kohn-Sham LDA SCF solver.
   02/03_nbody_gravity Direct + Barnes-Hut N-body (3D / 2D-with-FMM).
   04_molecular_dynamics  3D periodic Lennard-Jones MD -- Nose-Hoover/Berendsen
-                       thermostats, Berendsen NPT barostat. Both models: the
+                       thermostats, Berendsen NPT barostat, deck-driven
+                       melting/freezing temperature ramp. Both models: the
                        original ImGui + live-chart app, and (preferred) the
                        Simulation/Deck/headless model -- see its README.
   05_tdse_gpu/        2D time-dependent Schrödinger, split-step Fourier on the
