@@ -31,7 +31,8 @@ projects/            One executable per simulation. Numbered by creation order.
   02/03_nbody_gravity Direct + Barnes-Hut N-body (3D / 2D-with-FMM).
   04_molecular_dynamics  3D periodic Lennard-Jones MD -- Nose-Hoover/Berendsen
                        thermostats, Berendsen NPT barostat, deck-driven
-                       melting/freezing temperature ramp. Both models: the
+                       melting/freezing temperature ramp, optional
+                       Kob-Andersen binary glass mixture. Both models: the
                        original ImGui + live-chart app, and (preferred) the
                        Simulation/Deck/headless model -- see its README.
   05_tdse_gpu/        2D time-dependent Schrödinger, split-step Fourier on the

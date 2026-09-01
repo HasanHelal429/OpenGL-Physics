@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 
 namespace md {
@@ -20,9 +21,25 @@ void MDSim::Configure(const fw::Deck& deck) {
     const double temperature = deck.GetDouble("system.temperature", 1.00);
     const unsigned seed = static_cast<unsigned>(deck.GetInt("system.seed", 42));
 
-    const ScenarioResult ic = BuildFccLattice(targetN, density, temperature, seed);
+    const double fracB = deck.GetDouble("system.species_b_fraction", 0.0);
+    m_isMixture = fracB > 0.0;
+    ScenarioResult ic;
+    if (m_isMixture) {
+        ic = BuildFccLatticeBinary(targetN, density, temperature, 1.0 - fracB, seed);
+        // Kob-Andersen (Kob & Andersen, Phys. Rev. E 51, 4626, 1995)
+        // defaults -- lengths/energies quoted in sigma_AA/epsilon_AA, the
+        // canonical 80:20 glass-forming mixture at these values.
+        const double sigmaBB = deck.GetDouble("mixture.sigma_bb", 0.88);
+        const double epsBB = deck.GetDouble("mixture.eps_bb", 0.50);
+        const double sigmaAB = deck.GetDouble("mixture.sigma_ab", 0.80);
+        const double epsAB = deck.GetDouble("mixture.eps_ab", 1.50);
+        m_system.SetSpeciesLJParams(sigmaBB, epsBB, sigmaAB, epsAB);
+    } else {
+        ic = BuildFccLattice(targetN, density, temperature, seed);
+    }
     m_initialPos = ic.pos;
     m_initialVel = ic.vel;
+    m_initialSpecies = ic.species;
     m_initialL = ic.boxLength;
 
     m_params.cutoff = deck.GetDouble("potential.cutoff", 2.5);
@@ -77,8 +94,11 @@ void MDSim::Configure(const fw::Deck& deck) {
     m_diagNames = {"kinetic",  "potential", "potential_tail", "total_energy", "temperature",
                    "pressure", "pressure_tail", "box_length", "density", "nh_xi", "nh_invariant",
                    "target_t", "lindemann", "rdf_peak"};
+    if (m_isMixture) {
+        m_diagNames.insert(m_diagNames.end(), {"rdf_peak_aa", "rdf_peak_bb", "rdf_peak_ab", "fraction_b"});
+    }
 
-    m_system.SetParticles(m_initialPos, m_initialVel, m_initialL);
+    m_system.SetParticles(m_initialPos, m_initialVel, m_initialL, m_initialSpecies);
     m_system.PrimeForces(m_params);
     m_unwrappedPos = m_initialPos;
 
@@ -95,7 +115,7 @@ void MDSim::Configure(const fw::Deck& deck) {
 }
 
 void MDSim::Reset() {
-    m_system.SetParticles(m_initialPos, m_initialVel, m_initialL);
+    m_system.SetParticles(m_initialPos, m_initialVel, m_initialL, m_initialSpecies);
     m_system.PrimeForces(m_params);
     m_unwrappedPos = m_initialPos;
     m_simTime = 0.0;
@@ -162,6 +182,13 @@ void MDSim::Snapshot(fw::OutputWriter& writer) {
     }
     writer.WriteField("pos", posF.data(), fw::NpyDtype::F4, n, 3);
     writer.WriteField("vel", velF.data(), fw::NpyDtype::F4, n, 3);
+    // Species is static (never changes after Configure()) -- only needs
+    // writing once, on the first frame (see fw::SimInfo's comment on
+    // frameFields).
+    if (m_isMixture && writer.FramesWritten() == 0) {
+        std::vector<int32_t> speciesI(m_system.Species().begin(), m_system.Species().end());
+        writer.WriteField("species", speciesI.data(), fw::NpyDtype::I4, n, 1);
+    }
 
     const double ke = m_system.KineticEnergy();
     const double pe = m_system.PotentialEnergy();
@@ -193,6 +220,17 @@ void MDSim::Snapshot(fw::OutputWriter& writer) {
     const std::vector<double> g = m_system.ComputeRDF(40, 2.0);
     const double rdfPeak = g.empty() ? 0.0 : *std::max_element(g.begin(), g.end());
     writer.WriteScalar("rdf_peak", rdfPeak);
+
+    if (m_isMixture) {
+        auto peakOf = [](const std::vector<double>& gg) {
+            return gg.empty() ? 0.0 : *std::max_element(gg.begin(), gg.end());
+        };
+        writer.WriteScalar("rdf_peak_aa", peakOf(m_system.ComputePartialRDF(40, 2.0, 0, 0)));
+        writer.WriteScalar("rdf_peak_bb", peakOf(m_system.ComputePartialRDF(40, 2.0, 1, 1)));
+        writer.WriteScalar("rdf_peak_ab", peakOf(m_system.ComputePartialRDF(40, 2.0, 0, 1)));
+        const int nB = static_cast<int>(std::count(m_system.Species().begin(), m_system.Species().end(), 1));
+        writer.WriteScalar("fraction_b", static_cast<double>(nB) / std::max(n, 1));
+    }
 }
 
 fw::SimInfo MDSim::Info() const {
@@ -200,7 +238,8 @@ fw::SimInfo MDSim::Info() const {
     info.title = m_title;
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = {"pos", "vel"};
+    info.frameFields = m_isMixture ? std::vector<std::string>{"pos", "vel", "species"}
+                                    : std::vector<std::string>{"pos", "vel"};
     info.diagnostics = m_diagNames;
     return info;
 }
@@ -214,13 +253,22 @@ void MDSim::Render(int fbWidth, int fbHeight) {
     for (const glm::dvec3& v : vel) vMax = std::max(vMax, glm::dot(v, v));
     vMax = std::sqrt(vMax);
 
+    const std::vector<int>& species = m_system.Species();
     std::vector<fw::ParticleInstance> particles;
     particles.reserve(static_cast<size_t>(n));
     for (int i = 0; i < n; ++i) {
-        const float t = static_cast<float>(glm::length(vel[static_cast<size_t>(i)]) / vMax);
         fw::ParticleInstance p;
         p.position = glm::vec3(pos[static_cast<size_t>(i)]);
-        p.color = glm::vec4(0.3f + 0.7f * t, 0.45f, 1.0f - 0.6f * t, 1.0f); // blue (slow) -> orange (fast)
+        if (m_isMixture) {
+            // Fixed per-species colors (not speed) -- what matters for a
+            // mixture is seeing the two components, not the instantaneous
+            // kinetic state.
+            p.color = species[static_cast<size_t>(i)] == 0 ? glm::vec4(0.35f, 0.55f, 1.0f, 1.0f)   // A: blue
+                                                             : glm::vec4(1.0f, 0.45f, 0.25f, 1.0f);  // B: orange
+        } else {
+            const float t = static_cast<float>(glm::length(vel[static_cast<size_t>(i)]) / vMax);
+            p.color = glm::vec4(0.3f + 0.7f * t, 0.45f, 1.0f - 0.6f * t, 1.0f); // blue (slow) -> orange (fast)
+        }
         p.size = 0.06f;
         particles.push_back(p);
     }
@@ -258,6 +306,12 @@ void MDSim::Render(int fbWidth, int fbHeight) {
         y += 20.0f;
         std::snprintf(line, sizeof(line), "ramp: t=%.2f  target_t=%.3f  Lindemann=%.4f", m_simTime,
                       m_params.targetT, LindemannParameter());
+        m_text->Draw(m_font, line, glm::vec2(12.0f, y), dim);
+    }
+    if (m_isMixture) {
+        y += 20.0f;
+        const int nB = static_cast<int>(std::count(species.begin(), species.end(), 1));
+        std::snprintf(line, sizeof(line), "mixture: A=blue (%d)  B=orange (%d)", n - nB, nB);
         m_text->Draw(m_font, line, glm::vec2(12.0f, y), dim);
     }
 }

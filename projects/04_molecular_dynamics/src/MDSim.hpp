@@ -62,7 +62,9 @@ private:
     // Reset() baseline -- the Configure()-time initial condition. The deck
     // itself is not re-parsed by Reset() (matches TdeSim/GrhdSim convention).
     std::vector<glm::dvec3> m_initialPos, m_initialVel;
+    std::vector<int> m_initialSpecies; // empty unless system.species_b_fraction > 0
     double m_initialL = 1.0;
+    bool m_isMixture = false;
 
     std::string m_title = "Molecular Dynamics -- Lennard-Jones fluid";
     double m_dt = 0.002;

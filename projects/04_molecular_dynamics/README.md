@@ -2,11 +2,12 @@
 
 A classic all-pairs-within-cutoff LJ fluid: velocity-Verlet integration, a
 linked-cell neighbor list with a Verlet skin, shifted-force cutoff
-truncation, Berendsen/velocity-rescale/Nose-Hoover thermostats, and a
-Berendsen NPT barostat. Reduced LJ units throughout (mass = sigma = epsilon
-= k_B = 1), the standard convention that lets density/temperature/pressure
-be quoted as the dimensionless rho\*, T\*, P\* used across the LJ
-phase-diagram literature.
+truncation, Berendsen/velocity-rescale/Nose-Hoover thermostats, a Berendsen
+NPT barostat, a deck-driven melting/freezing temperature ramp, and an
+optional Kob-Andersen binary glass-forming mixture. Reduced LJ units
+throughout (mass = sigma_AA = epsilon_AA = k_B = 1), the standard convention
+that lets density/temperature/pressure be quoted as the dimensionless
+rho\*, T\*, P\* used across the LJ phase-diagram literature.
 
 **Two ways to run this project**, and both stay supported (see the top-level
 README's "Two ways a project can run"):
@@ -100,6 +101,23 @@ physics, not physics themselves):
   on no history/reference position, so it's usable on both the heating
   and cooling branches -- see Validation below for what it actually showed.
 
+**Binary mixture** (`system.species_b_fraction`, `[mixture]`): each particle
+gets a species label (A or B), and `MDSystem` looks up sigma/epsilon per
+(species i, species j) pair -- `sigma_AA`/`epsilon_AA` are always `(1.0,
+1.0)`, the reference units. Default `[mixture]` values are the actual
+Kob-Andersen parameters (Kob & Andersen, *Phys. Rev. E* 51, 4626, 1995):
+`sigma_BB=0.88, epsilon_BB=0.50, sigma_AB=0.80, epsilon_AB=1.50` -- a
+deliberately *non-additive* choice (not Lorentz-Berthelot mixing rules:
+`sigma_AB` is smaller and `epsilon_AB` is larger than either self-
+interaction) specifically designed to frustrate crystallization, making
+this the canonical glass-forming binary LJ model. One simplification: a
+single global cutoff distance (in `sigma_AA` units) is used for every
+species pair rather than the original per-pair `2.5*sigma_alphabeta`
+convention -- see the `ComputeForces` comment in `MDSystem.cpp` for why.
+`MDSystem::ComputePartialRDF` gives `g_AA`/`g_BB`/`g_AB` separately (see
+Validation below for why that separation actually matters here, not just
+as a formality).
+
 **Initial conditions.** `Scenarios::BuildFccLattice`: particles placed on an
 FCC lattice (never randomly -- an unstructured placement risks two atoms
 overlapping, which the repulsive LJ core turns into a force blow-up on the
@@ -121,6 +139,7 @@ title = "..."
               density = 0.8442     # rho* = N/V
               temperature = 1.44   # initial condition's T* (thermostat.target_t can differ -- see below)
               seed = 1
+              species_b_fraction = 0.0   # >0 -> binary mixture, see [mixture] below
 
 [potential]   cutoff = 2.5         # sigma units
               skin = 0.3           # Verlet-list skin beyond cutoff
@@ -166,6 +185,22 @@ t_start = 3.00
 t_end = 0.10
 ```
 
+`[mixture]` (only read if `system.species_b_fraction > 0`; defaults shown
+are the actual Kob-Andersen values):
+
+```toml
+[mixture]
+sigma_bb = 0.88
+eps_bb = 0.50
+sigma_ab = 0.80
+eps_ab = 1.50
+```
+
+For a mixture run, output also includes a static `species` field
+(`(N,1)` int32, written once on frame 0 only -- it never changes) and four
+extra diagnostics: `rdf_peak_aa`, `rdf_peak_bb`, `rdf_peak_ab`,
+`fraction_b`.
+
 ## Build & run
 
 ```sh
@@ -176,8 +211,8 @@ cmake --build --preset release --target 04_molecular_dynamics
 04_molecular_dynamics
 
 # cross-check the neighbor list (both the brute-force-fallback and real
-# linked-cell code paths) and the shifted-force LJ gradient against
-# independent references
+# linked-cell code paths), the shifted-force LJ gradient, and the
+# per-species-pair mixture force lookup, all against independent references
 04_molecular_dynamics --selftest
 
 # batch: run a deck, write raw data
@@ -195,21 +230,29 @@ python tools/plot_rdf.py out/liquid               # g(r) from the final frame
 python tools/msd.py out/liquid                    # mean-squared displacement -> diffusion coefficient
 python tools/eos_check.py out/liquid out/npt_liquid   # state-point table + NVT/NPT cross-consistency
 python tools/plot_melting.py out/melting_ramp     # lindemann/rdf_peak vs target_t, heating vs cooling
+python tools/plot_partial_rdf.py out/glass_kob_andersen   # g_AA/g_BB/g_AB for a binary mixture run
 ```
 
 ## Validation
 
 ### `--selftest`
 
-Two independent-reference cross-checks (a brute-force-force reference
-re-derived directly from the shifted-force LJ formula, with no knowledge of
-`MDSystem`'s neighbor list) plus a numerical-gradient check:
+Independent-reference cross-checks (each re-derives the relevant formula
+directly, with no knowledge of `MDSystem`'s internals) plus a
+numerical-gradient check:
 
 ```
-selftest (small (brute-force fallback)): max relative error  accel=2.016e-16  energy=5.919e-16  -- PASS
-selftest (multicell (linked-cell)):      max relative error  accel=3.888e-17  energy=6.930e-16  -- PASS
-selftest (numerical-gradient):           analytic=-2.172694  numerical=-2.172694  relerr=7.865e-11 -- PASS
+selftest (small (brute-force fallback)):     max relative error  accel=2.016e-16  energy=5.919e-16  -- PASS
+selftest (multicell (linked-cell)):          max relative error  accel=7.777e-17  energy=9.240e-16  -- PASS
+selftest (numerical-gradient):               analytic=-2.172694  numerical=-2.172694  relerr=7.865e-11 -- PASS
+selftest (mixture (Kob-Andersen params)):    max relative error  accel=9.881e-17  energy=1.313e-15  -- PASS
 ```
+
+`mixture` (N=400, random 80:20 species assignment, Kob-Andersen sigma/
+epsilon) cross-checks that `ComputeForces` looks up the right (species i,
+species j) parameters for every pair -- the other three cases already cover
+the single-species formula and neighbor-list code paths, so this one only
+needs to isolate the species-lookup logic itself.
 
 `small` (N=40, box edge deliberately < 3*cutoff) exercises `BuildCellListPairs`'s
 brute-force fallback branch; `multicell` (N=400, box several cells wide)
@@ -376,10 +419,52 @@ produced rather than an idealized symmetric hysteresis loop -- see
 `melting.png` for the two order parameters plotted against `target_t` on
 both branches.
 
+### Binary mixture (`decks/glass_kob_andersen.toml`, rho\*=1.2, T\*=0.80, 80:20 A:B)
+
+```
+frame 0399: N_A=396  N_B=104  (fraction_b=0.208)
+  g_A-A: first peak r=1.065  g=3.576
+  g_A-B: first peak r=0.915  g=4.327
+```
+
+`g_AA` looks like an ordinary dense LJ liquid -- a clean first peak near
+`r~1.07` (close to `sigma_AA`). `g_AB` peaks *sharper and taller* (`4.33`
+vs. `3.58`) at *smaller* `r` (`0.92` vs. `1.07`) -- both exactly what
+`sigma_AB=0.80 < sigma_AA` and `epsilon_AB=1.50 > epsilon_AA` predict: A and
+B pack closer together and more strongly than either species packs with
+itself. **`g_BB` is qualitatively different, not just quantitatively**:
+inspecting the raw histogram directly (not just the naive tallest-bin
+"peak") shows `g_BB(r) ~= 0` below `r~0.85` and never rises much past `~1.3`
+anywhere out to `r=2`, with no clear dominant peak at all -- B atoms are
+essentially never found close to each other. That is real physics, not a
+statistics artifact of the smaller `N_B=104` sample: it is exactly the
+designed consequence of `epsilon_BB=0.50` being the weakest of the three
+pair interactions while `epsilon_AB=1.50` is the strongest -- B atoms are
+energetically frustrated out of forming their own coordination shell and
+pulled toward A neighbors instead. This is the actual mechanism by which
+the Kob-Andersen mixture resists crystallization, and it shows up directly
+in the partial RDFs rather than needing a separate crystallinity
+diagnostic to see. (`tools/plot_partial_rdf.py`'s naive "first peak"
+line for B-B should be read with this caveat -- it reports the tallest bin
+of a mostly-flat, noisy curve, not a real structural peak.)
+
+Energy conservation under the Berendsen thermostat drifted `2.3%` (expected
+for a thermostatted run, same caveat as the single-species decks) and the
+`--selftest` mixture case above confirms the force calculation itself is
+correct independent of this qualitative RDF finding.
+
+**Not attempted at this state point**: the deeply supercooled regime
+(`T*` down toward the mode-coupling range this model is actually famous
+for) needs much longer equilibration than this demo run uses -- `T*=0.80`
+here is a moderate, clearly-liquid point chosen so the structural signature
+above is visible without an impractically long run.
+
 ## Known simplifications
 
-- **Single species only.** No mixtures yet (planned: a binary Kob-Andersen
-  glass former, a later phase of this project).
+- **Binary mixture uses one global cutoff for all species pairs** rather
+  than the original per-pair `2.5*sigma_alphabeta` convention (see Physics
+  above), and its tail corrections still use the pure species-A reference
+  parameters rather than a composition-weighted mean-field average.
 - **Weak-coupling Berendsen thermostat/barostat don't sample correct
   ensemble fluctuations** (see Physics above) -- Nose-Hoover fixes this for
   temperature; there is no fluctuation-correct (e.g. Parrinello-Rahman)
@@ -414,6 +499,11 @@ both branches.
       `lindemann`/`rdf_peak` order parameters. Clean melting-onset detection
       (`target_t~1.6`); cooling branch shows partial re-ordering but not
       full recrystallization at this quench rate -- see Validation above
-- [ ] Binary Kob-Andersen mixture
+- [x] Binary Kob-Andersen mixture: per-species-pair sigma/epsilon, partial
+      RDFs, `--selftest` mixture cross-check. `g_AB` sharper/taller and
+      shifted inward vs. `g_AA`; `g_BB` shows no real contact peak at all --
+      the actual, directly-visible mechanism behind this model's
+      crystallization resistance, not just three similar-looking curves
+      (see Validation above)
 - [ ] GPU compute-shader port (with a CPU-vs-GPU `--selftest` cross-check,
       matching `06`/`07`'s pattern)

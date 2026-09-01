@@ -126,6 +126,77 @@ bool SelfTestForces(int n, double L, double cutoff, unsigned seed, const char* l
     return ok;
 }
 
+// Same idea as SelfTestForces, but with a random 80:20 A:B species
+// assignment and Kob-Andersen-like per-pair sigma/epsilon -- independently
+// re-derives the same shifted-force formula with its OWN species lookup
+// (not calling into MDSystem's), cross-checking that MDSystem::ComputeForces
+// picks the right (species i, species j) parameters for every pair, not
+// just that the single-species formula is right (already covered above).
+bool SelfTestMixtureForces(int n, double L, double cutoff, unsigned seed, const char* label) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> u(0.0, L);
+    std::uniform_real_distribution<double> coin(0.0, 1.0);
+    std::vector<glm::dvec3> pos(static_cast<size_t>(n));
+    std::vector<int> species(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        pos[static_cast<size_t>(i)] = glm::dvec3(u(rng), u(rng), u(rng));
+        species[static_cast<size_t>(i)] = (coin(rng) < 0.8) ? 0 : 1;
+    }
+    const std::vector<glm::dvec3> vel(static_cast<size_t>(n), glm::dvec3(0.0));
+
+    const double sigma[2][2] = {{1.0, 0.8}, {0.8, 0.88}};
+    const double epsilon[2][2] = {{1.0, 1.5}, {1.5, 0.5}};
+
+    md::MDSystem sys;
+    md::MDParams params;
+    params.cutoff = cutoff;
+    params.skin = 0.3;
+    sys.SetParticles(pos, vel, L, species);
+    sys.SetSpeciesLJParams(sigma[1][1], epsilon[1][1], sigma[0][1], epsilon[0][1]);
+    sys.PrimeForces(params);
+
+    const double rc = std::min(cutoff, 0.49 * L);
+    double Fc[2][2], Uc[2][2];
+    for (int si = 0; si < 2; ++si) {
+        for (int sj = 0; sj < 2; ++sj) {
+            Fc[si][sj] = RefLjForceMag(rc, epsilon[si][sj], sigma[si][sj]);
+            Uc[si][sj] = RefLjPotential(rc, epsilon[si][sj], sigma[si][sj]);
+        }
+    }
+    std::vector<glm::dvec3> refAccel(static_cast<size_t>(n), glm::dvec3(0.0));
+    double refEnergy = 0.0;
+    const std::vector<glm::dvec3>& refPos = sys.Positions();
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            const glm::dvec3 rij = RefMinImage(refPos[static_cast<size_t>(i)] - refPos[static_cast<size_t>(j)], L);
+            const double r2 = glm::dot(rij, rij);
+            if (r2 > rc * rc) continue;
+            const int si = species[static_cast<size_t>(i)];
+            const int sj = species[static_cast<size_t>(j)];
+            const double r = std::sqrt(r2);
+            const double Fmag = RefLjForceMag(r, epsilon[si][sj], sigma[si][sj]) - Fc[si][sj];
+            const glm::dvec3 f = (Fmag / r) * rij;
+            refAccel[static_cast<size_t>(i)] += f;
+            refAccel[static_cast<size_t>(j)] -= f;
+            refEnergy += RefLjPotential(r, epsilon[si][sj], sigma[si][sj]) - Uc[si][sj] + (r - rc) * Fc[si][sj];
+        }
+    }
+
+    double accelErr = 0.0, refNorm = 1e-12;
+    const std::vector<glm::dvec3>& accel = sys.Accelerations();
+    for (int i = 0; i < n; ++i) {
+        accelErr = std::max(accelErr, glm::length(accel[static_cast<size_t>(i)] - refAccel[static_cast<size_t>(i)]));
+        refNorm = std::max(refNorm, glm::length(refAccel[static_cast<size_t>(i)]));
+    }
+    const double relAccelErr = accelErr / refNorm;
+    const double relEnergyErr = std::abs(sys.PotentialEnergy() - refEnergy) / std::max(std::abs(refEnergy), 1e-12);
+
+    std::printf("selftest (%s): max relative error  accel=%.3e  energy=%.3e\n", label, relAccelErr, relEnergyErr);
+    const bool ok = relAccelErr < 1e-9 && relEnergyErr < 1e-9;
+    std::printf("selftest (%s): %s\n", label, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 // Two particles, one pair, no periodic wrap in play: checks that
 // MDSystem's analytic force is actually the gradient of the SAME potential
 // it reports via PotentialEnergy() (central finite difference on the
@@ -173,7 +244,8 @@ bool SelfTest() {
     const bool small = SelfTestForces(40, 6.0, 2.5, 1, "small (brute-force fallback)");
     const bool multicell = SelfTestForces(400, 14.0, 2.5, 2, "multicell (linked-cell)");
     const bool gradient = SelfTestNumericalGradient();
-    return small && multicell && gradient;
+    const bool mixture = SelfTestMixtureForces(400, 14.0, 2.5, 3, "mixture (Kob-Andersen params)");
+    return small && multicell && gradient && mixture;
 }
 
 } // namespace

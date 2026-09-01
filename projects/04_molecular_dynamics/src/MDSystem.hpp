@@ -54,8 +54,29 @@ struct MDParams {
 // this, which this port carries over unchanged).
 class MDSystem {
 public:
-    // boxLength: cubic periodic box side, in sigma.
-    void SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3> vel, double boxLength);
+    // boxLength: cubic periodic box side, in sigma_AA. `species` (0=A, 1=B)
+    // may be shorter than `pos` (padded with 0/species-A) or omitted
+    // entirely -- an empty/short species vector means "everyone is species
+    // A", which combined with the default sigma/epsilon table below (all
+    // 1.0) reproduces the original single-species behavior exactly.
+    void SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3> vel, double boxLength,
+                       std::vector<int> species = {});
+
+    // Per-species-pair sigma/epsilon (species A vs. B); AA is always
+    // (1.0, 1.0) -- the reference units everything else (including
+    // `MDParams::cutoff`) is quoted in, matching the Kob-Andersen
+    // convention of expressing lengths/energies in sigma_AA/epsilon_AA.
+    // Defaults (all 1.0) make every species behave identically, so calling
+    // this is only necessary for an actual mixture.
+    void SetSpeciesLJParams(double sigmaBB, double epsilonBB, double sigmaAB, double epsilonAB);
+
+    const std::vector<int>& Species() const { return m_species; }
+    // Partial RDF over only (speciesA, speciesB) pairs (order doesn't
+    // matter -- AB and BA are the same cross term), normalized by the
+    // actual number of such pairs (not total N). Returns all-zero if
+    // either species has zero members present. Same O(N) linked-cell
+    // approach as ComputeRDF.
+    std::vector<double> ComputePartialRDF(int nBins, double rMax, int speciesA, int speciesB) const;
 
     // Must be called once after SetParticles (and again if `params` changes
     // materially while paused) so the first velocity-Verlet half-step has a
@@ -121,6 +142,12 @@ private:
     void StepNoseHoover(const MDParams& params);      // extended-Lagrangian leapfrog, see .cpp
 
     std::vector<glm::dvec3> m_pos, m_vel, m_accel;
+    std::vector<int> m_species; // 0=A, 1=B; size() == m_pos.size()
+    // m_sigma[i][j]/m_epsilon[i][j]: LJ parameters for a (species i, species
+    // j) pair. Defaults reproduce plain single-species LJ regardless of
+    // m_species' contents. Set via SetSpeciesLJParams.
+    double m_sigma[2][2] = {{1.0, 1.0}, {1.0, 1.0}};
+    double m_epsilon[2][2] = {{1.0, 1.0}, {1.0, 1.0}};
     double m_L = 1.0;
 
     std::vector<std::pair<int, int>> m_neighborPairs; // candidates within cutoff+skin, rebuilt periodically
