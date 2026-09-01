@@ -29,7 +29,10 @@ projects/            One executable per simulation. Numbered by creation order.
   00_hello_triangle/  Sanity-check — spinning triangle + ImGui overlay.
   01_hartree_fock/    Atomic Hartree-Fock-Slater / Kohn-Sham LDA SCF solver.
   02/03_nbody_gravity Direct + Barnes-Hut N-body (3D / 2D-with-FMM).
-  04_molecular_dynamics  3D periodic Lennard-Jones MD.
+  04_molecular_dynamics  3D periodic Lennard-Jones MD -- Nose-Hoover/Berendsen
+                       thermostats, Berendsen NPT barostat. Both models: the
+                       original ImGui + live-chart app, and (preferred) the
+                       Simulation/Deck/headless model -- see its README.
   05_tdse_gpu/        2D time-dependent Schrödinger, split-step Fourier on the
                        GPU (hand-written FFT compute shader). First project on
                        the Simulation/Deck/headless model — see its README.
@@ -44,8 +47,10 @@ projects stay independent while sharing the windowing/render/shader boilerplate.
 
 ### Two ways a project can run
 
-Older projects (`01`–`04`) subclass `fw::Application` directly, with an ImGui
-control panel and live `Chart2D` plots.
+Older projects (`01`–`03`) subclass `fw::Application` directly, with an ImGui
+control panel and live `Chart2D` plots. `04_molecular_dynamics` keeps that
+original app (`MDApp`) alongside a second, deck-driven `fw::Simulation`
+implementation (`MDSim`) added later -- see its README for why both exist.
 
 From `05` on, the preferred model is `fw::Simulation` + an **input deck**:
 

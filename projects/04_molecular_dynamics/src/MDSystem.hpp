@@ -11,7 +11,19 @@ namespace md {
 // and pressure be quoted as the dimensionless rho*, T*, P* used across the
 // LJ phase-diagram literature, with no unit conversion anywhere in the code.
 
-enum class Thermostat { None, Berendsen, VelocityRescale };
+// NoseHoover is a deterministic extended-Lagrangian thermostat that samples
+// the canonical ensemble correctly (Berendsen/VelocityRescale don't -- both
+// suppress KE fluctuations rather than reproducing the true NVT variance).
+// Berendsen still exists for fast, robust equilibration; Nose-Hoover is what
+// production/fluctuation-sensitive runs should use once equilibrated.
+enum class Thermostat { None, Berendsen, VelocityRescale, NoseHoover };
+
+// Isotropic Berendsen pressure coupling: rescales the box (and every
+// particle position with it) toward a target pressure. Weak coupling, not a
+// rigorous NPT ensemble (no fluctuation-dissipation guarantee, same caveat
+// as the Berendsen thermostat) -- good enough to trace out P-V-T state
+// points without hand-picking box sizes.
+enum class Barostat { None, Berendsen };
 
 struct MDParams {
     double cutoff = 2.5;             // LJ force cutoff, in sigma
@@ -23,6 +35,12 @@ struct MDParams {
     double targetT = 1.0;
     double berendsenTau = 1.0;        // Berendsen relaxation time, in time units
     int rescaleEvery = 20;            // VelocityRescale: steps between hard rescales
+    double noseHooverTau = 1.0;       // NoseHoover relaxation time; thermostat "mass" Q = dof*targetT*tau^2
+
+    Barostat barostat = Barostat::None;
+    double targetP = 0.0;
+    double berendsenTauP = 1.0;       // barostat relaxation time, in time units
+    double compressibility = 1.0;     // isothermal compressibility estimate, reduced units (order-1 for an LJ liquid)
 };
 
 // A periodic cubic box of N Lennard-Jones particles integrated with
@@ -60,6 +78,25 @@ public:
     // Virial pressure: P = rho*T + virial / (3*V), virial = sum_pairs r_ij . F_ij.
     double Pressure() const;
 
+    // Analytic mean-field corrections for everything the cutoff throws away
+    // (assumes g(r)=1 beyond `cutoff`, the standard approximation -- see
+    // Allen & Tildesley eq. 2.98/eq. 2.120). These do NOT feed back into the
+    // dynamics (forces stay cutoff-only, so NVE energy conservation checks
+    // must use the raw PotentialEnergy()/Pressure() above, not these) --
+    // they only correct the *reported* thermodynamics for comparison
+    // against literature equations of state, which are quoted for the full
+    // (untruncated) LJ potential.
+    double TailEnergyCorrection(double cutoff) const;
+    double TailPressureCorrection(double cutoff) const;
+
+    // Nose-Hoover friction variable (0 if that thermostat isn't active).
+    double ThermostatXi() const { return m_xi; }
+    // KE + PE + 0.5*Q*xi^2 + dof*targetT*integral(xi dt): the quantity the
+    // Nose-Hoover extended Lagrangian actually conserves (drifts far less
+    // than raw KE+PE, which the thermostat is deliberately pumping/damping).
+    // Reduces to TotalEnergy() when Nose-Hoover isn't active (xi stays 0).
+    double NoseHooverInvariant(const MDParams& params) const;
+
     // Radial distribution function g(r) over nBins bins spanning [0, rMax).
     // O(N) via the same linked-cell approach as the force neighbor list
     // (rMax is typically larger than the force cutoff, so this rebuilds its
@@ -70,11 +107,18 @@ public:
     double BoxLength() const { return m_L; }
     const std::vector<glm::dvec3>& Positions() const { return m_pos; }
     const std::vector<glm::dvec3>& Velocities() const { return m_vel; }
+    // Per-particle acceleration (mass=1 reduced units, so this is also the
+    // force) from the last ComputeForces() call -- exposed for --selftest's
+    // independent-reference cross-check, not used by production code.
+    const std::vector<glm::dvec3>& Accelerations() const { return m_accel; }
 
 private:
     void RebuildNeighborList(double listCutoff);
     void ComputeForces(double cutoff); // fills m_accel, m_potentialEnergy, m_virial
     void ApplyThermostat(const MDParams& params);
+    void ApplyBarostat(const MDParams& params);
+    void StepVelocityVerlet(const MDParams& params); // None / Berendsen / VelocityRescale
+    void StepNoseHoover(const MDParams& params);      // extended-Lagrangian leapfrog, see .cpp
 
     std::vector<glm::dvec3> m_pos, m_vel, m_accel;
     double m_L = 1.0;
@@ -85,6 +129,9 @@ private:
 
     double m_potentialEnergy = 0.0;
     double m_virial = 0.0;
+
+    double m_xi = 0.0;         // Nose-Hoover friction variable
+    double m_xiIntegral = 0.0; // running integral(xi dt), for NoseHooverInvariant
 };
 
 } // namespace md

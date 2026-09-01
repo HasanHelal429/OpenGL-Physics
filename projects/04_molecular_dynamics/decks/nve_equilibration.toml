@@ -1,0 +1,23 @@
+title = "Molecular Dynamics -- NVE energy-conservation check (rho*=0.8442, T*=0.72)"
+
+# No thermostat: the primary validation that velocity-Verlet + the
+# shifted-force LJ cutoff actually conserve energy (see README's
+# "Validation: NVE energy conservation").
+[system]
+target_n = 500
+density = 0.8442
+temperature = 0.72
+seed = 4
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "none"
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 400
+neighbor_rebuild_every = 5

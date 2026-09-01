@@ -1,0 +1,27 @@
+title = "Molecular Dynamics -- Nose-Hoover NVT liquid (rho*=0.8442, T*=0.72)"
+
+# Same state point and hot-start-then-relax setup as decks/liquid.toml, but
+# with the deterministic Nose-Hoover thermostat instead of Berendsen -- see
+# README's "Validation: Nose-Hoover" for the nh_invariant conservation check
+# (much tighter than raw total_energy, which the thermostat is deliberately
+# pumping/damping) and the resulting temperature fluctuation statistics.
+[system]
+target_n = 500
+density = 0.8442
+temperature = 1.44
+seed = 5
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "nose_hoover"
+target_t = 0.72
+tau = 1.0
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 400
+neighbor_rebuild_every = 5

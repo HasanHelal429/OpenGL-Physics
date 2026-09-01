@@ -119,6 +119,8 @@ void MDSystem::SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3>
     m_stepsSinceRescale = 0;
     m_potentialEnergy = 0.0;
     m_virial = 0.0;
+    m_xi = 0.0;
+    m_xiIntegral = 0.0;
 }
 
 void MDSystem::RebuildNeighborList(double listCutoff) {
@@ -215,9 +217,52 @@ void MDSystem::ApplyThermostat(const MDParams& params) {
     }
 }
 
-void MDSystem::Step(const MDParams& params) {
+// Isotropic Berendsen barostat: mu^3 = 1 - (dt/tauP)*compressibility*(P0-P),
+// applied as a uniform rescale of the box and every particle position.
+// Weak-coupling scheme (same caveat as the Berendsen thermostat: it doesn't
+// reproduce the true NPT volume-fluctuation variance) -- adequate for
+// equilibrating to a target pressure, not for fluctuation statistics.
+// mu is clamped per step (0.1 floor on mu^3) purely as a numerical safety
+// rail against a transient pressure spike driving the box to zero/negative
+// volume in one step; it should never bind in a well-behaved run.
+void MDSystem::ApplyBarostat(const MDParams& params) {
+    if (params.barostat != Barostat::Berendsen || m_pos.empty()) return;
+    const double mu3 = 1.0 - (params.dt / params.berendsenTauP) * params.compressibility * (params.targetP - Pressure());
+    const double mu = std::cbrt(std::max(mu3, 0.1));
+    if (mu == 1.0) return;
+    for (glm::dvec3& r : m_pos) r *= mu;
+    m_L *= mu;
+}
+
+double MDSystem::TailEnergyCorrection(double cutoff) const {
     const int n = static_cast<int>(m_pos.size());
-    if (n == 0) return;
+    if (n == 0) return 0.0;
+    const double rho = n / (m_L * m_L * m_L);
+    const double rc = std::min(cutoff, 0.49 * m_L);
+    const double sr3 = std::pow(kSigma / rc, 3);
+    const double sr9 = sr3 * sr3 * sr3;
+    return (8.0 / 3.0) * kPi * n * rho * kEpsilon * kSigma * kSigma * kSigma * (sr9 / 3.0 - sr3);
+}
+
+double MDSystem::TailPressureCorrection(double cutoff) const {
+    const int n = static_cast<int>(m_pos.size());
+    if (n == 0) return 0.0;
+    const double rho = n / (m_L * m_L * m_L);
+    const double rc = std::min(cutoff, 0.49 * m_L);
+    const double sr3 = std::pow(kSigma / rc, 3);
+    const double sr9 = sr3 * sr3 * sr3;
+    return (16.0 / 3.0) * kPi * rho * rho * kEpsilon * kSigma * kSigma * kSigma * (2.0 * sr9 / 3.0 - sr3);
+}
+
+double MDSystem::NoseHooverInvariant(const MDParams& params) const {
+    const int n = static_cast<int>(m_pos.size());
+    const double dof = 3.0 * std::max(n - 1, 0);
+    const double Q = std::max(dof * params.targetT * params.noseHooverTau * params.noseHooverTau, 1e-12);
+    return KineticEnergy() + m_potentialEnergy + 0.5 * Q * m_xi * m_xi + dof * params.targetT * m_xiIntegral;
+}
+
+void MDSystem::StepVelocityVerlet(const MDParams& params) {
+    const int n = static_cast<int>(m_pos.size());
     const double dt = params.dt;
 
     for (int i = 0; i < n; ++i) {
@@ -239,6 +284,67 @@ void MDSystem::Step(const MDParams& params) {
     }
 
     ApplyThermostat(params);
+}
+
+// Nose-Hoover thermostatted velocity-Verlet (single thermostat variable, no
+// chain): the friction term -xi*v is folded directly into the equations of
+// motion instead of a post-hoc rescale, which is what actually samples the
+// canonical ensemble correctly. Half-step splitting (e.g. Frenkel & Smit,
+// "Understanding Molecular Simulation", Sec. 6.1.2):
+//
+//   v(t+dt/2) = v(t) + dt/2*(a(t) - xi(t)*v(t))
+//   x(t+dt)   = x(t) + dt*v(t+dt/2)
+//   xi(t+dt/2)= xi(t) + dt/(2Q)*(2*KE(t+dt/2) - dof*T0)
+//   a(t+dt)   = F(x(t+dt))/m
+//   v(t+dt)   = (v(t+dt/2) + dt/2*a(t+dt)) / (1 + dt/2*xi(t+dt/2))   -- solves the implicit -xi*v(t+dt) term
+//   xi(t+dt)  = xi(t+dt/2) + dt/(2Q)*(2*KE(t+dt) - dof*T0)
+//
+// Q = dof*T0*tau^2 (deck-configurable tau); dof = 3*(N-1), same convention
+// as Temperature(). m_xiIntegral accumulates xi(t+dt/2)*dt for
+// NoseHooverInvariant's conserved-quantity check.
+void MDSystem::StepNoseHoover(const MDParams& params) {
+    const int n = static_cast<int>(m_pos.size());
+    const double dt = params.dt;
+    const double dof = 3.0 * std::max(n - 1, 0);
+    const double Q = std::max(dof * params.targetT * params.noseHooverTau * params.noseHooverTau, 1e-12);
+
+    for (int i = 0; i < n; ++i) {
+        m_vel[static_cast<size_t>(i)] += 0.5 * dt * (m_accel[static_cast<size_t>(i)] - m_xi * m_vel[static_cast<size_t>(i)]);
+    }
+    for (int i = 0; i < n; ++i) {
+        glm::dvec3& r = m_pos[static_cast<size_t>(i)];
+        r += dt * m_vel[static_cast<size_t>(i)];
+        r = WrapPosition(r, m_L);
+    }
+
+    ++m_stepsSinceRebuild;
+    if (m_stepsSinceRebuild >= params.neighborRebuildEvery) {
+        RebuildNeighborList(params.cutoff + params.skin);
+    }
+
+    const double keHalf = KineticEnergy();
+    const double xiHalf = m_xi + (0.5 * dt / Q) * (2.0 * keHalf - dof * params.targetT);
+
+    ComputeForces(std::min(params.cutoff, 0.49 * m_L));
+
+    const double denom = 1.0 + 0.5 * dt * xiHalf;
+    for (int i = 0; i < n; ++i) {
+        m_vel[static_cast<size_t>(i)] = (m_vel[static_cast<size_t>(i)] + 0.5 * dt * m_accel[static_cast<size_t>(i)]) / denom;
+    }
+
+    const double keNew = KineticEnergy();
+    m_xi = xiHalf + (0.5 * dt / Q) * (2.0 * keNew - dof * params.targetT);
+    m_xiIntegral += dt * xiHalf;
+}
+
+void MDSystem::Step(const MDParams& params) {
+    if (m_pos.empty()) return;
+    if (params.thermostat == Thermostat::NoseHoover) {
+        StepNoseHoover(params);
+    } else {
+        StepVelocityVerlet(params);
+    }
+    ApplyBarostat(params);
 }
 
 double MDSystem::KineticEnergy() const {
