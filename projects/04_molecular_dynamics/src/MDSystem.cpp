@@ -63,13 +63,36 @@ std::vector<std::pair<int, int>> BuildCellListPairs(const std::vector<glm::dvec3
         return c;
     };
 
-    std::vector<std::vector<int>> cells(static_cast<size_t>(nc) * static_cast<size_t>(nc) * static_cast<size_t>(nc));
+    // Flat CSR-style binning (counting sort) instead of nc^3 individually
+    // heap-allocated std::vector<int> buckets: for the box sizes/densities
+    // this project actually runs, nc^3 can be a few thousand cells, each of
+    // which used to be its own small allocation rebuilt from scratch every
+    // RebuildNeighborList call (every few steps) -- this replaces all of
+    // that with 3 flat arrays (cache-friendly, allocation-light) computed
+    // via a standard two-pass counting sort: histogram -> exclusive prefix
+    // sum -> scatter.
+    const int nCells = nc * nc * nc;
     std::vector<glm::ivec3> cellOf(static_cast<size_t>(n));
+    std::vector<int> cellStart(static_cast<size_t>(nCells) + 1, 0); // cellStart[c+1] holds cell c's count until the scan below
     for (int i = 0; i < n; ++i) {
         const glm::dvec3 w = WrapPosition(pos[static_cast<size_t>(i)], L);
         const glm::ivec3 c(cellIndex(w.x), cellIndex(w.y), cellIndex(w.z));
         cellOf[static_cast<size_t>(i)] = c;
-        cells[(static_cast<size_t>(c.x) * nc + static_cast<size_t>(c.y)) * nc + static_cast<size_t>(c.z)].push_back(i);
+        const int flat = (c.x * nc + c.y) * nc + c.z;
+        ++cellStart[static_cast<size_t>(flat) + 1];
+    }
+    for (int c = 0; c < nCells; ++c) {
+        cellStart[static_cast<size_t>(c) + 1] += cellStart[static_cast<size_t>(c)];
+    }
+
+    std::vector<int> cellParticles(static_cast<size_t>(n));
+    {
+        std::vector<int> cursor(cellStart.begin(), cellStart.end() - 1); // per-cell insertion point, advances as we scatter
+        for (int i = 0; i < n; ++i) {
+            const glm::ivec3& c = cellOf[static_cast<size_t>(i)];
+            const int flat = (c.x * nc + c.y) * nc + c.z;
+            cellParticles[static_cast<size_t>(cursor[static_cast<size_t>(flat)]++)] = i;
+        }
     }
 
     const double cutoff2 = cutoff * cutoff;
@@ -82,8 +105,11 @@ std::vector<std::pair<int, int>> BuildCellListPairs(const std::vector<glm::dvec3
                     const int nx = (c.x + dx + nc) % nc;
                     const int ny = (c.y + dy + nc) % nc;
                     const int nz = (c.z + dz + nc) % nc;
-                    const std::vector<int>& bucket = cells[(static_cast<size_t>(nx) * nc + static_cast<size_t>(ny)) * nc + static_cast<size_t>(nz)];
-                    for (int j : bucket) {
+                    const int flat = (nx * nc + ny) * nc + nz;
+                    const int begin = cellStart[static_cast<size_t>(flat)];
+                    const int end = cellStart[static_cast<size_t>(flat) + 1];
+                    for (int k = begin; k < end; ++k) {
+                        const int j = cellParticles[static_cast<size_t>(k)];
                         if (j <= i) continue; // dedupe: each unordered pair kept exactly once, from i's own expansion
                         const glm::dvec3 d = MinImage(pos[static_cast<size_t>(i)] - pos[static_cast<size_t>(j)], L);
                         if (glm::dot(d, d) <= cutoff2) pairs.emplace_back(i, j);
@@ -95,16 +121,41 @@ std::vector<std::pair<int, int>> BuildCellListPairs(const std::vector<glm::dvec3
     return pairs;
 }
 
+// (sigma/r)^6 via repeated squaring instead of std::pow(x, 6): pow() handles
+// arbitrary real exponents (effectively exp(6*log(x))), which is far more
+// work than the 4 multiplications an integer power like this actually
+// needs -- a standard, well-known LJ inner-loop optimization, and exact
+// (not approximate) for a positive integer exponent.
+inline double Sr6(double r, double sigma) {
+    const double sr = sigma / r;
+    const double sr2 = sr * sr;
+    return sr2 * sr2 * sr2;
+}
+
 // LJ radial force magnitude F(r) = -dU/dr = 24*epsilon*(2*(sigma/r)^12 - (sigma/r)^6)/r.
 // Positive (repulsive) for r < 2^(1/6)*sigma, negative (attractive) beyond.
 inline double LjForceMagnitude(double r, double epsilon, double sigma) {
-    const double sr6 = std::pow(sigma / r, 6);
+    const double sr6 = Sr6(r, sigma);
     return 24.0 * epsilon * (2.0 * sr6 * sr6 - sr6) / r;
 }
 
 inline double LjPotential(double r, double epsilon, double sigma) {
-    const double sr6 = std::pow(sigma / r, 6);
+    const double sr6 = Sr6(r, sigma);
     return 4.0 * epsilon * (sr6 * sr6 - sr6);
+}
+
+// Force magnitude AND potential together from a SINGLE sr6 evaluation --
+// ComputeForces' inner pair loop needs both every single pair (unlike the
+// Fc/Uc shift precompute below, which calls the two functions above
+// separately but only 4 times total per ComputeForces call, not once per
+// pair), so computing sr6 twice there via the separate functions was real
+// duplicated work in the hottest loop in this codebase.
+inline void LjForceAndPotential(double r, double epsilon, double sigma, double& outForceMag,
+                                 double& outPotential) {
+    const double sr6 = Sr6(r, sigma);
+    const double sr12 = sr6 * sr6;
+    outForceMag = 24.0 * epsilon * (2.0 * sr12 - sr6) / r;
+    outPotential = 4.0 * epsilon * (sr12 - sr6);
 }
 
 } // namespace
@@ -179,8 +230,15 @@ void MDSystem::ComputeForces(double cutoff) {
     }
 
     const int nThreads = std::max(1, omp_get_max_threads());
-    std::vector<std::vector<glm::dvec3>> threadAccel(
-        static_cast<size_t>(nThreads), std::vector<glm::dvec3>(static_cast<size_t>(n), glm::dvec3(0.0)));
+    // Resize only on the (rare) occasions n or nThreads actually changed;
+    // otherwise this is just a zero-fill of already-allocated memory, not a
+    // fresh allocation -- see MDSystem.hpp's comment on m_threadAccel.
+    if (m_threadAccel.size() != static_cast<size_t>(nThreads) ||
+        (nThreads > 0 && m_threadAccel[0].size() != static_cast<size_t>(n))) {
+        m_threadAccel.assign(static_cast<size_t>(nThreads), std::vector<glm::dvec3>(static_cast<size_t>(n)));
+    }
+    for (auto& acc : m_threadAccel) std::fill(acc.begin(), acc.end(), glm::dvec3(0.0));
+    std::vector<std::vector<glm::dvec3>>& threadAccel = m_threadAccel;
 
     double potentialSum = 0.0;
     double virialSum = 0.0;
@@ -204,13 +262,15 @@ void MDSystem::ComputeForces(double cutoff) {
             const double epsilon = m_epsilon[si][sj];
 
             const double r = std::sqrt(r2);
-            const double Fmag = LjForceMagnitude(r, epsilon, sigma) - Fc[si][sj];
+            double forceMag = 0.0, potential = 0.0;
+            LjForceAndPotential(r, epsilon, sigma, forceMag, potential);
+            const double Fmag = forceMag - Fc[si][sj];
             const glm::dvec3 f = (Fmag / r) * rij;
 
             acc[static_cast<size_t>(i)] += f;
             acc[static_cast<size_t>(j)] -= f;
 
-            potentialSum += LjPotential(r, epsilon, sigma) - Uc[si][sj] + (r - cutoff) * Fc[si][sj];
+            potentialSum += potential - Uc[si][sj] + (r - cutoff) * Fc[si][sj];
             virialSum += glm::dot(rij, f);
         }
     }
