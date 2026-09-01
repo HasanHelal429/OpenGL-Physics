@@ -1,0 +1,22 @@
+title = "Molecular Dynamics -- LJ FCC solid (rho*=1.00, T*=0.30)"
+
+[system]
+target_n = 500
+density = 1.00
+temperature = 0.30
+seed = 2
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "berendsen"
+target_t = 0.30
+tau = 1.0
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 400
+neighbor_rebuild_every = 5

@@ -1,0 +1,27 @@
+title = "Molecular Dynamics -- LJ liquid, near the classic triple point (rho*=0.8442, T*=0.72)"
+
+# Starts at T*=1.44 (2x target) so the run itself demonstrates thermostat
+# convergence, not just an already-equilibrated state -- see README's
+# "Validation: thermostat convergence" section. RDF/EOS comparisons against
+# literature use the tail of the run (after convergence), not the whole
+# trajectory.
+[system]
+target_n = 500
+density = 0.8442
+temperature = 1.44
+seed = 1
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "berendsen"
+target_t = 0.72
+tau = 1.0
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 400
+neighbor_rebuild_every = 5
