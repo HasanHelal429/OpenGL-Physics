@@ -22,9 +22,18 @@ void MDSim::Configure(const fw::Deck& deck) {
     const unsigned seed = static_cast<unsigned>(deck.GetInt("system.seed", 42));
 
     const double fracB = deck.GetDouble("system.species_b_fraction", 0.0);
-    m_isMixture = fracB > 0.0;
+    const double slabFraction = deck.GetDouble("system.slab_fraction", 0.0);
+    m_isSlab = slabFraction > 0.0;
+    // Slab mode takes priority if both are (incorrectly) set -- the two
+    // aren't implemented together (a mixture slab would need per-species
+    // vapor-fraction/profile bookkeeping this doesn't do), so mixture is
+    // simply ignored rather than attempting to combine them.
+    m_isMixture = !m_isSlab && fracB > 0.0;
     ScenarioResult ic;
-    if (m_isMixture) {
+    if (m_isSlab) {
+        ic = BuildSlab(targetN, density, temperature, slabFraction, seed);
+        m_slabZ1 = ic.slabZ1;
+    } else if (m_isMixture) {
         ic = BuildFccLatticeBinary(targetN, density, temperature, 1.0 - fracB, seed);
         // Kob-Andersen (Kob & Andersen, Phys. Rev. E 51, 4626, 1995)
         // defaults -- lengths/energies quoted in sigma_AA/epsilon_AA, the
@@ -96,6 +105,9 @@ void MDSim::Configure(const fw::Deck& deck) {
                    "target_t", "lindemann", "rdf_peak"};
     if (m_isMixture) {
         m_diagNames.insert(m_diagNames.end(), {"rdf_peak_aa", "rdf_peak_bb", "rdf_peak_ab", "fraction_b"});
+    }
+    if (m_isSlab) {
+        m_diagNames.push_back("vapor_fraction");
     }
 
     m_system.SetParticles(m_initialPos, m_initialVel, m_initialL, m_initialSpecies);
@@ -231,6 +243,37 @@ void MDSim::Snapshot(fw::OutputWriter& writer) {
         const int nB = static_cast<int>(std::count(m_system.Species().begin(), m_system.Species().end(), 1));
         writer.WriteScalar("fraction_b", static_cast<double>(nB) / std::max(n, 1));
     }
+
+    if (m_isSlab) {
+        // Fraction of particles currently outside where the condensed
+        // phase originally sat -- z is periodic, so "outside [0, m_slabZ1)"
+        // means "in the vacuum band", regardless of which of the slab's two
+        // faces a given particle evaporated from. A simple, robust
+        // evaporation/vapor-fraction proxy; NOT the same as a true vapor
+        // DENSITY (which density_profile below gives directly).
+        int nVapor = 0;
+        for (const glm::dvec3& r : pos) {
+            if (r.z >= m_slabZ1) ++nVapor;
+        }
+        writer.WriteScalar("vapor_fraction", static_cast<double>(nVapor) / std::max(n, 1));
+
+        // Number-density profile along z, binned over the WHOLE box (not
+        // just the original slab region) so the vacuum's filling-in is
+        // directly visible. Written every frame, deliberately -- watching
+        // this evolve IS the point of this diagnostic, unlike the
+        // one-shot species field above.
+        constexpr int kProfileBins = 40;
+        std::vector<float> profile(kProfileBins, 0.0f);
+        const double binWidth = L / kProfileBins;
+        for (const glm::dvec3& r : pos) {
+            int bin = static_cast<int>(r.z / binWidth);
+            bin = std::clamp(bin, 0, kProfileBins - 1);
+            profile[static_cast<size_t>(bin)] += 1.0f;
+        }
+        const double binVolume = L * L * binWidth;
+        for (float& c : profile) c = static_cast<float>(c / binVolume);
+        writer.WriteField("density_profile", profile.data(), fw::NpyDtype::F4, kProfileBins, 1);
+    }
 }
 
 fw::SimInfo MDSim::Info() const {
@@ -238,8 +281,13 @@ fw::SimInfo MDSim::Info() const {
     info.title = m_title;
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = m_isMixture ? std::vector<std::string>{"pos", "vel", "species"}
-                                    : std::vector<std::string>{"pos", "vel"};
+    if (m_isMixture) {
+        info.frameFields = {"pos", "vel", "species"};
+    } else if (m_isSlab) {
+        info.frameFields = {"pos", "vel", "density_profile"};
+    } else {
+        info.frameFields = {"pos", "vel"};
+    }
     info.diagnostics = m_diagNames;
     return info;
 }

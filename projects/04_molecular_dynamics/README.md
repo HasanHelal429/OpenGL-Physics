@@ -146,6 +146,29 @@ projects) -- it's cheap, deterministic, and already seeded; there's no
 sampling complexity here that would benefit from being inspectable/reusable
 outside the binary.
 
+**Slab-in-vacuum coexistence** (`system.slab_fraction`,
+`Scenarios::BuildSlab`): every scenario above is a single HOMOGENEOUS phase
+filling the whole box -- for two phases coexisting *simultaneously* with a
+real interface, rather than relying on spontaneous nucleation from a
+homogeneous system (a separate parameter-sweep study of this project found
+that to be unreliable within accessible run lengths), particles are placed
+only in a sub-region of the box (a condensed slab occupying `slab_fraction`
+of the box's z-extent, spanning x/y fully), leaving the rest of z as
+genuine vacuum -- no particles there at all, not just a dilute gas. The box
+stays an ordinary cubic periodic box (no new geometry): periodicity
+along z gives the slab two free surfaces for free, the standard "slab
+method" for studying condensed-phase/vapor interfaces. Thermal particles
+evaporate off the slab's surfaces into the vacuum over time, and paired with
+`[ramp]` this shows a live sublimation/evaporation transition -- see
+Validation. **The barostat should stay off for this mode**: isotropic
+pressure coupling would rescale the whole box (vacuum included) based on
+the box-averaged virial, which has no meaningful relationship to the slab's
+internal pressure or a vapor pressure. Two new diagnostics track it:
+`vapor_fraction` (fraction of particles currently outside where the
+condensed phase originally sat -- a simple evaporation proxy) and
+`density_profile` (a full `rho(z)` field, written every frame since
+watching the interface move IS the point).
+
 ## Deck format
 
 ```toml
@@ -217,6 +240,24 @@ For a mixture run, output also includes a static `species` field
 extra diagnostics: `rdf_peak_aa`, `rdf_peak_bb`, `rdf_peak_ab`,
 `fraction_b`.
 
+`system.slab_fraction` (default `0.0` -- off; mutually exclusive with
+`system.species_b_fraction`, and takes priority if both are set):
+
+```toml
+[system]
+slab_fraction = 0.35   # fraction of the box's z-extent the condensed slab occupies; rest is vacuum
+```
+
+For a slab run, output includes a `density_profile` field (`(40,1)`
+float32, written EVERY frame -- unlike `species` above, this is meant to be
+watched changing over time) and a `vapor_fraction` diagnostic. `rdf_peak`
+is still computed but is **not directly comparable to a homogeneous run's**:
+its normalization assumes a uniform bulk density across the whole box
+volume, which is wrong by construction for a slab (real density is
+concentrated in a fraction of the box) -- treat it as a rough same-run,
+frame-to-frame indicator only, not an absolute number to compare across
+scenarios.
+
 ## Build & run
 
 ```sh
@@ -248,6 +289,8 @@ python tools/eos_check.py out/liquid out/npt_liquid   # state-point table + NVT/
 python tools/plot_melting.py out/melting_ramp     # lindemann/rdf_peak vs target_t, heating vs cooling
 python tools/plot_partial_rdf.py out/glass_kob_andersen   # g_AA/g_BB/g_AB for a binary mixture run
 python tools/make_movie.py out/melting_ramp --stride 4    # (x,y) projection movie, speed- or species-colored
+python tools/make_movie.py out/slab_sublimation --projection xz --stride 4   # slab: xy hides the interface, use xz/yz
+python tools/plot_density_profile.py out/slab_sublimation   # rho(z) at a few snapshots -- the interface itself
 ```
 
 ## Validation
@@ -494,6 +537,48 @@ for) needs much longer equilibration than this demo run uses -- `T*=0.80`
 here is a moderate, clearly-liquid point chosen so the structural signature
 above is visible without an impractically long run.
 
+### Slab-in-vacuum coexistence (`decks/slab_sublimation.toml`, rho\*=1.00 slab, `slab_fraction=0.35`)
+
+Starts solid (`T*=0.30`) and ramps to `T*=0.70` over 40 time units, holding
+there for 40 more. **First attempt targeted `T*=2.5`** (chosen without
+checking it against anything) and produced a completely FLAT density
+profile within the first few time units -- no dense region left at all,
+just a uniform fluid filling the whole box. The reason: `T*=2.5` is well
+above the LJ critical temperature (`Tc*=1.32`, Thol et al. 2016, already
+cited elsewhere in this README) -- there is no liquid/vapor distinction to
+speak of up there, so of course it dispersed into a uniform supercritical
+fluid rather than showing a stable interface. Re-targeting to `T*=0.70`
+(comfortably below `Tc*`) fixed this:
+
+```
+frame 0    (t= 0.00): vapor_fraction=0.0000  peak_density=2.222  (pristine lattice)
+frame 200  (t=20.00): vapor_fraction=0.1574  peak_density=1.948
+frame 400  (t=40.00): vapor_fraction=0.2767  peak_density=0.796
+frame 799  (t=79.90): vapor_fraction=0.3436  peak_density=0.768
+```
+
+![Density profile at four snapshots](out/slab_sublimation/density_profile.png)
+
+The `t=40` and `t=79.9` profiles (peak density `0.80` vs `0.77`,
+`vapor_fraction` `0.277` vs `0.344`) are close enough to call this a real
+**steady-state coexistence**, not a system still dispersing further: a
+dense region (`rho~0.7-0.8`) smoothly falling off through a genuine
+interface to near-zero (`rho<0.05`) in the middle of the box, then rising
+again near the far edge (the slab's other, periodic-image face) -- textbook
+liquid-vapor interface shape, not a sharp step or a flat line. Watching
+`tools/make_movie.py --projection xz`'s output confirms this directly: a
+visibly denser, disordered region at one end of the box with a sparse,
+scattered vapor thinning out toward the other end.
+
+**Known limitation**: `vapor_fraction`'s plateau value on its own doesn't
+distinguish "genuine phase separation" from "uniform gas filling the whole
+box" -- at `T*=2.5` it ALSO plateaued (around `0.65-0.68`, close to the
+vacuum region's `1-slab_fraction=0.65` volume fraction) despite there being
+no remaining structure at all. `density_profile` is what actually
+distinguishes the two cases; `vapor_fraction` alone is not sufficient
+evidence of coexistence by itself, only a convenient scalar summary once
+coexistence is already confirmed some other way.
+
 ## Performance
 
 Three CPU optimizations to `MDSystem::ComputeForces`/`BuildCellListPairs`,
@@ -544,6 +629,13 @@ physical moved.
   `rdf_peak` covers the two-way case, but a proper bond-orientational order
   parameter (Steinhardt Q6, translation- *and* permutation-invariant) would
   be a more rigorous crystallinity measure than a single RDF-peak height.
+- **Slab mode's `rdf_peak` is not comparable to a homogeneous run's** (wrong
+  normalization for an inhomogeneous density -- see Deck format above), and
+  it isn't combinable with the binary mixture (slab mode simply takes
+  priority if both are set, see `MDSim::Configure`). `vapor_fraction` alone
+  doesn't distinguish real coexistence from uniform dispersal above the
+  critical temperature -- see Validation above for exactly that failure
+  mode and how `density_profile` catches it.
 
 ## Progress
 
@@ -582,3 +674,12 @@ physical moved.
       `LjForceAndPotential` (no more `std::pow`, no duplicate `(sigma/r)^6`),
       a persistent `m_threadAccel` buffer, and a flat CSR cell-list --
       26%/20% faster at N=2000/8000, `--selftest` unchanged throughout.
+- [x] Slab-in-vacuum phase coexistence (`Scenarios::BuildSlab`,
+      `system.slab_fraction`, `density_profile`/`vapor_fraction`
+      diagnostics, `make_movie.py --projection`). A real solid slab heated
+      through sublimation into a stable steady-state liquid-vapor
+      coexistence with a genuine interface (`decks/slab_sublimation.toml`)
+      -- caught and documented a real mistake along the way (an initial
+      target temperature above the LJ critical point gave a uniform
+      supercritical fluid instead of coexistence, not a bug in the feature
+      itself) -- see Validation above.
