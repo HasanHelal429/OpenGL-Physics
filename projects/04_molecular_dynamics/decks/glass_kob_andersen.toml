@@ -1,0 +1,39 @@
+title = "Molecular Dynamics -- Kob-Andersen 80:20 binary glass former (rho*=1.2, T*=0.80)"
+
+# Kob & Andersen, Phys. Rev. E 51, 4626 (1995): the canonical non-additive
+# binary LJ mixture that resists crystallization -- a real glass former,
+# unlike the single-species deck's, which readily forms an FCC crystal.
+# [mixture] defaults below ARE the Kob-Andersen parameters (sigma/epsilon in
+# sigma_AA/epsilon_AA units); density rho*=1.2 also matches the original
+# paper. T*=0.80 here is a moderate, clearly-liquid state point chosen so
+# RDF/structure are observable within a short demo run -- the deeply
+# supercooled regime the model is famous for (T* down toward the ~0.4-0.5
+# mode-coupling range) needs much longer equilibration than is practical
+# here; see README's Validation section for what this run actually showed.
+[system]
+target_n = 500
+density = 1.2
+temperature = 0.80
+species_b_fraction = 0.20   # 80:20 A:B, the KA composition
+seed = 11
+
+[mixture]
+sigma_bb = 0.88
+eps_bb = 0.50
+sigma_ab = 0.80
+eps_ab = 1.50
+
+[potential]
+cutoff = 2.5
+skin = 0.3
+
+[thermostat]
+type = "berendsen"
+target_t = 0.80
+tau = 1.0
+
+[time]
+dt = 0.002
+substeps_per_frame = 25
+frames = 400
+neighbor_rebuild_every = 5

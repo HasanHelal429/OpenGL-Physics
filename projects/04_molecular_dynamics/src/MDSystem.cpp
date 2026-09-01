@@ -109,10 +109,13 @@ inline double LjPotential(double r, double epsilon, double sigma) {
 
 } // namespace
 
-void MDSystem::SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3> vel, double boxLength) {
+void MDSystem::SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3> vel, double boxLength,
+                             std::vector<int> species) {
     m_pos = std::move(pos);
     m_vel = std::move(vel);
     m_L = boxLength;
+    m_species = std::move(species);
+    m_species.resize(m_pos.size(), 0); // short/empty -> pad with species A
     m_accel.assign(m_pos.size(), glm::dvec3(0.0));
     m_neighborPairs.clear();
     m_stepsSinceRebuild = 0;
@@ -121,6 +124,14 @@ void MDSystem::SetParticles(std::vector<glm::dvec3> pos, std::vector<glm::dvec3>
     m_virial = 0.0;
     m_xi = 0.0;
     m_xiIntegral = 0.0;
+}
+
+void MDSystem::SetSpeciesLJParams(double sigmaBB, double epsilonBB, double sigmaAB, double epsilonAB) {
+    m_sigma[1][1] = sigmaBB;
+    m_epsilon[1][1] = epsilonBB;
+    m_sigma[0][1] = m_sigma[1][0] = sigmaAB;
+    m_epsilon[0][1] = m_epsilon[1][0] = epsilonAB;
+    // m_sigma[0][0]/m_epsilon[0][0] stay (1.0, 1.0) -- the reference units.
 }
 
 void MDSystem::RebuildNeighborList(double listCutoff) {
@@ -150,8 +161,22 @@ void MDSystem::ComputeForces(double cutoff) {
     // removes energy every time a pair crosses the cutoff), which is why
     // this port keeps the same shift the Python vdw_gas.py prototype
     // needed (see its lj_force docstring for the measured drift numbers).
-    const double Fc = LjForceMagnitude(cutoff, kEpsilon, kSigma);
-    const double Uc = LjPotential(cutoff, kEpsilon, kSigma);
+    //
+    // One global cutoff distance (in sigma_AA units) for every species
+    // pair, rather than the original Kob-Andersen convention of a separate
+    // 2.5*sigma_alphabeta cutoff per pair type -- simpler (the linked-cell
+    // neighbor search stays completely species-agnostic), and the
+    // difference is only a modest change in how much attractive tail is
+    // included for the smaller-sigma B-containing pairs, not a qualitative
+    // behavior change. Fc/Uc precomputed once per (species i, species j)
+    // pair here, outside the parallel loop.
+    double Fc[2][2], Uc[2][2];
+    for (int si = 0; si < 2; ++si) {
+        for (int sj = 0; sj < 2; ++sj) {
+            Fc[si][sj] = LjForceMagnitude(cutoff, m_epsilon[si][sj], m_sigma[si][sj]);
+            Uc[si][sj] = LjPotential(cutoff, m_epsilon[si][sj], m_sigma[si][sj]);
+        }
+    }
 
     const int nThreads = std::max(1, omp_get_max_threads());
     std::vector<std::vector<glm::dvec3>> threadAccel(
@@ -173,14 +198,19 @@ void MDSystem::ComputeForces(double cutoff) {
             const double r2 = glm::dot(rij, rij);
             if (r2 > cutoff2) continue; // skin candidate that's outside the real cutoff this step
 
+            const int si = m_species[static_cast<size_t>(i)];
+            const int sj = m_species[static_cast<size_t>(j)];
+            const double sigma = m_sigma[si][sj];
+            const double epsilon = m_epsilon[si][sj];
+
             const double r = std::sqrt(r2);
-            const double Fmag = LjForceMagnitude(r, kEpsilon, kSigma) - Fc;
+            const double Fmag = LjForceMagnitude(r, epsilon, sigma) - Fc[si][sj];
             const glm::dvec3 f = (Fmag / r) * rij;
 
             acc[static_cast<size_t>(i)] += f;
             acc[static_cast<size_t>(j)] -= f;
 
-            potentialSum += LjPotential(r, kEpsilon, kSigma) - Uc + (r - cutoff) * Fc;
+            potentialSum += LjPotential(r, epsilon, sigma) - Uc[si][sj] + (r - cutoff) * Fc[si][sj];
             virialSum += glm::dot(rij, f);
         }
     }
@@ -234,6 +264,12 @@ void MDSystem::ApplyBarostat(const MDParams& params) {
     m_L *= mu;
 }
 
+// Uses the species-A (sigma=epsilon=1) reference parameters regardless of
+// mixture composition -- a real simplification for a binary system (the
+// correct mean-field tail is a composition-weighted sum over all three
+// pair types), left as-is since this correction is reporting-only and
+// mixtures in this project are run dense enough (rho*=1.2) that the tail
+// beyond the cutoff is a small correction either way.
 double MDSystem::TailEnergyCorrection(double cutoff) const {
     const int n = static_cast<int>(m_pos.size());
     if (n == 0) return 0.0;
@@ -389,6 +425,50 @@ std::vector<double> MDSystem::ComputeRDF(int nBins, double rMax) const {
 
     const double V = m_L * m_L * m_L;
     const double totalPairs = 0.5 * n * (n - 1);
+    for (int b = 0; b < nBins; ++b) {
+        const double rLo = b * dr;
+        const double rHi = rLo + dr;
+        const double shellVol = (4.0 / 3.0) * kPi * (rHi * rHi * rHi - rLo * rLo * rLo);
+        const double expected = totalPairs * (shellVol / V);
+        g[static_cast<size_t>(b)] = (expected > 1e-12) ? hist[static_cast<size_t>(b)] / expected : 0.0;
+    }
+    return g;
+}
+
+std::vector<double> MDSystem::ComputePartialRDF(int nBins, double rMax, int speciesA, int speciesB) const {
+    std::vector<double> g(static_cast<size_t>(std::max(nBins, 0)), 0.0);
+    const int n = static_cast<int>(m_pos.size());
+    if (n < 2 || nBins <= 0 || rMax <= 0.0) return g;
+
+    int nA = 0, nB = 0;
+    for (int s : m_species) {
+        if (s == speciesA) ++nA;
+        if (s == speciesB) ++nB;
+    }
+    if (nA == 0 || nB == 0) return g; // e.g. speciesB absent in a single-species run
+
+    // Same-species: 0.5*nA*(nA-1) distinct unordered pairs (standard g(r)
+    // convention). Cross-species: nA*nB -- every A-B pair is distinct (no /2,
+    // A and B are disjoint sets, so there's no double-counting to remove).
+    const double totalPairs = (speciesA == speciesB) ? 0.5 * nA * (nA - 1) : static_cast<double>(nA) * nB;
+
+    rMax = std::min(rMax, 0.49 * m_L);
+    const std::vector<std::pair<int, int>> pairs = BuildCellListPairs(m_pos, m_L, rMax);
+
+    std::vector<double> hist(static_cast<size_t>(nBins), 0.0);
+    const double dr = rMax / nBins;
+    for (const std::pair<int, int>& pr : pairs) {
+        const int si = m_species[static_cast<size_t>(pr.first)];
+        const int sj = m_species[static_cast<size_t>(pr.second)];
+        const bool matches = (si == speciesA && sj == speciesB) || (si == speciesB && sj == speciesA);
+        if (!matches) continue;
+        const glm::dvec3 d = MinImage(m_pos[static_cast<size_t>(pr.first)] - m_pos[static_cast<size_t>(pr.second)], m_L);
+        const double r = std::sqrt(glm::dot(d, d));
+        const int bin = static_cast<int>(r / dr);
+        if (bin >= 0 && bin < nBins) hist[static_cast<size_t>(bin)] += 1.0;
+    }
+
+    const double V = m_L * m_L * m_L;
     for (int b = 0; b < nBins; ++b) {
         const double rLo = b * dr;
         const double rHi = rLo + dr;
