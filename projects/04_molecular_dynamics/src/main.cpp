@@ -1,12 +1,15 @@
 #include "MDApp.hpp"
 #include "MDSim.hpp"
 #include "MDSystem.hpp"
+#include "kernels.hpp"
 
+#include "framework/ComputeShader.hpp"
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
 #include "framework/SimApp.hpp"
 
+#include <glad/glad.h>
 #include <glm/glm.hpp>
 
 #include <algorithm>
@@ -197,6 +200,119 @@ bool SelfTestMixtureForces(int n, double L, double cutoff, unsigned seed, const 
     return ok;
 }
 
+// Cross-checks kernels.hpp's GPU BuildGrid+Forces against MDSystem's own
+// (already independently-validated, see SelfTestForces above) CPU
+// implementation -- same physics, two completely separate code paths (a
+// periodic dense-grid GPU compute shader vs. the CPU's linked-cell
+// std::vector list), same role as 06/07's GPU-vs-CPU selftest cases.
+// Needs a current GL context (caller's responsibility, see main()).
+bool SelfTestGpuForces(int n, double L, double cutoff, unsigned seed, const char* label) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> u(0.0, L);
+    std::vector<glm::dvec3> posD(static_cast<size_t>(n));
+    for (glm::dvec3& p : posD) p = glm::dvec3(u(rng), u(rng), u(rng));
+    const std::vector<glm::dvec3> velD(static_cast<size_t>(n), glm::dvec3(0.0));
+
+    md::MDSystem sys;
+    md::MDParams params;
+    params.cutoff = cutoff;
+    params.skin = 0.3;
+    sys.SetParticles(posD, velD, L);
+    sys.PrimeForces(params); // CPU reference: MDSystem's own force evaluation
+
+    const int nc = static_cast<int>(std::floor(L / cutoff));
+    if (nc < 3) {
+        std::printf("selftest (%s): SKIP (uNc=%d < 3, kernels.hpp needs the real-grid regime)\n", label, nc);
+        return true;
+    }
+
+    std::vector<glm::vec4> posF(static_cast<size_t>(n));
+    const std::vector<glm::dvec3>& cpuPos = sys.Positions(); // already in [0,L), generated that way above
+    for (int i = 0; i < n; ++i) posF[static_cast<size_t>(i)] = glm::vec4(glm::vec3(cpuPos[static_cast<size_t>(i)]), 0.0f);
+
+    fw::ComputeShader buildGrid = fw::ComputeShader::FromSource(md::kernels::BuildGrid());
+    fw::ComputeShader forces = fw::ComputeShader::FromSource(md::kernels::Forces());
+
+    GLuint bufPos = 0, bufAccelEnergy = 0, bufCellHead = 0, bufNextIndex = 0;
+    glCreateBuffers(1, &bufPos);
+    glCreateBuffers(1, &bufAccelEnergy);
+    glCreateBuffers(1, &bufCellHead);
+    glCreateBuffers(1, &bufNextIndex);
+    glNamedBufferData(bufPos, n * sizeof(glm::vec4), posF.data(), GL_STATIC_DRAW);
+    glNamedBufferData(bufAccelEnergy, n * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    const int nCells = nc * nc * nc;
+    glNamedBufferData(bufCellHead, static_cast<GLsizeiptr>(nCells) * sizeof(unsigned int), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(bufNextIndex, n * sizeof(unsigned int), nullptr, GL_DYNAMIC_DRAW);
+    const unsigned int sentinel = 0xFFFFFFFFu;
+    glClearNamedBufferData(bufCellHead, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, &sentinel);
+
+    // cellSize MUST be L/nc (not `cutoff` directly) so the uNc cells tile
+    // the box exactly with no remainder -- otherwise cellOf() can compute
+    // an out-of-[0,uNc) index for a particle near the far edge, corrupting
+    // the grid. Matches MDSystem.cpp's BuildCellListPairs exactly (its
+    // cellSize is likewise L/nc, not the raw cutoff).
+    const float cellSize = static_cast<float>(L / nc);
+    const GLuint groups = static_cast<GLuint>((n + md::kernels::kWorkgroupSize - 1) / md::kernels::kWorkgroupSize);
+
+    buildGrid.Use();
+    buildGrid.SetInt("uN", n);
+    buildGrid.SetInt("uNc", nc);
+    buildGrid.SetFloat("uCellSize", cellSize);
+    buildGrid.SetFloat("uL", static_cast<float>(L));
+    fw::ComputeShader::BindBuffer(0, bufPos);
+    fw::ComputeShader::BindBuffer(6, bufCellHead);
+    fw::ComputeShader::BindBuffer(7, bufNextIndex);
+    buildGrid.Dispatch(groups);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    const double rc = std::min(cutoff, 0.49 * L);
+    const float Fc = static_cast<float>(RefLjForceMag(rc, 1.0, 1.0));
+    const float Uc = static_cast<float>(RefLjPotential(rc, 1.0, 1.0));
+
+    forces.Use();
+    forces.SetInt("uN", n);
+    forces.SetInt("uNc", nc);
+    forces.SetFloat("uCellSize", cellSize);
+    forces.SetFloat("uL", static_cast<float>(L));
+    forces.SetFloat("uCutoff", static_cast<float>(rc));
+    forces.SetFloat("uSigma", 1.0f);
+    forces.SetFloat("uEpsilon", 1.0f);
+    forces.SetFloat("uFc", Fc);
+    forces.SetFloat("uUc", Uc);
+    fw::ComputeShader::BindBuffer(0, bufPos);
+    fw::ComputeShader::BindBuffer(1, bufAccelEnergy);
+    fw::ComputeShader::BindBuffer(6, bufCellHead);
+    fw::ComputeShader::BindBuffer(7, bufNextIndex);
+    forces.Dispatch(groups);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+
+    std::vector<glm::vec4> gpuOut(static_cast<size_t>(n));
+    glGetNamedBufferSubData(bufAccelEnergy, 0, n * sizeof(glm::vec4), gpuOut.data());
+    GLuint bufs[4] = {bufPos, bufAccelEnergy, bufCellHead, bufNextIndex};
+    glDeleteBuffers(4, bufs);
+
+    double gpuEnergy = 0.0;
+    for (const glm::vec4& v : gpuOut) gpuEnergy += v.w;
+
+    double accelErr = 0.0, refNorm = 1e-12;
+    const std::vector<glm::dvec3>& cpuAccel = sys.Accelerations();
+    for (int i = 0; i < n; ++i) {
+        const glm::dvec3 gpuAccel(gpuOut[static_cast<size_t>(i)]);
+        accelErr = std::max(accelErr, glm::length(gpuAccel - cpuAccel[static_cast<size_t>(i)]));
+        refNorm = std::max(refNorm, glm::length(cpuAccel[static_cast<size_t>(i)]));
+    }
+    const double relAccelErr = accelErr / refNorm;
+    const double relEnergyErr = std::abs(gpuEnergy - sys.PotentialEnergy()) / std::max(std::abs(sys.PotentialEnergy()), 1e-12);
+
+    std::printf("selftest (%s): max relative error  accel=%.3e  energy=%.3e\n", label, relAccelErr, relEnergyErr);
+    // Looser tolerance than the CPU-vs-CPU cases: this compares float32 GPU
+    // arithmetic against MDSystem's double-precision CPU path, so the floor
+    // is float32 precision (~1e-6 relative), not machine-double precision.
+    const bool ok = relAccelErr < 1e-4 && relEnergyErr < 1e-4;
+    std::printf("selftest (%s): %s\n", label, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 // Two particles, one pair, no periodic wrap in play: checks that
 // MDSystem's analytic force is actually the gradient of the SAME potential
 // it reports via PotentialEnergy() (central finite difference on the
@@ -245,7 +361,8 @@ bool SelfTest() {
     const bool multicell = SelfTestForces(400, 14.0, 2.5, 2, "multicell (linked-cell)");
     const bool gradient = SelfTestNumericalGradient();
     const bool mixture = SelfTestMixtureForces(400, 14.0, 2.5, 3, "mixture (Kob-Andersen params)");
-    return small && multicell && gradient && mixture;
+    const bool gpu = SelfTestGpuForces(400, 14.0, 2.5, 4, "gpu (kernels.hpp vs. CPU MDSystem)");
+    return small && multicell && gradient && mixture && gpu;
 }
 
 } // namespace
@@ -261,6 +378,7 @@ int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
 
     if (a.selftest) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6); // needed for the GPU cross-check case
         return SelfTest() ? 0 : 1;
     }
 
