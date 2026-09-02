@@ -107,7 +107,13 @@ selects the obstacle-flow sim); see "Flow past an obstacle" below:
     --deck projects/08_compressible_fluid/decks/cylinder_re100.toml \
     --out projects/08_compressible_fluid/out/cylinder_re100
 python projects/08_compressible_fluid/tools/plot_strouhal.py projects/08_compressible_fluid/out/cylinder_re100
+python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/cylinder_re100
 ```
+
+`tools/make_movie.py` works for any 2D run (`--2d`/`--channel`/
+`--taylor-green`/`--cylinder`), rendering the vorticity field frame-by-frame
+(drawing the obstacle as a solid disk when the deck has one) — the vortex
+street is far more legible as a movie than any single static frame.
 
 `--selftest` (no deck needed) runs four fast, deck-independent checks:
 HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
@@ -306,3 +312,4 @@ natural follow-up to close this gap, not attempted here.
 | `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |
 | `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`; exposes `measure_decay_rate()` for `Studies/compressible_fluid`. |
 | `tools/plot_strouhal.py` | FFTs the downstream velocity probe, measures the shedding Strouhal number vs. Roshko's correlation. |
+| `tools/make_movie.py` | Vorticity-field movie for any 2D run (obstacle drawn as a disk when present). |
