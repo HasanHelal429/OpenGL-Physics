@@ -12,6 +12,7 @@ Prim2D ToPrim2D(const Cons2D& c, double gamma) {
     p.v = c.momY / c.rho;
     const double kinetic = 0.5 * (c.momX * c.momX + c.momY * c.momY) / c.rho;
     p.p = (gamma - 1.0) * (c.energy - kinetic);
+    p.tracer = c.rhoTracer / c.rho;
     return p;
 }
 
@@ -21,6 +22,7 @@ Cons2D ToCons2D(const Prim2D& p, double gamma) {
     c.momX = p.rho * p.u;
     c.momY = p.rho * p.v;
     c.energy = p.p / (gamma - 1.0) + 0.5 * p.rho * (p.u * p.u + p.v * p.v);
+    c.rhoTracer = p.rho * p.tracer;
     return c;
 }
 
@@ -31,6 +33,7 @@ Cons2D FluxX2D(const Prim2D& p, double gamma) {
     f.momX = c.momX * p.u + p.p;
     f.momY = c.momY * p.u;
     f.energy = p.u * (c.energy + p.p);
+    f.rhoTracer = c.rhoTracer * p.u; // pure advection -- no pressure term, the tracer exerts no force
     return f;
 }
 
@@ -41,6 +44,7 @@ Cons2D FluxY2D(const Prim2D& p, double gamma) {
     f.momX = c.momX * p.v;
     f.momY = c.momY * p.v + p.p;
     f.energy = p.v * (c.energy + p.p);
+    f.rhoTracer = c.rhoTracer * p.v;
     return f;
 }
 
@@ -66,11 +70,13 @@ Cons2D HllcFluxX(const Prim2D& left, const Prim2D& right, double gamma) {
         uStar.momX = coef * sStar;
         uStar.momY = coef * left.v; // transverse momentum: carried through unchanged (Toro sec. 10.4)
         uStar.energy = coef * (uL.energy / left.rho + (sStar - left.u) * (sStar + left.p / (left.rho * (sL - left.u))));
+        uStar.rhoTracer = coef * left.tracer; // tracer: equally passive, same treatment
         Cons2D f;
         f.rho = fL.rho + sL * (uStar.rho - uL.rho);
         f.momX = fL.momX + sL * (uStar.momX - uL.momX);
         f.momY = fL.momY + sL * (uStar.momY - uL.momY);
         f.energy = fL.energy + sL * (uStar.energy - uL.energy);
+        f.rhoTracer = fL.rhoTracer + sL * (uStar.rhoTracer - uL.rhoTracer);
         return f;
     }
     const double coef = right.rho * (sR - right.u) / (sR - sStar);
@@ -79,11 +85,13 @@ Cons2D HllcFluxX(const Prim2D& left, const Prim2D& right, double gamma) {
     uStar.momX = coef * sStar;
     uStar.momY = coef * right.v;
     uStar.energy = coef * (uR.energy / right.rho + (sStar - right.u) * (sStar + right.p / (right.rho * (sR - right.u))));
+    uStar.rhoTracer = coef * right.tracer;
     Cons2D f;
     f.rho = fR.rho + sR * (uStar.rho - uR.rho);
     f.momX = fR.momX + sR * (uStar.momX - uR.momX);
     f.momY = fR.momY + sR * (uStar.momY - uR.momY);
     f.energy = fR.energy + sR * (uStar.energy - uR.energy);
+    f.rhoTracer = fR.rhoTracer + sR * (uStar.rhoTracer - uR.rhoTracer);
     return f;
 }
 
@@ -109,11 +117,13 @@ Cons2D HllcFluxY(const Prim2D& left, const Prim2D& right, double gamma) {
         uStar.momY = coef * sStar;
         uStar.momX = coef * left.u; // transverse momentum
         uStar.energy = coef * (uL.energy / left.rho + (sStar - left.v) * (sStar + left.p / (left.rho * (sL - left.v))));
+        uStar.rhoTracer = coef * left.tracer;
         Cons2D f;
         f.rho = fL.rho + sL * (uStar.rho - uL.rho);
         f.momX = fL.momX + sL * (uStar.momX - uL.momX);
         f.momY = fL.momY + sL * (uStar.momY - uL.momY);
         f.energy = fL.energy + sL * (uStar.energy - uL.energy);
+        f.rhoTracer = fL.rhoTracer + sL * (uStar.rhoTracer - uL.rhoTracer);
         return f;
     }
     const double coef = right.rho * (sR - right.v) / (sR - sStar);
@@ -122,11 +132,13 @@ Cons2D HllcFluxY(const Prim2D& left, const Prim2D& right, double gamma) {
     uStar.momY = coef * sStar;
     uStar.momX = coef * right.u;
     uStar.energy = coef * (uR.energy / right.rho + (sStar - right.v) * (sStar + right.p / (right.rho * (sR - right.v))));
+    uStar.rhoTracer = coef * right.tracer;
     Cons2D f;
     f.rho = fR.rho + sR * (uStar.rho - uR.rho);
     f.momX = fR.momX + sR * (uStar.momX - uR.momX);
     f.momY = fR.momY + sR * (uStar.momY - uR.momY);
     f.energy = fR.energy + sR * (uStar.energy - uR.energy);
+    f.rhoTracer = fR.rhoTracer + sR * (uStar.rhoTracer - uR.rhoTracer);
     return f;
 }
 
@@ -234,8 +246,11 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
         const double dU = Minmod(p0.u - pm.u, pp.u - p0.u);
         const double dV = Minmod(p0.v - pm.v, pp.v - p0.v);
         const double dP = Minmod(p0.p - pm.p, pp.p - p0.p);
-        faceL[static_cast<size_t>(i)] = Prim2D{p0.rho - 0.5 * dRho, p0.u - 0.5 * dU, p0.v - 0.5 * dV, p0.p - 0.5 * dP};
-        faceR[static_cast<size_t>(i)] = Prim2D{p0.rho + 0.5 * dRho, p0.u + 0.5 * dU, p0.v + 0.5 * dV, p0.p + 0.5 * dP};
+        const double dTracer = Minmod(p0.tracer - pm.tracer, pp.tracer - p0.tracer);
+        faceL[static_cast<size_t>(i)] = Prim2D{p0.rho - 0.5 * dRho, p0.u - 0.5 * dU, p0.v - 0.5 * dV,
+                                                p0.p - 0.5 * dP, p0.tracer - 0.5 * dTracer};
+        faceR[static_cast<size_t>(i)] = Prim2D{p0.rho + 0.5 * dRho, p0.u + 0.5 * dU, p0.v + 0.5 * dV,
+                                                p0.p + 0.5 * dP, p0.tracer + 0.5 * dTracer};
     }
 
     std::vector<Cons2D> dudt(static_cast<size_t>(n));
@@ -248,6 +263,7 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
         d.momX = -(fluxNext.momX - fluxPrev.momX) / dx;
         d.momY = -(fluxNext.momY - fluxPrev.momY) / dx;
         d.energy = -(fluxNext.energy - fluxPrev.energy) / dx;
+        d.rhoTracer = -(fluxNext.rhoTracer - fluxPrev.rhoTracer) / dx;
         fluxPrev = fluxNext;
     }
     return dudt;
@@ -274,6 +290,7 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         c.momX += dt * d.momX;
         c.momY += dt * d.momY;
         c.energy += dt * d.energy;
+        c.rhoTracer += dt * d.rhoTracer;
     }
     ApplyBoundaryLine(stage1, bcLeft, bcRight, inflowCons, axis);
     const std::vector<Cons2D> k2 = LineRhs(stage1, gamma, dx, hllc, ToPrim2D);
@@ -288,6 +305,7 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         out.momX = 0.5 * (a.momX + b.momX + dt * d2.momX);
         out.momY = 0.5 * (a.momY + b.momY + dt * d2.momY);
         out.energy = 0.5 * (a.energy + b.energy + dt * d2.energy);
+        out.rhoTracer = 0.5 * (a.rhoTracer + b.rhoTracer + dt * d2.rhoTracer);
     }
     return result;
 }
@@ -311,7 +329,7 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
 // too strong for a genuinely 2D velocity field, i.e. Taylor-Green -- see
 // docs/SIMULATION.md's Phase 4 postmortem for how the bug was caught).
 std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, double mu, double conductivity,
-                                 double gamma) {
+                                 double tracerDiffusivity, double gamma) {
     const int total = static_cast<int>(padded.size());
     const int n = total - 2 * kGhost;
     std::vector<Prim2D> prim(static_cast<size_t>(total));
@@ -332,6 +350,15 @@ std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, do
         d.momX = mu * d2u;
         d.momY = mu * d2v;
         d.energy = conductivity * d2T;
+        // Tracer diffusion (Fick's law, constant-density-weighted form
+        // mu*Laplacian(tracer)): zero by default, since a dye-visualization
+        // tracer usually wants sharp interfaces limited only by the
+        // scheme's own numerical dissipation, not an explicit smoothing on
+        // top of it -- SetTracerDiffusivity opts into a nonzero value.
+        if (tracerDiffusivity > 0.0) {
+            const double d2Tracer = (pp.tracer - 2.0 * p0.tracer + pm.tracer) * invDx2;
+            d.rhoTracer = tracerDiffusivity * d2Tracer;
+        }
     }
     return delta;
 }
@@ -360,9 +387,10 @@ void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)
 }
 
 void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
-    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> row(static_cast<size_t>(m_nx));
     for (int j = 0; j < m_ny; ++j) {
+        const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
+        const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) row[static_cast<size_t>(i)] = grid[static_cast<size_t>(j * m_nx + i)];
         const std::vector<Cons2D> updated =
             AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
@@ -371,9 +399,10 @@ void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
 }
 
 void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
-    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> col(static_cast<size_t>(m_ny));
     for (int i = 0; i < m_nx; ++i) {
+        const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
+        const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) col[static_cast<size_t>(j)] = grid[static_cast<size_t>(j * m_nx + i)];
         const std::vector<Cons2D> updated =
             AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
@@ -382,33 +411,37 @@ void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
 }
 
 void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
-    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> padded(static_cast<size_t>(m_nx + 2 * kGhost));
     for (int j = 0; j < m_ny; ++j) {
+        const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
+        const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_gamma);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_tracerDiffusivity, m_gamma);
         for (int i = 0; i < m_nx; ++i) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
             c.momX += dt * delta[static_cast<size_t>(i)].momX;
             c.momY += dt * delta[static_cast<size_t>(i)].momY;
             c.energy += dt * delta[static_cast<size_t>(i)].energy;
+            c.rhoTracer += dt * delta[static_cast<size_t>(i)].rhoTracer;
         }
     }
 }
 
 void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
-    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> padded(static_cast<size_t>(m_ny + 2 * kGhost));
     for (int i = 0; i < m_nx; ++i) {
+        const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
+        const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_gamma);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_tracerDiffusivity, m_gamma);
         for (int j = 0; j < m_ny; ++j) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
             c.momX += dt * delta[static_cast<size_t>(j)].momX;
             c.momY += dt * delta[static_cast<size_t>(j)].momY;
             c.energy += dt * delta[static_cast<size_t>(j)].energy;
+            c.rhoTracer += dt * delta[static_cast<size_t>(j)].rhoTracer;
         }
     }
 }
@@ -456,6 +489,7 @@ void Euler2D::ApplyObstacleMask() {
         c.energy -= kinetic;
         c.momX = 0.0;
         c.momY = 0.0;
+        c.rhoTracer = 0.0; // no fluid (hence no dye) actually occupies a solid cell
     }
 }
 
@@ -467,14 +501,14 @@ void Euler2D::Step(double dt) {
     SweepY(m_u, dt);
     SweepX(m_u, 0.5 * dt);
 
-    if (m_mu > 0.0 || m_conductivity > 0.0) {
+    if (m_mu > 0.0 || m_conductivity > 0.0 || m_tracerDiffusivity > 0.0) {
         // Explicit diffusion has a parabolic stability limit (dt <~
         // dx^2/(2*coeff)), generally tighter than the hyperbolic CFL limit
         // dt was chosen from (see CompressibleSim2D.cpp) once viscosity is
         // resolved on a fine grid -- sub-cycle so correctness never depends
         // on the caller's dt happening to already satisfy it.
         const double minDx2 = std::min(m_dx * m_dx, m_dy * m_dy);
-        const double diffCoeff = std::max(m_mu, m_conductivity);
+        const double diffCoeff = std::max({m_mu, m_conductivity, m_tracerDiffusivity});
         const double dtDiffMax = 0.4 * minDx2 / diffCoeff;
         const int nSub = std::max(1, static_cast<int>(std::ceil(dt / dtDiffMax)));
         const double subDt = dt / nSub;
