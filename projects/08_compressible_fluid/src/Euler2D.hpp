@@ -6,32 +6,46 @@
 
 namespace cf {
 
-// Conserved variables: mass density, x/y momentum density, total energy density.
+// Conserved variables: mass density, x/y momentum density, total energy
+// density, and (rho*tracer) -- a passive scalar's conserved form, see
+// Prim2D::tracer. Named `rhoTracer` (not the shorter `c`) specifically to
+// avoid colliding with the sound-speed local variable named `c` throughout
+// Euler2D.cpp's wave-speed code.
 struct Cons2D {
     double rho = 0.0;
     double momX = 0.0;
     double momY = 0.0;
     double energy = 0.0;
+    double rhoTracer = 0.0;
 };
 
-// Primitive variables: density, x/y velocity, pressure.
+// Primitive variables: density, x/y velocity, pressure, and a passive
+// scalar tracer concentration (dimensionless, dye-like -- carried by the
+// flow, contributes no pressure/force of its own; see HllcFluxX/Y's
+// comment for how it's advected). Defaults to 0 so every existing
+// aggregate-init call site (`Prim2D{rho, u, v, p}`) keeps compiling
+// unchanged, with tracer=0 everywhere unless a sim explicitly sets it.
 struct Prim2D {
     double rho = 0.0;
     double u = 0.0;
     double v = 0.0;
     double p = 0.0;
+    double tracer = 0.0;
 };
 
 Prim2D ToPrim2D(const Cons2D& c, double gamma);
 Cons2D ToCons2D(const Prim2D& p, double gamma);
 Cons2D FluxX2D(const Prim2D& p, double gamma);
 Cons2D FluxY2D(const Prim2D& p, double gamma);
-// Direction-specific HLLC flux, generalizing Euler1D's HllcFlux with a
-// passively-advected transverse momentum component (Toro sec. 10.4's
-// "additional/passive variable" extension: the transverse velocity is
-// carried unchanged into whichever star state -- left or right of the
-// contact -- the sampled point falls in, since only the normal-direction
-// fields jump across the two non-linear (shock/rarefaction) waves).
+// Direction-specific HLLC flux, generalizing Euler1D's HllcFlux with two
+// passively-advected quantities (Toro sec. 10.4's "additional/passive
+// variable" extension: each is carried unchanged into whichever star
+// state -- left or right of the contact -- the sampled point falls in,
+// since only the normal-direction fields jump across the two non-linear
+// (shock/rarefaction) waves): the transverse momentum component, and the
+// scalar tracer concentration (Prim2D::tracer) -- a tracer is exactly as
+// "passive" as transverse velocity in this sense, just carried as a
+// concentration rather than a velocity component.
 Cons2D HllcFluxX(const Prim2D& left, const Prim2D& right, double gamma);
 Cons2D HllcFluxY(const Prim2D& left, const Prim2D& right, double gamma);
 
@@ -89,8 +103,21 @@ public:
         m_bcBottom = bottom;
         m_bcTop = top;
     }
-    // The fixed upstream state used wherever a side's WallBC is Inflow.
+    // The fixed upstream state used wherever a side's WallBC is Inflow,
+    // unless SetInflowProfile overrides it.
     void SetInflowState(const Prim2D& state) { m_inflowState = state; }
+    // Position-dependent inflow, for e.g. an alternating dye-stripe
+    // tracer pattern fed continuously at the inlet (a one-time initial-
+    // condition pulse washes downstream and out of the domain long before
+    // a run like cylinder shedding's is over -- a real, persistent tracer
+    // visualization needs the inflow itself to keep supplying pattern).
+    // `coord` is y for a left/right (X-sweep) boundary, x for a top/bottom
+    // (Y-sweep) one -- whichever this side actually varies along. Once
+    // set, this REPLACES the fixed state from SetInflowState wherever
+    // Inflow is used, on every side (not just the one the profile was
+    // designed for) -- pass an empty function (the default) to go back to
+    // the fixed state.
+    void SetInflowProfile(const std::function<Prim2D(double coord)>& profile) { m_inflowProfile = profile; }
     // mu: dynamic viscosity. conductivity: Fourier heat-conduction
     // coefficient (energy equation gets +conductivity*Laplacian(T),
     // T=p/rho -- viscous heating is not modeled, see the class comment).
@@ -98,6 +125,11 @@ public:
         m_mu = mu;
         m_conductivity = conductivity;
     }
+    // Explicit tracer diffusion coefficient, mu*Laplacian(tracer) added to
+    // rhoTracer -- default 0 (pure advection, sharp dye interfaces limited
+    // only by the scheme's own numerical dissipation, the usual choice for
+    // a flow-visualization tracer).
+    void SetTracerDiffusivity(double diffusivity) { m_tracerDiffusivity = diffusivity; }
     // Constant force per unit volume added to the x-momentum (and, as
     // f*u*dt, to the energy) each step -- the standard way to drive a
     // periodic channel flow without needing an actual streamwise pressure
@@ -134,13 +166,18 @@ private:
     void DiffuseY(std::vector<Cons2D>& grid, double dt) const;
     void ApplyBodyForce(double dt);
     void ApplyObstacleMask();
+    // SetInflowState's fixed value, or SetInflowProfile's function
+    // evaluated at `coord` if one was set -- see SetInflowProfile's
+    // comment for what `coord` means on each side.
+    Prim2D InflowStateAt(double coord) const { return m_inflowProfile ? m_inflowProfile(coord) : m_inflowState; }
 
     int m_nx = 0, m_ny = 0;
     double m_xMin = 0.0, m_yMin = 0.0, m_dx = 1.0, m_dy = 1.0, m_gamma = 1.4;
     WallBC m_bcLeft = WallBC::Outflow, m_bcRight = WallBC::Outflow;
     WallBC m_bcBottom = WallBC::Outflow, m_bcTop = WallBC::Outflow;
     Prim2D m_inflowState;
-    double m_mu = 0.0, m_conductivity = 0.0, m_bodyForceX = 0.0;
+    std::function<Prim2D(double)> m_inflowProfile;
+    double m_mu = 0.0, m_conductivity = 0.0, m_tracerDiffusivity = 0.0, m_bodyForceX = 0.0;
     std::vector<Cons2D> m_u; // row-major, size nx*ny, index = j*nx + i
     std::vector<uint8_t> m_obstacleMask; // empty if no obstacle set; else size nx*ny, row-major like m_u
 };
