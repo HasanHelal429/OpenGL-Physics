@@ -1,12 +1,13 @@
 # 08 — Compressible fluid: 1D Euler, HLLC/MinMod/RK2 finite volume
 
-A conservative finite-volume solver for the compressible Euler equations —
-the flat-spacetime, non-relativistic limit of
-[`07_grhd`](../07_grhd/)'s Valencia formulation (see that project's
-`docs/SIMULATION.md`): conserved variables evolved by flux differencing,
-MinMod-limited piecewise-linear reconstruction, an HLLC approximate Riemann
-solver, RK2 (Heun) method-of-lines time integration. Unlike the incompressible
-solvers in [`Physics Simulations/Fluid Mechanics`](../../../Physics%20Simulations/Fluid%20Mechanics/)
+A conservative finite-volume solver for the compressible Euler/Navier-Stokes
+equations — the flat-spacetime, non-relativistic limit of
+[`07_grhd`](../07_grhd/)'s Valencia formulation (see this project's own
+[`docs/SIMULATION.md`](docs/SIMULATION.md) for the full formalism-mapping
+walkthrough): conserved variables evolved by flux differencing, MinMod-limited
+piecewise-linear reconstruction, an HLLC approximate Riemann solver, RK2
+(Heun) method-of-lines time integration. Unlike the incompressible solvers in
+[`Physics Simulations/Fluid Mechanics`](../../../Physics%20Simulations/Fluid%20Mechanics/)
 (Stable Fluids, a MAC-grid projection method, LBM), this is a genuine
 shock-capturing conservation-law scheme — it can resolve a real discontinuity
 (a shock) without producing spurious oscillations or losing mass/momentum/
