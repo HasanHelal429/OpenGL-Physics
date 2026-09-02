@@ -11,15 +11,19 @@ curve's log-slope and compares it to that analytic rate, the real check
 that this project's viscous terms (Phase 4) get the *transient* decay
 right, not just the steady-state Poiseuille profile already validated.
 
+`measure_decay_rate(results_dir)` is the reusable core (deck + diagnostics
+in, measured/exact decay rates out) -- imported directly by
+Studies/compressible_fluid/vorticity_decay_vs_viscosity/analyze.py rather
+than re-derived there, same pattern as 04_molecular_dynamics/tools/msd.py's
+compute_diffusion.
+
 Usage:
     python plot_taylor_green.py <results_dir> [--out FILE]
 """
 
 import argparse
-import json
 import os
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 try:
@@ -28,14 +32,12 @@ except ImportError:
     tomllib = None
 
 
-def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("results_dir")
-    ap.add_argument("--out", default=None)
-    args = ap.parse_args()
-    d = args.results_dir
-
-    with open(os.path.join(d, "deck.toml"), "rb") as f:
+def measure_decay_rate(results_dir):
+    """Returns a dict: t, ke (arrays), mu, decay_rate_measured, decay_rate_exact,
+    relative_error. decay_rate_measured is a least-squares fit of log(KE) vs t
+    over the whole run (robust to the small residual compressible wobble on
+    top of the dominant exponential trend)."""
+    with open(os.path.join(results_dir, "deck.toml"), "rb") as f:
         deck = tomllib.load(f)
 
     mu = deck["physics"]["mu"]
@@ -50,16 +52,37 @@ def main():
     # velocity) at twice that.
     decay_rate_exact = 4.0 * nu * k * k
 
-    data = np.genfromtxt(os.path.join(d, "diagnostics.csv"), delimiter=",", names=True)
+    data = np.genfromtxt(os.path.join(results_dir, "diagnostics.csv"), delimiter=",", names=True)
     t = data["t"]
     ke = data["kinetic_energy"]
 
-    # Fit log(KE) = log(KE0) - decay_rate*t via least squares -- robust to
-    # the small residual compressible wobble on top of the dominant
-    # exponential trend.
     coeffs = np.polyfit(t, np.log(ke), 1)
     decay_rate_measured = -coeffs[0]
     rel_err = abs(decay_rate_measured - decay_rate_exact) / decay_rate_exact
+    return {
+        "t": t,
+        "ke": ke,
+        "mu": mu,
+        "k": k,
+        "decay_rate_measured": decay_rate_measured,
+        "decay_rate_exact": decay_rate_exact,
+        "relative_error": rel_err,
+    }
+
+
+def main():
+    import matplotlib.pyplot as plt
+
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("results_dir")
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+    d = args.results_dir
+
+    r = measure_decay_rate(d)
+    t, ke = r["t"], r["ke"]
+    decay_rate_measured, decay_rate_exact, rel_err = (
+        r["decay_rate_measured"], r["decay_rate_exact"], r["relative_error"])
     print(f"decay rate: measured={decay_rate_measured:.5f}  exact=4*nu*k^2={decay_rate_exact:.5f}  "
           f"relative error={rel_err:.4f}")
 
