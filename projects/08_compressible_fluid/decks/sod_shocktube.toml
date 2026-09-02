@@ -1,0 +1,27 @@
+title = "Compressible Euler -- 1D Sod shock tube"
+
+# The classic Sod (1978) Riemann problem: density/pressure ratio 10, both
+# sides at rest. The standard first validation test for any compressible
+# solver -- has an exact self-similar solution (tools/exact_riemann_newtonian.py)
+# to compare against, and exercises all three wave families at once (a
+# left rarefaction fan, a contact discontinuity, a right shock).
+[grid]
+n = 400
+length = 1.0
+
+[physics]
+gamma = 1.4
+
+[riemann]
+rho_l = 1.0
+u_l = 0.0
+p_l = 1.0
+rho_r = 0.125
+u_r = 0.0
+p_r = 0.1
+x0 = 0.5
+
+[time]
+cfl = 0.4
+substeps_per_frame = 8
+frames = 30
