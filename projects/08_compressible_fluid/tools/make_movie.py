@@ -1,19 +1,24 @@
 """
-Turn a headless 08_compressible_fluid run into a movie of the vorticity
-field (dv/dx - du/dy, central differences on the u/v frames), the field
-that makes shedding/wake structure visible at a glance in a way raw
-velocity or density don't. Works for any 2D run (--2d/--channel/
---taylor-green/--cylinder); the obstacle mask (if the deck has one) is
-drawn as a solid disk so the cylinder itself doesn't show up as a raw
-zero-velocity artifact.
+Turn a headless 08_compressible_fluid run into a movie. Always renders the
+vorticity field (dv/dx - du/dy, central differences on the u/v frames),
+the field that makes shedding/wake structure visible at a glance in a way
+raw velocity or density don't; if the run also wrote a passive scalar
+tracer field (Prim2D::tracer -- currently only decks/cylinder_re100.toml's
+inflow dye stripes do), a second panel renders that too, showing how the
+shed vortices actually mix and roll up fluid from different streamlines --
+vorticity shows where the rotation is, the tracer shows what it's doing to
+the fluid. Works for any 2D run (--2d/--channel/--taylor-green/--cylinder);
+the obstacle mask (if the deck has one) is drawn as a solid disk so the
+cylinder itself doesn't show up as a raw zero-velocity artifact.
 
     python make_movie.py <results_dir> [--fps 30] [--stride 1] [--vmax V] [--out movie.mp4]
 
-Reads manifest.json + frames/u_*.npy + frames/v_*.npy (+ deck.toml's
-[cylinder] table, if present, to draw the obstacle). Uses imageio (bundled
-ffmpeg via imageio-ffmpeg, not the system PATH) so this works even where a
-system ffmpeg isn't installed; falls back to a PNG sequence if that import
-fails -- same convention as 06_tidal_disruption/tools/make_movie.py.
+Reads manifest.json + frames/u_*.npy + frames/v_*.npy (+ frames/tracer_*.npy
+if present, + deck.toml's [cylinder] table, if present, to draw the
+obstacle). Uses imageio (bundled ffmpeg via imageio-ffmpeg, not the system
+PATH) so this works even where a system ffmpeg isn't installed; falls back
+to a PNG sequence if that import fails -- same convention as
+06_tidal_disruption/tools/make_movie.py.
 """
 
 import argparse
@@ -53,6 +58,8 @@ def main():
     manifest = json.load(open(os.path.join(d, "manifest.json")))
     u_frames = sorted(glob.glob(os.path.join(d, "frames", "u_*.npy")))[:: args.stride]
     v_frames = sorted(glob.glob(os.path.join(d, "frames", "v_*.npy")))[:: args.stride]
+    tracer_frames = sorted(glob.glob(os.path.join(d, "frames", "tracer_*.npy")))[:: args.stride]
+    has_tracer = len(tracer_frames) == len(u_frames) and len(tracer_frames) > 0
     if not u_frames:
         sys.exit("no u_*.npy frames found -- this tool is for 2D runs (--2d/--channel/"
                   "--taylor-green/--cylinder), not the 1D shock tube")
@@ -93,16 +100,32 @@ def main():
             mags.append(np.percentile(np.abs(vorticity(u, v)), 99.0))
         vmax = max(float(np.max(mags)), 1e-6)
 
-    fig, ax = plt.subplots(figsize=(12, 12 * ly / lx), dpi=130)
-    im = ax.imshow(np.zeros((ny, nx)), origin="lower", cmap="RdBu_r", extent=[0, lx, 0, ly],
-                    vmin=-vmax, vmax=vmax)
-    ax.set_xlabel("x"); ax.set_ylabel("y")
-    fig.colorbar(im, ax=ax, label="vorticity", fraction=0.025, pad=0.01)
-    if cyl is not None:
-        ax.add_patch(Circle((cyl["x"], cyl["y"]), cyl["r"], facecolor="0.3", edgecolor="k", zorder=5))
-    txt = ax.text(0.01, 0.98, "", transform=ax.transAxes, color="k", va="top",
-                  fontsize=9, family="monospace",
-                  bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2))
+    n_panels = 2 if has_tracer else 1
+    fig, axes = plt.subplots(n_panels, 1, figsize=(12, n_panels * 12 * ly / lx + 0.6), dpi=130,
+                              squeeze=False)
+    axes = axes[:, 0]
+    ax_vort = axes[0]
+    im_vort = ax_vort.imshow(np.zeros((ny, nx)), origin="lower", cmap="RdBu_r", extent=[0, lx, 0, ly],
+                              vmin=-vmax, vmax=vmax)
+    ax_vort.set_ylabel("y"); ax_vort.set_title("vorticity")
+    fig.colorbar(im_vort, ax=ax_vort, label="vorticity", fraction=0.025, pad=0.01)
+
+    im_tracer = None
+    if has_tracer:
+        ax_tracer = axes[1]
+        im_tracer = ax_tracer.imshow(np.zeros((ny, nx)), origin="lower", cmap="viridis", extent=[0, lx, 0, ly],
+                                      vmin=0.0, vmax=1.0)
+        ax_tracer.set_xlabel("x"); ax_tracer.set_ylabel("y"); ax_tracer.set_title("tracer")
+        fig.colorbar(im_tracer, ax=ax_tracer, label="tracer", fraction=0.025, pad=0.01)
+    else:
+        ax_vort.set_xlabel("x")
+
+    for a in axes:
+        if cyl is not None:
+            a.add_patch(Circle((cyl["x"], cyl["y"]), cyl["r"], facecolor="0.3", edgecolor="k", zorder=5))
+    txt = ax_vort.text(0.01, 0.98, "", transform=ax_vort.transAxes, color="k", va="top",
+                        fontsize=9, family="monospace",
+                        bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2))
     fig.tight_layout()
 
     n_frames = len(u_frames)
@@ -111,10 +134,14 @@ def main():
 
     def update(i):
         u, v = np.load(u_frames[i]), np.load(v_frames[i])
-        im.set_data(vorticity(u, v))
+        im_vort.set_data(vorticity(u, v))
+        artists = [im_vort, txt]
+        if has_tracer:
+            im_tracer.set_data(np.load(tracer_frames[i]))
+            artists.append(im_tracer)
         t = i * args.stride * substeps * dt
         txt.set_text(f"{manifest.get('title','')}\nt = {t:.2f}   frame {i*args.stride}/{manifest.get('frames','?')}")
-        return im, txt
+        return tuple(artists)
 
     out = args.out or os.path.join(d, "movie.mp4")
     try:

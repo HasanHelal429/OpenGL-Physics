@@ -47,6 +47,28 @@ void CompressibleSimCylinder::Configure(const fw::Deck& deck) {
     m_solver.SetInflowState(m_inflow);
     m_solver.SetViscosity(mu, 0.0);
 
+    // A passive dye tracer, fed continuously as alternating bands at the
+    // inflow (not just a one-time initial-condition pulse -- that would
+    // wash downstream and out of the domain long before a run this long is
+    // over, see Reset()'s comment on the same issue for the symmetry-
+    // breaking perturbation). Density/velocity/pressure stay the uniform
+    // inflow state; only the tracer concentration varies with y, striping
+    // the incoming flow so the shed vortices' roll-up and mixing become
+    // directly visible downstream (tools/make_movie.py renders this
+    // alongside vorticity). stripe_width_d<=0 disables the tracer entirely
+    // (an inflow profile is only installed if stripes are requested).
+    const double stripeWidthD = deck.GetDouble("cylinder.tracer_stripe_width_d", 1.0);
+    if (stripeWidthD > 0.0) {
+        const Prim2D inflowBase = m_inflow;
+        const double stripeWidth = stripeWidthD * m_diameter;
+        m_solver.SetInflowProfile([=](double y) {
+            Prim2D p = inflowBase;
+            const int band = static_cast<int>(std::floor(y / stripeWidth));
+            p.tracer = (band % 2 == 0) ? 1.0 : 0.0;
+            return p;
+        });
+    }
+
     m_cylX = upstreamD * m_diameter;
     // A small permanent offset off the exact centerline, not just a
     // transient initial-condition perturbation (see Reset()'s comment for
@@ -127,7 +149,7 @@ void CompressibleSimCylinder::Step(int substeps) {
 void CompressibleSimCylinder::Snapshot(fw::OutputWriter& writer) {
     const int nx = m_solver.Nx(), ny = m_solver.Ny();
     std::vector<float> rho(static_cast<size_t>(nx * ny)), u(static_cast<size_t>(nx * ny)),
-        v(static_cast<size_t>(nx * ny)), p(static_cast<size_t>(nx * ny));
+        v(static_cast<size_t>(nx * ny)), p(static_cast<size_t>(nx * ny)), tracer(static_cast<size_t>(nx * ny));
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
             const Prim2D pr = m_solver.PrimAt(i, j);
@@ -136,12 +158,14 @@ void CompressibleSimCylinder::Snapshot(fw::OutputWriter& writer) {
             u[idx] = static_cast<float>(pr.u);
             v[idx] = static_cast<float>(pr.v);
             p[idx] = static_cast<float>(pr.p);
+            tracer[idx] = static_cast<float>(pr.tracer);
         }
     }
     writer.WriteField("rho", rho.data(), fw::NpyDtype::F4, ny, nx);
     writer.WriteField("u", u.data(), fw::NpyDtype::F4, ny, nx);
     writer.WriteField("v", v.data(), fw::NpyDtype::F4, ny, nx);
     writer.WriteField("p", p.data(), fw::NpyDtype::F4, ny, nx);
+    writer.WriteField("tracer", tracer.data(), fw::NpyDtype::F4, ny, nx);
     writer.WriteScalar("mass_total", m_solver.TotalMass());
     writer.WriteScalar("probe_v", m_solver.PrimAt(m_probeI, m_probeJ).v);
 }
@@ -155,7 +179,7 @@ fw::SimInfo CompressibleSimCylinder::Info() const {
     info.ly = m_solver.Ny() * m_solver.Dy();
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = {"rho", "u", "v", "p"};
+    info.frameFields = {"rho", "u", "v", "p", "tracer"};
     info.diagnostics = {"mass_total", "probe_v"};
     return info;
 }

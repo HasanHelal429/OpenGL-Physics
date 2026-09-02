@@ -293,13 +293,45 @@ the measurement is otherwise clean (a single, sharp FFT peak, no secondary
 structure). A finer grid and/or a longer run to reach saturation is the
 natural follow-up to close this gap, not attempted here.
 
+## Tracing the flow: a passive scalar dye
+
+`Prim2D::tracer` / `Cons2D::rhoTracer` is a passive scalar (concentration,
+dye-like) carried by the flow — it exerts no force and has no pressure of
+its own, so it's dynamically inert: adding it changes nothing about the
+solver's physics (confirmed: the cylinder deck's measured Strouhal number
+is bit-identical with and without the tracer enabled). It's carried
+through the HLLC Riemann solver exactly like the transverse momentum
+component already was (Toro sec. 10.4's "passive variable" extension —
+only jumps at the contact, carried unchanged through the star state) and
+reconstructed by the same MinMod limiter as everything else, so its
+interfaces stay as sharp as the scheme allows without any special-casing.
+
+`decks/cylinder_re100.toml` feeds it in as **alternating 1D-wide stripes**
+at the inflow (`cylinder.tracer_stripe_width_d`, default `1.0`; set `<=0`
+to disable), fed *continuously* rather than as a one-time initial-condition
+pulse — a pulse would wash downstream and out of the domain long before a
+130-time-unit run is over, exactly the same problem the shedding-symmetry
+perturbation faced (see above). Continuous injection needed a new
+capability, `Euler2D::SetInflowProfile(function<Prim2D(coord)>)`: a
+position-dependent inflow state, evaluated per-row/per-column instead of
+once for the whole boundary.
+
+`tools/make_movie.py` renders the tracer as a second panel under vorticity
+whenever a run wrote one. The result is directly legible: the stripes stay
+perfectly straight and undisturbed upstream of the cylinder, then get
+visibly rolled up and interleaved by each shed vortex downstream — the
+swirl pattern in the tracer panel lines up exactly with each vorticity
+lobe above it, showing *what the vortices are actually doing to the fluid*
+(mixing/entrainment), which vorticity alone (a measure of local rotation)
+doesn't directly show.
+
 ## File map
 
 | File | Role |
 |---|---|
 | `src/Euler1D.{hpp,cpp}` | 1D physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — the reference `kernels_euler1d.hpp` is cross-checked against. |
 | `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
-| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`), and the obstacle cell-masking pass. CPU only. |
+| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`) with an optional position-dependent inflow profile, the obstacle cell-masking pass, and the passive scalar tracer field. CPU only. |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
 | `src/CompressibleSim2D.{hpp,cpp}` | `fw::Simulation` wrapper for the 2D four-quadrant Riemann problem. |
 | `src/CompressibleSimChannel.{hpp,cpp}` | `fw::Simulation` wrapper for the viscous Poiseuille channel flow. |
@@ -312,4 +344,4 @@ natural follow-up to close this gap, not attempted here.
 | `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |
 | `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`; exposes `measure_decay_rate()` for `Studies/compressible_fluid`. |
 | `tools/plot_strouhal.py` | FFTs the downstream velocity probe, measures the shedding Strouhal number vs. Roshko's correlation. |
-| `tools/make_movie.py` | Vorticity-field movie for any 2D run (obstacle drawn as a disk when present). |
+| `tools/make_movie.py` | Vorticity-field movie for any 2D run (obstacle drawn as a disk when present; adds a tracer panel when a run wrote one). |
