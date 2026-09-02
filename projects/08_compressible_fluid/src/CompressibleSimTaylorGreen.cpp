@@ -26,7 +26,7 @@ void CompressibleSimTaylorGreen::Configure(const fw::Deck& deck) {
     m_k = 2.0 * kPi * waveNumberMultiplier / length;
 
     m_solver.Init(n, n, 0.0, length, 0.0, length, m_gamma);
-    m_solver.SetBoundaryConditions(WallBC::Periodic, WallBC::Periodic);
+    m_solver.SetBoundaryConditions(WallBC::Periodic, WallBC::Periodic, WallBC::Periodic, WallBC::Periodic);
     m_solver.SetViscosity(mu, conductivity);
     Reset();
 
