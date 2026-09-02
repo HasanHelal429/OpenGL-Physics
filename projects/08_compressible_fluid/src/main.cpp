@@ -1,5 +1,7 @@
 #include "CompressibleSim.hpp"
+#include "CompressibleSim2D.hpp"
 #include "Euler1D.hpp"
+#include "Euler2D.hpp"
 #include "kernels_euler1d.hpp"
 
 #include "framework/ComputeShader.hpp"
@@ -25,6 +27,7 @@ struct Args {
     int frames = 0;
     int substeps = 0;
     bool selftest = false;
+    bool twoD = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -37,6 +40,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--frames") a.frames = std::atoi(next());
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--selftest") a.selftest = true;
+        else if (s == "--2d") a.twoD = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -260,6 +264,81 @@ bool SelfTestGpu() {
     return ok;
 }
 
+// The 2D isentropic vortex (Shu 1997-style): an exact smooth traveling
+// solution of the 2D Euler equations superimposed on a uniform background
+// flow (Yee, Sandham & Djomehri 1999; Spiegel et al. 2015's review of vortex
+// preservation tests). Since it's smooth (no shocks -- MinMod should sit at
+// or near unlimited, 2nd-order accuracy almost everywhere) and has a known
+// closed-form solution at any later time (rigid advection at the background
+// velocity), it is the standard check that dimensional splitting + the
+// transverse-momentum HLLC extension haven't broken 2nd-order accuracy or
+// introduced a splitting-direction bias (e.g. an X-Y asymmetry) that a
+// pure-shock test like Sod can't reveal.
+struct VortexParams {
+    double x0 = 2.0, y0 = 2.0; // initial center
+    double uInf = 1.0, vInf = 1.0; // background flow (diagonal: exercises both sweep directions)
+    double beta = 5.0; // vortex strength
+    double gamma = 1.4;
+};
+
+cf::Prim2D VortexState(double x, double y, double t, const VortexParams& vp) {
+    const double kPi = 3.14159265358979323846;
+    const double xc = vp.x0 + vp.uInf * t;
+    const double yc = vp.y0 + vp.vInf * t;
+    const double dx = x - xc, dy = y - yc;
+    const double r2 = dx * dx + dy * dy;
+    const double expTerm = std::exp(0.5 * (1.0 - r2));
+    const double du = -vp.beta / (2.0 * kPi) * expTerm * dy;
+    const double dv = vp.beta / (2.0 * kPi) * expTerm * dx;
+    const double dT = -(vp.gamma - 1.0) * vp.beta * vp.beta / (8.0 * vp.gamma * kPi * kPi) * std::exp(1.0 - r2);
+    const double T = 1.0 + dT; // background T=p/rho=1
+    const double rho = std::pow(T, 1.0 / (vp.gamma - 1.0));
+    const double p = std::pow(rho, vp.gamma); // isentropic, background entropy p/rho^gamma=1
+    return cf::Prim2D{rho, vp.uInf + du, vp.vInf + dv, p};
+}
+
+bool SelfTestVortexAdvection() {
+    const VortexParams vp;
+    const int n = 100;
+    const double length = 10.0;
+    cf::Euler2D solver;
+    solver.Init(n, n, 0.0, length, 0.0, length, vp.gamma);
+    solver.SetInitialCondition([&](double x, double y) { return VortexState(x, y, 0.0, vp); });
+
+    const double dt = 0.4 / (solver.MaxWaveSpeedX() / solver.Dx() + solver.MaxWaveSpeedY() / solver.Dy());
+    // Vortex core radius ~1; center moves from (2,2) to (4,4) at t=2, still
+    // >3 core radii from the nearest boundary (domain is [0,10]^2).
+    const double tEnd = 2.0;
+    const int steps = static_cast<int>(std::ceil(tEnd / dt));
+    for (int s = 0; s < steps; ++s) solver.Step(dt);
+    const double tActual = steps * dt;
+
+    double l2Num = 0.0, l2Den = 0.0, linf = 0.0;
+    for (int j = 0; j < n; ++j) {
+        const double y = (static_cast<double>(j) + 0.5) * solver.Dy();
+        for (int i = 0; i < n; ++i) {
+            const double x = (static_cast<double>(i) + 0.5) * solver.Dx();
+            const double rhoNum = solver.PrimAt(i, j).rho;
+            const double rhoEx = VortexState(x, y, tActual, vp).rho;
+            const double diff = rhoNum - rhoEx;
+            l2Num += diff * diff;
+            l2Den += rhoEx * rhoEx;
+            linf = std::max(linf, std::abs(diff));
+        }
+    }
+    const double relL2 = std::sqrt(l2Num / l2Den);
+    std::printf("selftest (vortex advection): rho relative L2 err=%.3e  Linf err=%.3e (t=%.4f)\n", relL2, linf,
+                tActual);
+    // MinMod is the most diffusive standard limiter, and n=100 across a
+    // length-10 domain gives only ~10 cells across the vortex core (radius
+    // 1) -- a coarse, quick-running check, not a formal convergence study,
+    // so this tolerance has real headroom above the observed error rather
+    // than being tuned tight to it.
+    const bool ok = relL2 < 0.05;
+    std::printf("selftest (vortex advection): %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -267,14 +346,15 @@ int main(int argc, char** argv) {
 
     if (a.selftest) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
-        const bool ok = SelfTestHllcConsistency() && SelfTestConservation() && SelfTestGpu();
+        const bool ok =
+            SelfTestHllcConsistency() && SelfTestConservation() && SelfTestGpu() && SelfTestVortexAdvection();
         return ok ? 0 : 1;
     }
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
-                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
+                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--2d]\n"
                      "  08_compressible_fluid --selftest\n");
         return 2;
     }
@@ -286,12 +366,17 @@ int main(int argc, char** argv) {
     fw::Deck deck = fw::Deck::FromFile(a.deck);
     fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
 
-    cf::CompressibleSim sim;
-    sim.Configure(deck);
-
     fw::HeadlessOptions opts;
     opts.outDir = a.out;
     opts.frames = a.frames;
     opts.substeps = a.substeps;
+
+    if (a.twoD) {
+        cf::CompressibleSim2D sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
+    cf::CompressibleSim sim;
+    sim.Configure(deck);
     return fw::RunHeadless(sim, deck, opts);
 }
