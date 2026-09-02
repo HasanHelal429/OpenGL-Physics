@@ -256,24 +256,136 @@ than converging past it the way a steady state does.
 
 ---
 
-## 6. What a Phase 5+ would need, if extended further
+## 6. Flow past an obstacle: the immersed boundary and a symmetry gotcha
+
+The original plan for this project explicitly scoped cylinder vortex
+shedding *out*, on the reasoning that a compressible HLLC scheme run at
+the very low Mach numbers an incompressible-solver comparison would want
+suffers severe acoustic stiffness without a low-Mach preconditioner. That
+concern is real for matching the Python reference's effectively-zero Mach
+number exactly, but doesn't rule out a *weakly* compressible run
+(`mach=0.2`, still well subsonic even for the ~2x-U_inf peak surface speed
+potential flow predicts near a cylinder) — and vortex shedding turned out
+to be tractable at that Mach number without any preconditioner.
+
+### 6.1 The immersed boundary: cell masking
+
+Adding a solid obstacle to a Cartesian-grid finite-volume code has several
+standard approaches, ranging from cut cells (geometrically exact, a lot of
+extra bookkeeping at every solid-adjacent face) to ghost-fluid methods
+(exact-ish, needs per-face special-casing in the Riemann solver) to the
+simplest: **volume penalization** (Brinkman penalization) — treat the
+solid region as a porous medium with a friction coefficient so large it
+forces velocity to zero there, without changing anything else. This
+project uses the *hard* (instantaneous) limit of that idea: every step,
+`Euler2D::ApplyObstacleMask` forces velocity to exactly zero inside the
+masked region (energy reduced by exactly the removed kinetic energy, so
+pressure — and hence the physically real force the obstacle exerts on
+the surrounding fluid — is preserved rather than spiking). This needed
+zero changes to `LineRhs`, the HLLC solver, or the line-sweep structure:
+the masked region simply participates in ordinary flux exchange with its
+neighbors as "fluid currently at rest," and the existing viscous machinery
+(section 5) diffuses the resulting no-slip condition into the surrounding
+flow exactly the way it would diffuse any other velocity discontinuity.
+
+The tradeoff, honestly: the obstacle boundary is jagged (Cartesian
+staircase, not a smooth circle) at any finite resolution, and this
+technique doesn't produce a sharp boundary layer the way a body-fitted
+grid or a cut-cell method would. For a global, wake-timing quantity like
+the Strouhal number this is a reasonable trade (see section 6.3); it would
+matter more for something resolution-sensitive right at the surface, like
+a drag coefficient.
+
+### 6.2 The BCs an external flow needs, and a genuine bug they exposed
+
+`WallBC::Inflow` (ghost cells fixed to a prescribed upstream state,
+independent of the interior) and `WallBC::FreeSlipReflective` (mirrors
+only the boundary-normal velocity component, keeping the tangential one —
+a symmetry/no-penetration condition, appropriate for a domain edge that's
+a truncation rather than a physical wall) round out the `WallBC` set
+already built for Poiseuille flow (`NoSlipReflective`, `Periodic`) and the
+Riemann problems (`Outflow`). Supporting a *different* condition on each
+side of the domain (inflow left, outflow right, free-slip top and bottom)
+required promoting `Euler2D::SetBoundaryConditions` from one `WallBC` per
+axis to four independent per-side values — a refactor validated by
+re-running all five prior targets (Sod, GPU-vs-CPU, vortex advection,
+Config3, Poiseuille, Taylor-Green) and confirming every one reproduced its
+prior result exactly, before trusting the new capability on top.
+
+**A genuine, caught-before-shipping bug, in the same spirit as section 5's
+viscosity postmortem**: the deck's domain, obstacle mask, and boundary
+conditions are symmetric about the channel centerline to floating-point
+precision. The very first run — an exactly-centered cylinder, a uniform
+impulsive-start initial condition, no perturbation of any kind — **never
+sheds at all**: the wake settles into an exactly symmetric, steady state
+(visually: two mirror-image recirculation lobes, no alternation) and sits
+there for the entire simulated run. This isn't a solver bug in the usual
+sense — the symmetric state genuinely is an exact solution of the
+discretized equations — but it *is* a linearly *unstable* one, and nothing
+in a perfectly symmetric simulation ever breaks the symmetry needed to
+reach the (stable) shedding limit cycle instead. A real cylinder always
+sheds because a real flow always carries some asymmetric disturbance;
+the "clean" perfectly symmetric numerical case is the artificial one. The
+fix has two parts, both in `CompressibleSimCylinder`: a small *permanent*
+geometric offset of the cylinder off the centerline (`cylinder.y_offset_d`,
+default 2% of `D`) — persistent, so the instability always has something
+to grow from, not just a one-time nudge that convects away before the
+wake even forms — plus a smaller, one-time antisymmetric velocity bump in
+the initial condition to seed the growth faster than waiting on the
+offset's much smaller steady-state asymmetry alone.
+
+### 6.3 Validation, and an honest read on a real discrepancy
+
+`decks/cylinder_re100.toml` mirrors `MAC_Grid_Solver`'s
+`Cylinder_Vortex_Shedding.ipynb` geometry and boundary conditions
+(`D=1, Re=100, U_inf=1`, blockage `0.125`, 5D upstream / 20D downstream,
+inflow/outflow/free-slip). `tools/plot_strouhal.py` FFTs a downstream
+velocity probe and measures `St=f*D/U_inf`. The result: a genuine von
+Kármán street (alternating vorticity lobes, visually unambiguous) at
+**St=0.138**, against Roshko's correlation's `0.159` at this Reynolds
+number (literature `~0.166`) — a real 13% gap, reported rather than
+smoothed over, with three identifiable, non-mysterious contributors: the
+probe signal hadn't yet saturated to a full periodic limit cycle within
+this run's 130 time units (still visibly growing exponentially — the
+frequency of a growing oscillation should already closely track the
+eventual shedding frequency for this kind of onset, but not necessarily
+exactly); the resolution (`cells_per_d=8`) is coarser than even the Python
+reference's own flagged-as-suboptimal 12; and this project's own numerical
+dissipation (quantified independently in
+`Studies/compressible_fluid/vorticity_decay_vs_viscosity`) acts like added
+viscosity at this resolution, and *lower* Strouhal number is exactly the
+direction that predicts — solving Roshko's correlation backward from the
+measured value implies an effective Reynolds number of roughly 65, a
+sizable but physically coherent reduction from the nominal 100. None of
+these individually or together are surprising; a finer grid and a longer
+run are the natural next step to close the gap, not attempted here.
+
+---
+
+## 7. What further extension would need
 
 Not attempted here, but worth naming so the scope boundary is explicit
 rather than implicit:
 
 - **The full viscous stress tensor**, including the bulk-viscosity
-  correction and the mixed `d²/dxdy` cross-derivatives Phase 4 drops — needed
-  for any flow with genuine 2D velocity structure (a lid-driven cavity, a
-  cylinder wake), which is exactly why those two benchmarks were explicitly
-  scoped *out* of this project from the initial plan (see the top-level
-  conversation this project was proposed in): a compressible HLLC scheme
-  run at the very low Mach numbers those benchmarks use suffers severe
-  acoustic stiffness without a low-Mach preconditioner, a distinct
-  numerical-methods problem from anything solved so far.
+  correction and the mixed `d²/dxdy` cross-derivatives section 5 drops —
+  needed for a flow with genuine small-scale 2D velocity structure right at
+  a surface (e.g. an accurate drag coefficient, not just the global wake
+  timing a Strouhal number captures).
+- **A body-fitted grid or cut-cell obstacle representation**, if the
+  jagged Cartesian-staircase boundary of section 6's cell-masking approach
+  ever needs to become resolution-independent rather than just resolution-
+  convergent.
 - **A genuinely adaptive per-step CFL controller.** Every deck in this
   project computes `dt` once from the *initial* condition and holds it
   fixed — safe here because each validation target either has provably
-  bounded characteristic speeds (the Riemann problems) or stays at low,
-  roughly-constant Mach number throughout (Poiseuille) — but not a general
-  solution for a flow whose velocities or sound speed change substantially
-  over the run.
+  bounded characteristic speeds (the Riemann problems), stays at low,
+  roughly-constant Mach number throughout (Poiseuille, Taylor-Green), or
+  has the sound speed dominate its wave-speed estimate by a wide-enough
+  margin that a plausible velocity excursion barely moves it (the
+  cylinder, backed by a lower CFL number for extra margin) — but not a
+  general solution for a flow whose velocities or sound speed change
+  substantially over the run.
+- **Reaching a fully saturated shedding limit cycle** (section 6.3) and
+  a resolution sweep, to see how much of the 13% Strouhal gap closes with
+  each.

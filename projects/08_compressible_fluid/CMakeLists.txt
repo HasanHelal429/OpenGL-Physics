@@ -6,6 +6,7 @@ add_executable(08_compressible_fluid
     src/CompressibleSim2D.cpp
     src/CompressibleSimChannel.cpp
     src/CompressibleSimTaylorGreen.cpp
+    src/CompressibleSimCylinder.cpp
 )
 
 target_link_libraries(08_compressible_fluid PRIVATE physgl)

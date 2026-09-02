@@ -52,9 +52,12 @@ projects/            One executable per simulation. Numbered by creation order.
   08_compressible_fluid/ Compressible Euler/Navier-Stokes: the flat-spacetime,
                        non-relativistic limit of 07_grhd's formalism (HLLC
                        instead of HLLE, closed-form primitive recovery, no
-                       geometric source terms), 1D+2D, CPU+GPU, plus a
+                       geometric source terms), 1D+2D, CPU+GPU, a
                        Newtonian-viscosity extension validated against plane
-                       Poiseuille flow — see its README and docs/SIMULATION.md.
+                       Poiseuille flow and Taylor-Green vortex decay, and
+                       flow past an immersed obstacle (cylinder vortex
+                       shedding, Strouhal number vs. Roshko's correlation)
+                       — see its README and docs/SIMULATION.md.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so

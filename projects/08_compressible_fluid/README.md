@@ -13,15 +13,19 @@ shock-capturing conservation-law scheme — it can resolve a real discontinuity
 (a shock) without producing spurious oscillations or losing mass/momentum/
 energy across it.
 
-**Status: Phase 4 (this phase)** — 1D (CPU + GPU), 2D inviscid (CPU, via
-Strang dimensional splitting), and 2D **viscous** (Newtonian shear stress +
-Fourier conduction). Validated against the exact Sod shock tube, a
+**Status** — 1D (CPU + GPU), 2D inviscid (CPU, via Strang dimensional
+splitting), 2D **viscous** (Newtonian shear stress + Fourier conduction),
+and flow past an **immersed obstacle** (Brinkman-style cell masking + a
+prescribed inflow boundary). Validated against the exact Sod shock tube, a
 GPU-vs-CPU cross-check, an exact 2D isentropic-vortex advection solution, a
 qualitative match to the published Kurganov & Tadmor 2D Riemann
 "Configuration 3" density pattern, the exact plane-Poiseuille velocity
-profile (0.08% error), and the exact Taylor-Green vortex decay rate (1.6%
-error). Used in [`Studies/compressible_fluid`](../../../Studies/compressible_fluid/)
-for a viscosity-vs-vorticity-decay sweep.
+profile (0.08% error), the exact Taylor-Green vortex decay rate (1.6%
+error), and cylinder vortex shedding (a real von Kármán street, Strouhal
+number within 13% of Roshko's correlation — see "Flow past an obstacle"
+below for the honest read on that gap). Used in
+[`Studies/compressible_fluid`](../../../Studies/compressible_fluid/) for a
+viscosity-vs-vorticity-decay sweep.
 
 ## Physics
 
@@ -93,6 +97,16 @@ selects the doubly-periodic sim); see "Viscosity" below:
     --deck projects/08_compressible_fluid/decks/taylor_green.toml \
     --out projects/08_compressible_fluid/out/taylor_green
 python projects/08_compressible_fluid/tools/plot_taylor_green.py projects/08_compressible_fluid/out/taylor_green
+```
+
+`decks/cylinder_re100.toml` — cylinder vortex shedding (`--cylinder`
+selects the obstacle-flow sim); see "Flow past an obstacle" below:
+
+```sh
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --cylinder \
+    --deck projects/08_compressible_fluid/decks/cylinder_re100.toml \
+    --out projects/08_compressible_fluid/out/cylinder_re100
+python projects/08_compressible_fluid/tools/plot_strouhal.py projects/08_compressible_fluid/out/cylinder_re100
 ```
 
 `--selftest` (no deck needed) runs four fast, deck-independent checks:
@@ -199,20 +213,96 @@ walls at all.
   steady-state residual, since a genuinely time-evolving flow keeps
   accumulating that numerical dissipation rather than converging past it).
 
+## Flow past an obstacle: cylinder vortex shedding
+
+`Euler2D::SetObstacleMask(isSolid)` adds an immersed-boundary solid region
+via **cell masking**: every step, cells inside the mask have their
+velocity forced to exactly zero (energy reduced by exactly the removed
+kinetic energy, so pressure is preserved rather than spiking) — the hard
+(instantaneous) limit of Brinkman penalization, a standard, simple
+immersed-boundary technique that needs no changes to the Riemann solver or
+line-sweep structure at all. Two new boundary conditions support external
+flow: `WallBC::Inflow` (ghost cells fixed to a prescribed upstream state,
+`SetInflowState`) and `WallBC::FreeSlipReflective` (mirrors only the
+boundary-normal velocity component — a symmetry/no-penetration wall, for a
+domain edge that's a truncation, not a physical wall).
+
+`decks/cylinder_re100.toml` mirrors the geometry and boundary conditions of
+[`MAC_Grid_Solver`'s `Cylinder_Vortex_Shedding.ipynb`](../../../Physics%20Simulations/Fluid%20Mechanics/MAC_Grid_Solver/Cylinder_Vortex_Shedding.ipynb)
+(that project's own incompressible validation of the same physics):
+`D=1, Re=100, U_inf=1`, blockage `D/H=0.125`, 5D upstream / 20D downstream,
+inflow-left / outflow-right / free-slip-top-bottom. `mach=0.2` (soundspeed
+`=U_inf/mach=5`) keeps this weakly compressible without the acoustic
+stiffness a much lower Mach number would need a preconditioner to handle
+well. `cells_per_d=8` is a first-pass resolution compromise — coarser even
+than the Python reference's own flagged-as-suboptimal 12 — chosen for a
+single validated run's compute budget (~3 minutes on this project's usual
+hardware for 130 time units).
+
+**A real gotcha, worth naming**: this domain, obstacle mask, and boundary
+conditions are symmetric about the channel centerline to floating-point
+precision. A first attempt with an exactly-centered cylinder and a uniform
+impulsive-start initial condition **never sheds at all** — the wake
+settles into an exactly symmetric, steady (if linearly unstable) state and
+sits there for the entire run, because nothing in a perfectly symmetric
+simulation breaks the symmetry vortex shedding requires breaking. Real
+cylinders always shed because real flows always carry some asymmetric
+disturbance (free-stream turbulence, structural vibration); the "cleaner"
+perfectly symmetric numerical case is the artificial one. The fix:
+`cylinder.y_offset_d` (default `0.02`) offsets the cylinder slightly off
+the centerline — a *permanent* geometric asymmetry, not just a transient
+perturbation, so the instability has something to keep growing from — plus
+a smaller, belt-and-suspenders one-time antisymmetric velocity bump in the
+initial condition (`cylinder.perturb_amplitude`) to seed it faster than
+waiting on the offset's much smaller steady-state asymmetry alone.
+
+**Validation.** `tools/plot_strouhal.py` FFTs the downstream velocity
+probe (4D behind the cylinder, on the centerline) and finds the shedding
+frequency, giving `St = f*D/U_inf`. The default deck's run produces a real
+von Kármán street (alternating vorticity lobes, visually unmistakable) and
+measures **St=0.138** against Roshko's correlation's `St=0.159` at Re=100
+(literature: `St~0.166`) — a real, if visible, **13% gap**, not hidden:
+- The probe signal was still in its exponential-growth phase at the end of
+  this run's 130 time units (visible in the probe timeseries), not yet
+  saturated to a full periodic limit cycle — the growing oscillation's
+  frequency should already closely track the eventual shedding frequency
+  for a standard supercritical-Hopf-type onset, but "closely" isn't
+  "exactly," and a longer run would settle this.
+- `cells_per_d=8` is coarser than even the Python reference's own
+  already-conservative 12.
+- This project's own numerical dissipation (quantified directly in
+  [`Studies/compressible_fluid/vorticity_decay_vs_viscosity`](../../../Studies/compressible_fluid/vorticity_decay_vs_viscosity/README.md))
+  acts like added viscosity at this coarser resolution — and lower
+  Strouhal number is exactly the direction that predicts (Roshko's own
+  correlation gives a lower `St` at lower `Re`; solving backward from the
+  measured `St=0.138` implies an effective `Re~65`, a real and sizable
+  reduction from the nominal `Re=100` fully consistent with numerical
+  dissipation at this resolution being the dominant cause).
+- The flow is weakly compressible (`mach=0.2`), unlike the incompressible
+  reference.
+
+None of these are surprising or hidden — they're exactly the tradeoffs a
+first validated pass at a coarser resolution and shorter run predicts, and
+the measurement is otherwise clean (a single, sharp FFT peak, no secondary
+structure). A finer grid and/or a longer run to reach saturation is the
+natural follow-up to close this gap, not attempted here.
+
 ## File map
 
 | File | Role |
 |---|---|
 | `src/Euler1D.{hpp,cpp}` | 1D physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — the reference `kernels_euler1d.hpp` is cross-checked against. |
 | `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
-| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, and (Phase 4) the viscous diffusion sub-step + `WallBC` boundary conditions. CPU only. |
+| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`), and the obstacle cell-masking pass. CPU only. |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
 | `src/CompressibleSim2D.{hpp,cpp}` | `fw::Simulation` wrapper for the 2D four-quadrant Riemann problem. |
 | `src/CompressibleSimChannel.{hpp,cpp}` | `fw::Simulation` wrapper for the viscous Poiseuille channel flow. |
 | `src/CompressibleSimTaylorGreen.{hpp,cpp}` | `fw::Simulation` wrapper for the doubly-periodic Taylor-Green vortex decay. |
-| `src/main.cpp` | CLI entry point (`--2d`/`--channel`/`--taylor-green` select `CompressibleSim2D`/`CompressibleSimChannel`/`CompressibleSimTaylorGreen`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
+| `src/CompressibleSimCylinder.{hpp,cpp}` | `fw::Simulation` wrapper for cylinder vortex shedding (inflow/outflow/free-slip BCs + an obstacle mask). |
+| `src/main.cpp` | CLI entry point (`--2d`/`--channel`/`--taylor-green`/`--cylinder` select the matching `CompressibleSim*`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |
 | `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |
-| `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`. |
+| `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`; exposes `measure_decay_rate()` for `Studies/compressible_fluid`. |
+| `tools/plot_strouhal.py` | FFTs the downstream velocity probe, measures the shedding Strouhal number vs. Roshko's correlation. |

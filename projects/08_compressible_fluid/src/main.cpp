@@ -1,6 +1,7 @@
 #include "CompressibleSim.hpp"
 #include "CompressibleSim2D.hpp"
 #include "CompressibleSimChannel.hpp"
+#include "CompressibleSimCylinder.hpp"
 #include "CompressibleSimTaylorGreen.hpp"
 #include "Euler1D.hpp"
 #include "Euler2D.hpp"
@@ -32,6 +33,7 @@ struct Args {
     bool twoD = false;
     bool channel = false;
     bool taylorGreen = false;
+    bool cylinder = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -47,6 +49,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--2d") a.twoD = true;
         else if (s == "--channel") a.channel = true;
         else if (s == "--taylor-green") a.taylorGreen = true;
+        else if (s == "--cylinder") a.cylinder = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -379,6 +382,11 @@ int main(int argc, char** argv) {
 
     if (a.channel) {
         cf::CompressibleSimChannel sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
+    if (a.cylinder) {
+        cf::CompressibleSimCylinder sim;
         sim.Configure(deck);
         return fw::RunHeadless(sim, deck, opts);
     }
