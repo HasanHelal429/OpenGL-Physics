@@ -1,0 +1,35 @@
+title = "Compressible Euler -- 2D Riemann problem (Kurganov & Tadmor 2002, Configuration 3)"
+
+# A genuinely 2D Riemann problem: four constant states in the four
+# quadrants of [0,1]^2, each pair of adjacent quadrants connected by a
+# single 1D elementary wave (shock or rarefaction) -- the standard test
+# that a 2D scheme's cross terms (the transverse-momentum HLLC extension,
+# Strang dimensional splitting) correctly resolve wave interactions a pure
+# dimensional-splitting bug could otherwise miss even after Sod passes.
+# No exact solution exists, but this specific configuration's density
+# pattern at t~0.3 is widely published (e.g. Kurganov & Tadmor 2002; Liska
+# & Wendroff 2003's scheme-comparison paper) -- see tools/plot_riemann2d.py
+# for the qualitative comparison this validates against.
+[grid]
+nx = 400
+ny = 400
+x_min = 0.0
+x_max = 1.0
+y_min = 0.0
+y_max = 1.0
+
+[physics]
+gamma = 1.4
+
+[riemann2d]
+x0 = 0.5
+y0 = 0.5
+ne = [1.5, 0.0, 0.0, 1.5]
+nw = [0.5323, 1.206, 0.0, 0.3]
+sw = [0.138, 1.206, 1.206, 0.029]
+se = [0.5323, 0.0, 1.206, 0.3]
+
+[time]
+cfl = 0.4
+substeps_per_frame = 32
+frames = 40
