@@ -1,0 +1,31 @@
+title = "Compressible Navier-Stokes -- plane Poiseuille flow"
+
+# Channel of height 1, periodic in x (nothing ever varies in x for this
+# flow -- nx is kept small purely to save compute), no-slip walls at
+# y=0 and y=height. Started from rest, driven by a constant body force
+# (channel.body_force_x) until it approaches the analytic steady parabolic
+# profile u(y) = (f/(2*mu)) * y*(height-y), u_max = f*height^2/(8*mu).
+# Parameters chosen so u_max/soundspeed ~ 0.1 (Mach ~0.1): low enough that
+# compressible-solver effects should be a small correction to the
+# genuinely-incompressible analytic solution, not a dominant one -- see
+# tools/plot_poiseuille.py for how close it actually comes.
+[grid]
+nx = 8
+ny = 64
+lx = 0.1
+height = 1.0
+
+[physics]
+gamma = 1.4
+mu = 0.05
+conductivity = 0.0
+
+[channel]
+rho0 = 1.0
+p0 = 1.0
+body_force_x = 0.05
+
+[time]
+cfl = 0.4
+substeps_per_frame = 350
+frames = 50
