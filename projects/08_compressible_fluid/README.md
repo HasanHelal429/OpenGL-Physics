@@ -12,10 +12,11 @@ shock-capturing conservation-law scheme — it can resolve a real discontinuity
 (a shock) without producing spurious oscillations or losing mass/momentum/
 energy across it.
 
-**Status: Phase 1 (this phase)** — 1D only, CPU only, validated against the
-classic Sod (1978) shock tube's exact solution. See the top-level plan for
-the phases after this one (GPU port + cross-check, 2D via dimensional
-splitting, viscous terms + Poiseuille flow, then a design-doc writeup).
+**Status: Phase 2 (this phase)** — 1D, CPU + GPU (compute shader), validated
+against the classic Sod (1978) shock tube's exact solution, plus a GPU-vs-CPU
+cross-check. See the top-level plan for the phases after this one (2D via
+dimensional splitting, viscous terms + Poiseuille flow, then a design-doc
+writeup).
 
 ## Physics
 
@@ -59,19 +60,23 @@ cmake --build --preset release --target 08_compressible_fluid
 python projects/08_compressible_fluid/tools/plot_shocktube.py projects/08_compressible_fluid/out/sod_shocktube
 ```
 
-`--selftest` (no deck needed) runs two fast, deck-independent checks:
-HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), and a
+`--selftest` (no deck needed) runs three fast, deck-independent checks:
+HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
 conservation-identity check (mass and energy exactly conserved, momentum
 matching the analytic boundary-pressure-forcing prediction, both before
 either wave reaches the domain edge — see `main.cpp`'s comment for why
-these are exact identities, not approximate physics).
+these are exact identities, not approximate physics), and a GPU-vs-CPU
+cross-check (the same Sod IC run 50 RK2 steps on both `Euler1D` and the
+`kernels_euler1d.hpp` compute-shader port, comparing recovered primitives —
+matches to ~1e-7 relative, the expected float32 precision floor).
 
 ## File map
 
 | File | Role |
 |---|---|
-| `src/Euler1D.{hpp,cpp}` | The physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — this is the Phase 2 GPU-port target. |
-| `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper: deck parsing, `Step`/`Snapshot`/`Info`. |
-| `src/main.cpp` | CLI entry point + `--selftest`. |
+| `src/Euler1D.{hpp,cpp}` | The physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — the reference `kernels_euler1d.hpp` is cross-checked against. |
+| `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
+| `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper: deck parsing, `Step`/`Snapshot`/`Info`. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
+| `src/main.cpp` | CLI entry point + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot. |
