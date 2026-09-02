@@ -141,41 +141,76 @@ constexpr int kGhost = 2;
 using HllcFluxFn = Cons2D (*)(const Prim2D&, const Prim2D&, double);
 using ToPrimFn = Prim2D (*)(const Cons2D&, double);
 
-// Ghost-cell boundary fill for one padded line. Outflow reproduces
-// Euler1D::ApplyBoundary's zero-gradient convention exactly. Periodic wraps
-// each ghost to the interior cell the same distance in from the FAR edge
-// (so the line reads as one period of an infinite periodic sequence).
-// NoSlipReflective mirrors each ghost to the interior cell the same
-// distance in from its OWN (near) edge, with momentum negated, so velocity
-// linearly extrapolates to exactly zero at the wall face -- density/energy
-// are copied unchanged, since energy's kinetic term is invariant under a
-// velocity sign flip.
-void ApplyBoundaryLine(std::vector<Cons2D>& u, WallBC bc) {
+// Ghost-cell boundary fill for one padded line, independent conditions on
+// each side. Outflow reproduces Euler1D::ApplyBoundary's zero-gradient
+// convention exactly. Periodic wraps to the interior cell the same
+// distance in from the FAR edge (so the line reads as one period of an
+// infinite periodic sequence) -- meaningful only when set on BOTH sides
+// together (see Euler2D.hpp's WallBC comment). NoSlipReflective mirrors
+// the interior cell the same distance in from THIS side's own (near) edge,
+// negating BOTH momentum components, so velocity linearly extrapolates to
+// exactly zero at the wall face -- density/energy are copied unchanged,
+// since energy's kinetic term is invariant under a velocity sign flip.
+// FreeSlipReflective does the same mirror but negates only the component
+// `axis` selects (a symmetry wall: no penetration, but no tangential drag
+// either). Inflow ignores the interior entirely, fixing the ghost to
+// `inflowCons` every call.
+void ApplyBoundaryLine(std::vector<Cons2D>& u, WallBC bcLeft, WallBC bcRight, const Cons2D& inflowCons,
+                        BoundaryAxis axis) {
     const int total = static_cast<int>(u.size());
     const int n = total - 2 * kGhost;
     for (int g = 0; g < kGhost; ++g) {
         const int leftGhost = g;
         const int rightGhost = total - kGhost + g;
-        switch (bc) {
+
+        switch (bcLeft) {
         case WallBC::Outflow:
             u[static_cast<size_t>(leftGhost)] = u[static_cast<size_t>(kGhost)];
-            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + n - 1)];
             break;
         case WallBC::Periodic:
             u[static_cast<size_t>(leftGhost)] = u[static_cast<size_t>(kGhost + n - (kGhost - g))];
-            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + g)];
             break;
         case WallBC::NoSlipReflective: {
             Cons2D lm = u[static_cast<size_t>(kGhost + (kGhost - 1 - g))];
             lm.momX = -lm.momX;
             lm.momY = -lm.momY;
             u[static_cast<size_t>(leftGhost)] = lm;
+            break;
+        }
+        case WallBC::FreeSlipReflective: {
+            Cons2D lm = u[static_cast<size_t>(kGhost + (kGhost - 1 - g))];
+            if (axis == BoundaryAxis::X) lm.momX = -lm.momX; else lm.momY = -lm.momY;
+            u[static_cast<size_t>(leftGhost)] = lm;
+            break;
+        }
+        case WallBC::Inflow:
+            u[static_cast<size_t>(leftGhost)] = inflowCons;
+            break;
+        }
+
+        switch (bcRight) {
+        case WallBC::Outflow:
+            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + n - 1)];
+            break;
+        case WallBC::Periodic:
+            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + g)];
+            break;
+        case WallBC::NoSlipReflective: {
             Cons2D rm = u[static_cast<size_t>(kGhost + n - 1 - g)];
             rm.momX = -rm.momX;
             rm.momY = -rm.momY;
             u[static_cast<size_t>(rightGhost)] = rm;
             break;
         }
+        case WallBC::FreeSlipReflective: {
+            Cons2D rm = u[static_cast<size_t>(kGhost + n - 1 - g)];
+            if (axis == BoundaryAxis::X) rm.momX = -rm.momX; else rm.momY = -rm.momY;
+            u[static_cast<size_t>(rightGhost)] = rm;
+            break;
+        }
+        case WallBC::Inflow:
+            u[static_cast<size_t>(rightGhost)] = inflowCons;
+            break;
         }
     }
 }
@@ -222,11 +257,12 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
 // fractional step dt, given its own ghost-padded flux operator -- the same
 // algorithm as Euler1D::Step, generalized over direction (HllcFluxX/Y).
 std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double dt, double dx, double gamma,
-                                    HllcFluxFn hllc, WallBC bc) {
+                                    HllcFluxFn hllc, WallBC bcLeft, WallBC bcRight, const Cons2D& inflowCons,
+                                    BoundaryAxis axis) {
     const int n = static_cast<int>(interior.size());
     std::vector<Cons2D> padded(static_cast<size_t>(n + 2 * kGhost));
     for (int i = 0; i < n; ++i) padded[static_cast<size_t>(i + kGhost)] = interior[static_cast<size_t>(i)];
-    ApplyBoundaryLine(padded, bc);
+    ApplyBoundaryLine(padded, bcLeft, bcRight, inflowCons, axis);
 
     const std::vector<Cons2D> k1 = LineRhs(padded, gamma, dx, hllc, ToPrim2D);
 
@@ -239,7 +275,7 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         c.momY += dt * d.momY;
         c.energy += dt * d.energy;
     }
-    ApplyBoundaryLine(stage1, bc);
+    ApplyBoundaryLine(stage1, bcLeft, bcRight, inflowCons, axis);
     const std::vector<Cons2D> k2 = LineRhs(stage1, gamma, dx, hllc, ToPrim2D);
 
     std::vector<Cons2D> result(static_cast<size_t>(n));
@@ -324,28 +360,33 @@ void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)
 }
 
 void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
+    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> row(static_cast<size_t>(m_nx));
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) row[static_cast<size_t>(i)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated = AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX, m_bcX);
+        const std::vector<Cons2D> updated =
+            AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
         for (int i = 0; i < m_nx; ++i) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(i)];
     }
 }
 
 void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
+    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> col(static_cast<size_t>(m_ny));
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) col[static_cast<size_t>(j)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated = AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY, m_bcY);
+        const std::vector<Cons2D> updated =
+            AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
         for (int j = 0; j < m_ny; ++j) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(j)];
     }
 }
 
 void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
+    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> padded(static_cast<size_t>(m_nx + 2 * kGhost));
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
-        ApplyBoundaryLine(padded, m_bcX);
+        ApplyBoundaryLine(padded, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
         const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_gamma);
         for (int i = 0; i < m_nx; ++i) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
@@ -357,10 +398,11 @@ void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
 }
 
 void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
+    const Cons2D inflowCons = ToCons2D(m_inflowState, m_gamma);
     std::vector<Cons2D> padded(static_cast<size_t>(m_ny + 2 * kGhost));
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
-        ApplyBoundaryLine(padded, m_bcY);
+        ApplyBoundaryLine(padded, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
         const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_gamma);
         for (int j = 0; j < m_ny; ++j) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
@@ -377,6 +419,43 @@ void Euler2D::ApplyBodyForce(double dt) {
         const double u = c.momX / c.rho;
         c.energy += m_bodyForceX * u * dt; // work done by the force (explicit, using pre-update u)
         c.momX += m_bodyForceX * dt;
+    }
+}
+
+void Euler2D::SetObstacleMask(const std::function<bool(double x, double y)>& isSolid) {
+    m_obstacleMask.assign(static_cast<size_t>(m_nx * m_ny), 0);
+    for (int j = 0; j < m_ny; ++j) {
+        const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
+        for (int i = 0; i < m_nx; ++i) {
+            const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
+            m_obstacleMask[static_cast<size_t>(j * m_nx + i)] = isSolid(x, y) ? 1 : 0;
+        }
+    }
+}
+
+// Immersed-boundary obstacle: the mu->infinity (equivalently, penalization
+// time->0) limit of Brinkman penalization -- a standard, simple technique
+// for imposing a no-slip solid region on a Cartesian grid without changing
+// the flux/Riemann-solver machinery at all (see Euler2D.hpp's SetObstacleMask
+// comment). Forcing velocity to exactly zero every step, rather than
+// relaxing it over a finite penalization time, is the hard/instantaneous
+// limit of that technique -- simpler to implement and tune (no extra
+// timescale to choose), at the cost of a less smooth transition at the
+// obstacle's (already jagged, Cartesian-staircase) boundary. Density is
+// left alone (mass isn't created or destroyed by this); energy is reduced
+// by exactly the kinetic energy being removed, so pressure -- and hence
+// the force the obstacle exerts on the surrounding fluid via ordinary
+// pressure-gradient physics -- is preserved rather than spiking from a
+// sudden kinetic-to-internal-energy conversion this isn't meant to model.
+void Euler2D::ApplyObstacleMask() {
+    if (m_obstacleMask.empty()) return;
+    for (size_t idx = 0; idx < m_u.size(); ++idx) {
+        if (!m_obstacleMask[idx]) continue;
+        Cons2D& c = m_u[idx];
+        const double kinetic = 0.5 * (c.momX * c.momX + c.momY * c.momY) / c.rho;
+        c.energy -= kinetic;
+        c.momX = 0.0;
+        c.momY = 0.0;
     }
 }
 
@@ -405,6 +484,7 @@ void Euler2D::Step(double dt) {
         }
     }
     ApplyBodyForce(dt);
+    ApplyObstacleMask();
 }
 
 double Euler2D::MaxWaveSpeedX() const {

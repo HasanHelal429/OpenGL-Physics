@@ -22,7 +22,7 @@ void CompressibleSimChannel::Configure(const fw::Deck& deck) {
     const double bodyForceX = deck.GetDouble("channel.body_force_x", 0.05);
 
     m_solver.Init(nx, ny, 0.0, lx, 0.0, h, gamma);
-    m_solver.SetBoundaryConditions(WallBC::Periodic, WallBC::NoSlipReflective);
+    m_solver.SetBoundaryConditions(WallBC::Periodic, WallBC::Periodic, WallBC::NoSlipReflective, WallBC::NoSlipReflective);
     m_solver.SetViscosity(mu, conductivity);
     m_solver.SetBodyForceX(bodyForceX);
     Reset();

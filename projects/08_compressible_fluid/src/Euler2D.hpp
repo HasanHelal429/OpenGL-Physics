@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <vector>
 
@@ -36,12 +37,24 @@ Cons2D HllcFluxY(const Prim2D& left, const Prim2D& right, double gamma);
 
 // Ghost-cell boundary treatment for one line (row or column). Outflow is
 // the zero-gradient condition used by Phases 1-3 (default, unchanged
-// behavior); Periodic and NoSlipReflective are new in Phase 4, needed for
+// behavior); Periodic and NoSlipReflective were added in Phase 4 for
 // channel (Poiseuille) flow: periodic in the streamwise direction,
 // reflective (u=v=0 at the wall, enforced by negating ghost momentum --
 // density/energy are copied unchanged, since energy's kinetic term is
-// invariant under a velocity sign flip) cross-channel.
-enum class WallBC { Outflow, Periodic, NoSlipReflective };
+// invariant under a velocity sign flip) cross-channel. FreeSlipReflective
+// and Inflow are new for external flow past an obstacle (cylinder vortex
+// shedding): FreeSlipReflective negates only the velocity component
+// NORMAL to the boundary (a symmetry/no-penetration wall -- used at the
+// domain's top/bottom truncation, which isn't a physical wall, just where
+// the domain was cut off); Inflow fixes the ghost cells to a caller-
+// supplied constant state regardless of the interior (used at the domain
+// inlet, where the upstream condition is prescribed, not derived).
+enum class WallBC { Outflow, Periodic, NoSlipReflective, FreeSlipReflective, Inflow };
+
+// Which velocity component a FreeSlipReflective boundary should treat as
+// "normal" (negate) vs "tangential" (keep) -- X for a left/right (vertical)
+// boundary, Y for a top/bottom (horizontal) one.
+enum class BoundaryAxis { X, Y };
 
 // 2D compressible Navier-Stokes via Strang dimensional splitting: each
 // timestep is [X half-step][Y full-step][X half-step] (LeVeque, "Finite
@@ -65,7 +78,19 @@ class Euler2D {
 public:
     void Init(int nx, int ny, double xMin, double xMax, double yMin, double yMax, double gamma);
     void SetInitialCondition(const std::function<Prim2D(double x, double y)>& f);
-    void SetBoundaryConditions(WallBC bcX, WallBC bcY) { m_bcX = bcX; m_bcY = bcY; }
+    // Independent per-side boundary conditions. Periodic must be set on
+    // BOTH sides of an axis together (it wraps to the far interior cell of
+    // the same line, so a one-sided Periodic is meaningless) -- every other
+    // combination (e.g. Inflow left / Outflow right) is the point of
+    // splitting this from the old single-WallBC-per-axis API.
+    void SetBoundaryConditions(WallBC left, WallBC right, WallBC bottom, WallBC top) {
+        m_bcLeft = left;
+        m_bcRight = right;
+        m_bcBottom = bottom;
+        m_bcTop = top;
+    }
+    // The fixed upstream state used wherever a side's WallBC is Inflow.
+    void SetInflowState(const Prim2D& state) { m_inflowState = state; }
     // mu: dynamic viscosity. conductivity: Fourier heat-conduction
     // coefficient (energy equation gets +conductivity*Laplacian(T),
     // T=p/rho -- viscous heating is not modeled, see the class comment).
@@ -78,6 +103,13 @@ public:
     // periodic channel flow without needing an actual streamwise pressure
     // drop (which a periodic domain can't otherwise sustain).
     void SetBodyForceX(double forcePerVolume) { m_bodyForceX = forcePerVolume; }
+    // Immersed-boundary obstacle via cell masking (Brinkman-penalization
+    // limit, see ApplyObstacleMask's comment in Euler2D.cpp): cells where
+    // isSolid(x,y) is true have their velocity forced to zero every step,
+    // letting the existing viscous machinery diffuse the resulting no-slip
+    // condition into the surrounding fluid -- no changes needed to the
+    // Riemann solver or line-sweep structure.
+    void SetObstacleMask(const std::function<bool(double x, double y)>& isSolid);
 
     void Step(double dt);
 
@@ -90,6 +122,7 @@ public:
     double Dy() const { return m_dy; }
     double Gamma() const { return m_gamma; }
     Prim2D PrimAt(int i, int j) const;
+    bool IsSolidAt(int i, int j) const { return !m_obstacleMask.empty() && m_obstacleMask[static_cast<size_t>(j * m_nx + i)] != 0; }
 
     double TotalMass() const;
     double TotalEnergy() const;
@@ -100,12 +133,16 @@ private:
     void DiffuseX(std::vector<Cons2D>& grid, double dt) const;
     void DiffuseY(std::vector<Cons2D>& grid, double dt) const;
     void ApplyBodyForce(double dt);
+    void ApplyObstacleMask();
 
     int m_nx = 0, m_ny = 0;
     double m_xMin = 0.0, m_yMin = 0.0, m_dx = 1.0, m_dy = 1.0, m_gamma = 1.4;
-    WallBC m_bcX = WallBC::Outflow, m_bcY = WallBC::Outflow;
+    WallBC m_bcLeft = WallBC::Outflow, m_bcRight = WallBC::Outflow;
+    WallBC m_bcBottom = WallBC::Outflow, m_bcTop = WallBC::Outflow;
+    Prim2D m_inflowState;
     double m_mu = 0.0, m_conductivity = 0.0, m_bodyForceX = 0.0;
     std::vector<Cons2D> m_u; // row-major, size nx*ny, index = j*nx + i
+    std::vector<uint8_t> m_obstacleMask; // empty if no obstacle set; else size nx*ny, row-major like m_u
 };
 
 } // namespace cf
