@@ -18,9 +18,10 @@ Strang dimensional splitting), and 2D **viscous** (Newtonian shear stress +
 Fourier conduction). Validated against the exact Sod shock tube, a
 GPU-vs-CPU cross-check, an exact 2D isentropic-vortex advection solution, a
 qualitative match to the published Kurganov & Tadmor 2D Riemann
-"Configuration 3" density pattern, and the exact plane-Poiseuille velocity
-profile (0.08% error). See the top-level plan for the phase after this one
-(a design-doc writeup).
+"Configuration 3" density pattern, the exact plane-Poiseuille velocity
+profile (0.08% error), and the exact Taylor-Green vortex decay rate (1.6%
+error). Used in [`Studies/compressible_fluid`](../../../Studies/compressible_fluid/)
+for a viscosity-vs-vorticity-decay sweep.
 
 ## Physics
 
@@ -84,6 +85,16 @@ selects the viscous channel sim); see "Viscosity" below:
 python projects/08_compressible_fluid/tools/plot_poiseuille.py projects/08_compressible_fluid/out/poiseuille_channel
 ```
 
+`decks/taylor_green.toml` — 2D Taylor-Green vortex decay (`--taylor-green`
+selects the doubly-periodic sim); see "Viscosity" below:
+
+```sh
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --taylor-green \
+    --deck projects/08_compressible_fluid/decks/taylor_green.toml \
+    --out projects/08_compressible_fluid/out/taylor_green
+python projects/08_compressible_fluid/tools/plot_taylor_green.py projects/08_compressible_fluid/out/taylor_green
+```
+
 `--selftest` (no deck needed) runs four fast, deck-independent checks:
 HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
 conservation-identity check (mass and energy exactly conserved, momentum
@@ -132,19 +143,30 @@ density pattern to compare against qualitatively).
 
 `Euler2D::SetViscosity(mu, conductivity)` adds a Navier-Stokes viscous term
 on top of the inviscid Strang-split sweeps, via an extra explicit-diffusion
-sub-step each `Step()`. Two deliberate simplifications, both **exact** (zero
-error) for this project's own Poiseuille validation, though a genuinely
-general viscous flow would need the full tensor:
+sub-step each `Step()`: `mu*Laplacian(u)` added to x-momentum, `mu*Laplacian(v)`
+to y-momentum, each Laplacian assembled from one row-local `d²/dx²` pass
+(`DiffuseX`) plus one column-local `d²/dy²` pass (`DiffuseY`), so every
+viscous term stays a 1D operation like the inviscid sweeps. This is the
+exact incompressible-limit reduction of the full Newtonian viscous stress
+divergence — dropping only Stokes' hypothesis' bulk-viscosity correction
+and a mixed `d²/dxdy` cross term that cancels a compensating factor of 2
+elsewhere in the full tensor (see `Euler2D.cpp`'s `LineDiffuse` comment for
+the derivation) — exact for divergence-free flow, and a good approximation
+at the low Mach numbers this project's validation targets use.
 
-- **Shear-only stress** (Stokes' hypothesis' bulk-viscosity correction
-  dropped): `tau_xx=2*mu*du/dx`, `tau_yy=2*mu*dv/dy`, `tau_xy=mu*(du/dy+dv/dx)`.
-- **Same-line derivatives only**: each viscous force term keeps only the
-  part of its outer derivative that stays row-local (`DiffuseX`) or
-  column-local (`DiffuseY`) — e.g. `d(tau_xy)/dy`'s `du/dy` part, not its
-  `dv/dx` part (a genuine mixed `d²/dxdy` term, which would need a
-  full-grid pass rather than independent lines). For Poiseuille flow
-  (`v≡0` everywhere, `u=u(y)` only), every dropped term is identically
-  zero — the simplification costs nothing there.
+**A bug this caught, worth naming.** The first version of this diffusion
+term used coefficient `2*mu` on the direction-of-sweep ("normal") second
+derivative and `mu` on the transverse one — correct in isolation for a
+flow with *no dependence on the swept direction* (Poiseuille: `u=u(y)`
+only, so the erroneous factor multiplies an identically-zero term), but
+silently 1.5x too strong for a genuinely 2D velocity field. It passed
+Poiseuille validation (0.08% error, unaffected either way) but decayed a
+Taylor-Green vortex 2x too fast — caught only once a second, independent
+viscous-flow test existed. See docs/SIMULATION.md's Phase 4 section for
+the full derivation of why the fix is exactly `mu*Laplacian`, and the
+lesson generalizes: **a simplification validated by only one test case can
+be wrong in a way that test can't see** — same shape of lesson as
+`07_grhd`'s docs/SIMULATION.md section 8.
 
 Explicit diffusion has its own (usually tighter than the hyperbolic CFL's)
 parabolic stability limit, so `Step()` sub-cycles `DiffuseX`/`DiffuseY`
@@ -158,11 +180,24 @@ new alongside the existing `Outflow` (Phases 1-3's zero-gradient, unchanged
 default). `decks/poiseuille_channel.toml` uses periodic-x/no-slip-y; a
 constant body force (`SetBodyForceX`) drives the flow, the standard way to
 sustain a periodic channel without an actual streamwise pressure drop.
+`decks/taylor_green.toml` instead uses periodic in *both* directions — no
+walls at all.
 
-**Validation.** Started from rest, `decks/poiseuille_channel.toml` spins up
-to the analytic steady parabolic profile `u(y) = (f/(2*mu))*y*(H-y)` —
-`tools/plot_poiseuille.py` measured **0.08% max error** against it (the
-residual is compressibility: `u_max`/soundspeed ≈ 0.1, not zero).
+**Validation, two ways.**
+- **Steady state**: started from rest, `decks/poiseuille_channel.toml`
+  spins up to the analytic steady parabolic profile
+  `u(y) = (f/(2*mu))*y*(H-y)` — `tools/plot_poiseuille.py` measured
+  **0.08% max error** against it (residual: compressibility,
+  `u_max`/soundspeed ≈ 0.1, not zero).
+- **Transient decay**: `decks/taylor_green.toml`'s doubly-periodic vortex
+  pair has an exact viscous-decay solution, kinetic energy
+  `KE(t) = KE(0)*exp(-4*nu*k²*t)` — `tools/plot_taylor_green.py` fits the
+  measured log-slope and found **1.6% error** against the analytic rate
+  (residual: the inviscid HLLC/MinMod scheme's own numerical dissipation,
+  on top of the physical viscosity, plus the same small compressible
+  correction as Poiseuille — expected to be larger here than Poiseuille's
+  steady-state residual, since a genuinely time-evolving flow keeps
+  accumulating that numerical dissipation rather than converging past it).
 
 ## File map
 
@@ -174,8 +209,10 @@ residual is compressibility: `u_max`/soundspeed ≈ 0.1, not zero).
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
 | `src/CompressibleSim2D.{hpp,cpp}` | `fw::Simulation` wrapper for the 2D four-quadrant Riemann problem. |
 | `src/CompressibleSimChannel.{hpp,cpp}` | `fw::Simulation` wrapper for the viscous Poiseuille channel flow. |
-| `src/main.cpp` | CLI entry point (`--2d`/`--channel` select `CompressibleSim2D`/`CompressibleSimChannel`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
+| `src/CompressibleSimTaylorGreen.{hpp,cpp}` | `fw::Simulation` wrapper for the doubly-periodic Taylor-Green vortex decay. |
+| `src/main.cpp` | CLI entry point (`--2d`/`--channel`/`--taylor-green` select `CompressibleSim2D`/`CompressibleSimChannel`/`CompressibleSimTaylorGreen`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |
 | `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |
+| `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`. |

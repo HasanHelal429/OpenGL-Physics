@@ -1,6 +1,7 @@
 #include "CompressibleSim.hpp"
 #include "CompressibleSim2D.hpp"
 #include "CompressibleSimChannel.hpp"
+#include "CompressibleSimTaylorGreen.hpp"
 #include "Euler1D.hpp"
 #include "Euler2D.hpp"
 #include "kernels_euler1d.hpp"
@@ -30,6 +31,7 @@ struct Args {
     bool selftest = false;
     bool twoD = false;
     bool channel = false;
+    bool taylorGreen = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -44,6 +46,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--2d") a.twoD = true;
         else if (s == "--channel") a.channel = true;
+        else if (s == "--taylor-green") a.taylorGreen = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -357,7 +360,7 @@ int main(int argc, char** argv) {
     if (a.deck.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
-                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--2d|--channel]\n"
+                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--2d|--channel|--taylor-green]\n"
                      "  08_compressible_fluid --selftest\n");
         return 2;
     }
@@ -376,6 +379,11 @@ int main(int argc, char** argv) {
 
     if (a.channel) {
         cf::CompressibleSimChannel sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
+    if (a.taylorGreen) {
+        cf::CompressibleSimTaylorGreen sim;
         sim.Configure(deck);
         return fw::RunHeadless(sim, deck, opts);
     }

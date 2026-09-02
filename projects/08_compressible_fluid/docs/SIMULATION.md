@@ -135,75 +135,124 @@ here as an asymmetric smearing of the vortex along one axis; it doesn't
 at the deliberately coarse ~10-cells-per-core-radius resolution used, not
 with any directional artifact).
 
-## 5. Phase 4: viscosity, and the two simplifications that are exact for Poiseuille flow
+## 5. Phase 4: viscosity, one wrong simplification, and how a second test caught it
 
 Everything in Phases 1-3 is the compressible **Euler** equations (inviscid).
 Phase 4 adds the missing viscous terms of compressible **Navier-Stokes**: a
 Newtonian stress tensor and Fourier heat conduction, via an explicit
 diffusion sub-step appended to each `Euler2D::Step()`.
 
-Two simplifications are made, and both are worth being explicit about
-because they are not generally valid — they are exact *for this project's
-own validation target* (plane Poiseuille flow) and would need to be
-revisited for a genuinely general viscous flow:
+### 5.1 The simplification, done correctly
 
-1. **Shear-only stress** — `tau_xx=2*mu*du/dx`, `tau_yy=2*mu*dv/dy`,
-   `tau_xy=mu*(du/dy+dv/dx)`, dropping Stokes' hypothesis' bulk-viscosity
-   correction (`-2/3*mu*div(v)` inside the normal stresses). This
-   correction is a *compressibility* effect (it depends on `div(v)`, which
-   vanishes for incompressible flow); Poiseuille flow's steady state has
-   `div(v)=0` exactly, so the term this drops is exactly zero there.
-2. **Same-line derivatives only** — the outer derivative of each stress
-   term keeps only the part that's local to one row (`DiffuseX`) or one
-   column (`DiffuseY`). Concretely, the `x`-momentum's viscous force is
-   `d(tau_xx)/dx + d(tau_xy)/dy`; the `d(tau_xy)/dy` term is
-   `d/dy[mu*du/dy] + d/dy[mu*dv/dx]`, and only the first (column-local)
-   piece is kept — the second is a genuine mixed `d²v/dxdy` derivative that
-   would need values from neighboring columns, breaking the
-   independent-line structure every other operator in this project relies
-   on. For Poiseuille flow, `v≡0` everywhere, so `dv/dx≡0` and the dropped
-   term is exactly zero. (The symmetric term dropped from the `y`-momentum
-   equation, `d/dx[mu*du/dy]`, is also exactly zero there: `u=u(y)` has no
-   `x`-dependence, so `du/dy` doesn't vary in `x` either.)
+The full Newtonian viscous stress divergence for the `x`-momentum equation
+is `d(tau_xx)/dx + d(tau_xy)/dy`, with `tau_xx=2*mu*du/dx` and
+`tau_xy=mu*(du/dy+dv/dx)` (Stokes' hypothesis' bulk-viscosity correction
+dropped throughout — a genuine, separate simplification, exactly zero for
+incompressible flow since it's proportional to `div(v)`). Expanding:
 
-Because both omissions are exact for the validation target, this is a
-correctness-preserving simplification for that target, not an
-approximation being passed off as one — but it is a real scope boundary: a
-flow with actual cross-terms (a lid-driven cavity's corner vortices, say)
-would need the full stress tensor and a genuinely 2D (not per-line)
-diffusion operator.
+```
+d(tau_xx)/dx + d(tau_xy)/dy = 2*mu*d^2u/dx^2 + mu*d^2u/dy^2 + mu*d^2v/dxdy
+```
 
-**Stability.** Explicit diffusion has a parabolic stability limit
-(`dt <~ dx²/(2*coefficient)`) that's typically *tighter* than the
-hyperbolic CFL limit once viscosity is resolved on a reasonably fine grid —
-the opposite scaling from advection, since the diffusive limit shrinks
-quadratically with resolution while advection's shrinks linearly. Rather
-than requiring a deck's `time.cfl` to somehow already account for this,
-`Euler2D::Step` sub-cycles the diffusion update on its own, computing
-however many smaller sub-steps its own stability limit requires within
-whatever `dt` it's handed.
+The `d^2v/dxdy` term is a genuine mixed derivative, needing values from
+neighboring lines — incompatible with this project's per-line (`DiffuseX`/
+`DiffuseY`) structure. Simply dropping it, keeping the `2*mu` and `mu`
+coefficients as written, is **wrong in general**: for divergence-free flow
+(`du/dx=-dv/dy`, differentiating: `d^2u/dx^2=-d^2v/dxdy`), the correct
+reduction substitutes this identity into the mixed term instead of dropping
+it outright:
 
-**Boundary conditions, generalized.** Poiseuille flow needs two BC types
-neither prior phase required: periodic in the streamwise (`x`) direction
-(so an infinite channel can be represented on a finite domain), and
-no-slip at the two walls (`y=0` and `y=H`). `WallBC::NoSlipReflective`
-negates ghost-cell momentum (density/energy are copied unchanged, since
-energy's kinetic term `1/2 rho (u²+v²)` is invariant under a velocity sign
-flip) — a standard Godunov-code technique that makes velocity extrapolate
-to exactly zero at the wall face without needing to special-case the
-Riemann solver itself. A constant body force (`SetBodyForceX`) replaces
-what would otherwise be an explicit streamwise pressure gradient, which a
-periodic domain has no way to sustain on its own.
+```
+2*mu*d^2u/dx^2 + mu*d^2u/dy^2 + mu*(-d^2u/dx^2) = mu*d^2u/dx^2 + mu*d^2u/dy^2 = mu*Laplacian(u)
+```
 
-**Validation.** `decks/poiseuille_channel.toml` starts from rest and spins
-up under a constant body force; the exact steady solution is the textbook
-parabolic profile `u(y) = (f/(2*mu))*y*(H-y)`. `tools/plot_poiseuille.py`
-measures the final-frame profile against it: **0.08% max relative error**,
-with the residual attributable to the flow's small but nonzero
-compressibility (`u_max`/soundspeed ≈ 0.1) rather than any bug — a
-literally-incompressible solver would be expected to do slightly better,
-which is exactly the trade this project's "stronger, but still
-compressible" formalism makes.
+— the mixed term doesn't vanish; it exactly **cancels one of the two
+factor-of-2 normal-derivative terms**. The correct per-line implementation
+is therefore a *uniform* coefficient `mu` in both directions (`DiffuseX`
+contributes `mu*d^2u/dx^2`, `DiffuseY` contributes `mu*d^2u/dy^2`, summing
+to `mu*Laplacian(u)`), not `2*mu` on the "normal" direction and `mu` on the
+"transverse" one.
+
+### 5.2 The bug, and why one validation target wasn't enough to catch it
+
+The first implementation used the naive (uncancelled) form —
+coefficient `2*mu` on the swept-direction second derivative, `mu` on the
+other — reasoning that dropping "just the cross term" was the only
+simplification being made. **It passed Poiseuille validation** (0.08%
+error, see below) because Poiseuille flow has `u=u(y)` only: the swept-in-x
+second derivative `d^2u/dx^2` is *identically zero* regardless of its
+coefficient, so the erroneous `2*mu` multiplies nothing. Poiseuille flow
+genuinely cannot distinguish the correct coefficient from the wrong one.
+
+The bug surfaced building this project's second viscous validation target,
+a doubly-periodic **Taylor-Green vortex** (`decks/taylor_green.toml`,
+`u=U0*cos(kx)*sin(ky)`) — a flow with real second derivatives in *both*
+directions, where the miscounted factor doesn't cancel: the wrong
+coefficients give `d(tau_xx)/dx + d(tau_xy)/dy = 2*mu*(-k^2 u) + mu*(-k^2 u)
+= -3*mu*k^2*u` where the correct answer is `mu*Laplacian(u) = -2*mu*k^2*u`
+— a real, `1.5`x error in the velocity decay rate (`3`x in kinetic energy,
+since `KE∝velocity²`). The measured kinetic-energy decay rate came out at
+almost exactly double the (initially, also miscalculated — see below) exact
+prediction, which is what led to finding both errors.
+
+**The general lesson** (stated because it recurred in `07_grhd`'s own
+development too, section 8 there): a simplification validated against only
+one test case can be silently wrong in a way that test case cannot reveal,
+because the very thing that makes the target simple enough to have a clean
+exact answer (here, `u`'s complete lack of `x`-dependence) is often exactly
+what makes it blind to the specific error. The fix, both times, was the
+same: get a second, independently-chosen validation target whose structure
+is different enough to exercise the part of the formula the first target
+couldn't reach.
+
+### 5.3 Stability and boundary conditions
+
+Explicit diffusion has a parabolic stability limit (`dt <~
+dx²/(2*coefficient)`) that's typically *tighter* than the hyperbolic CFL
+limit once viscosity is resolved on a reasonably fine grid — the opposite
+scaling from advection, since the diffusive limit shrinks quadratically
+with resolution while advection's shrinks linearly. Rather than requiring
+a deck's `time.cfl` to somehow already account for this, `Euler2D::Step`
+sub-cycles the diffusion update on its own, computing however many smaller
+sub-steps its own stability limit requires within whatever `dt` it's
+handed.
+
+Poiseuille flow needs two BC types neither prior phase required: periodic
+in the streamwise (`x`) direction (so an infinite channel can be
+represented on a finite domain), and no-slip at the two walls (`y=0` and
+`y=H`). `WallBC::NoSlipReflective` negates ghost-cell momentum
+(density/energy are copied unchanged, since energy's kinetic term
+`1/2 rho (u²+v²)` is invariant under a velocity sign flip) — a standard
+Godunov-code technique that makes velocity extrapolate to exactly zero at
+the wall face without needing to special-case the Riemann solver itself. A
+constant body force (`SetBodyForceX`) replaces what would otherwise be an
+explicit streamwise pressure gradient, which a periodic domain has no way
+to sustain on its own. Taylor-Green needs no walls at all — periodic in
+*both* directions.
+
+### 5.4 Validation
+
+**Steady state.** `decks/poiseuille_channel.toml` starts from rest and
+spins up under a constant body force; the exact steady solution is the
+textbook parabolic profile `u(y) = (f/(2*mu))*y*(H-y)`.
+`tools/plot_poiseuille.py` measures the final-frame profile against it:
+**0.08% max relative error**, attributable to the flow's small but nonzero
+compressibility (`u_max`/soundspeed ≈ 0.1) rather than any bug.
+
+**Transient decay.** `decks/taylor_green.toml`'s vortex pair has an exact
+viscous-decay solution. `u`'s Laplacian is `-2*k²*u` (wavenumber `k` in
+*both* `x` and `y`, each contributing `-k²*u`), so velocity decays as
+`exp(-2*nu*k²*t)` and kinetic energy (quadratic in velocity) as
+`exp(-4*nu*k²*t)` — getting this factor of 2 right was itself a second,
+smaller mistake made and caught while writing the validation script (the
+first draft assumed a single-direction wavenumber's `-k²*u`, off by exactly
+the same kind of "which directions actually contribute" error as the
+solver bug above, underscoring the same lesson from a different angle).
+`tools/plot_taylor_green.py` fits the measured `log(KE(t))` slope and
+found **1.6% error** against `4*nu*k²` — larger than Poiseuille's 0.08%
+because a genuinely time-evolving flow keeps accumulating the inviscid
+scheme's own numerical dissipation on top of the physical viscosity, rather
+than converging past it the way a steady state does.
 
 ---
 

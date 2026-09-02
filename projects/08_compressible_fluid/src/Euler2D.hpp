@@ -49,16 +49,18 @@ enum class WallBC { Outflow, Periodic, NoSlipReflective };
 // flux, where each fractional step reuses Euler1D's exact MinMod+HLLC+RK2
 // line update (AdvanceLineRK2 in Euler2D.cpp) applied row-by-row (X) or
 // column-by-column (Y). When viscosity is set (SetViscosity), an explicit
-// diffusion sub-step follows, using a SIMPLIFIED Newtonian stress tensor
-// (shear terms only, tau_xx=2*mu*du/dx, tau_yy=2*mu*dv/dy,
-// tau_xy=mu*(du/dy+dv/dx) -- Stokes' hypothesis' bulk-viscosity correction
-// dropped) further approximated by keeping only the "same-line" derivative
-// of each stress term (e.g. d(tau_xy)/dy's du/dy part, not its dv/dx part)
-// so every viscous term stays a row-local or column-local Laplacian, exactly
-// like the inviscid sweeps. Both omissions are exact (introduce zero error)
-// for a flow with no streamwise variation and no cross-channel velocity --
-// precisely this project's Poiseuille validation (see docs/SIMULATION.md) --
-// but would need the full tensor for a general viscous flow.
+// diffusion sub-step follows, adding mu*Laplacian(u) to x-momentum and
+// mu*Laplacian(v) to y-momentum (each Laplacian assembled from one
+// row-local d^2/dx^2 pass plus one column-local d^2/dy^2 pass, so every
+// viscous term stays a 1D operation, exactly like the inviscid sweeps).
+// This is the exact incompressible-limit reduction of the full Newtonian
+// viscous stress divergence (dropping only Stokes' hypothesis' bulk-
+// viscosity correction and the mixed d^2/dxdy cross term, which cancel a
+// compensating factor of 2 in the full tensor -- see LineDiffuse's comment
+// in Euler2D.cpp for the derivation, including a real bug this project hit
+// by getting that cancellation wrong on the first attempt) -- exact for a
+// genuinely divergence-free flow, and a good approximation at the low Mach
+// numbers this project's validation targets use.
 class Euler2D {
 public:
     void Init(int nx, int ny, double xMin, double xMax, double yMin, double yMax, double gamma);
