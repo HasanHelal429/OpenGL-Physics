@@ -4,6 +4,7 @@ add_executable(08_compressible_fluid
     src/Euler2D.cpp
     src/CompressibleSim.cpp
     src/CompressibleSim2D.cpp
+    src/CompressibleSimChannel.cpp
 )
 
 target_link_libraries(08_compressible_fluid PRIVATE physgl)

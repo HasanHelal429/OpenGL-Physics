@@ -12,12 +12,14 @@ shock-capturing conservation-law scheme — it can resolve a real discontinuity
 (a shock) without producing spurious oscillations or losing mass/momentum/
 energy across it.
 
-**Status: Phase 3 (this phase)** — 1D (CPU + GPU) and 2D (CPU, via Strang
-dimensional splitting), validated against the exact Sod shock tube, a
-GPU-vs-CPU cross-check, an exact 2D isentropic-vortex advection solution,
-and a qualitative match to the published Kurganov & Tadmor 2D Riemann
-"Configuration 3" density pattern. See the top-level plan for the phases
-after this one (viscous terms + Poiseuille flow, then a design-doc writeup).
+**Status: Phase 4 (this phase)** — 1D (CPU + GPU), 2D inviscid (CPU, via
+Strang dimensional splitting), and 2D **viscous** (Newtonian shear stress +
+Fourier conduction). Validated against the exact Sod shock tube, a
+GPU-vs-CPU cross-check, an exact 2D isentropic-vortex advection solution, a
+qualitative match to the published Kurganov & Tadmor 2D Riemann
+"Configuration 3" density pattern, and the exact plane-Poiseuille velocity
+profile (0.08% error). See the top-level plan for the phase after this one
+(a design-doc writeup).
 
 ## Physics
 
@@ -39,14 +41,14 @@ bounds use the simple Davis estimate (`min/max` of `u±c` on each side).
 **Time integration.** RK2 (Heun's method), identical in structure to
 `07_grhd`.
 
-**What's absent, on purpose, at this phase:** geometric source terms (flat
-metric — they're identically zero, so the whole term simply doesn't
-appear), viscosity (Phase 4), and a genuinely adaptive per-step CFL
-controller — `dt` is fixed once at `Configure()` from the initial
-condition's max wave speed (`Euler1D::MaxWaveSpeed()`), safe for a single
-self-similar Riemann problem since a shock/rarefaction/contact's speeds are
-always bounded by the data (see `CompressibleSim.cpp`'s comment) but not
-something a later time-varying flow can rely on.
+**What's absent, on purpose:** geometric source terms (flat metric — they're
+identically zero, so the whole term simply doesn't appear), and a genuinely
+adaptive per-step CFL controller — `dt` is fixed once at `Configure()` from
+the initial condition's max wave speed (`Euler1D::MaxWaveSpeed()`), safe for
+a single self-similar Riemann problem since a shock/rarefaction/contact's
+speeds are always bounded by the data (see `CompressibleSim.cpp`'s comment)
+but not something a later time-varying flow can rely on in general (the
+Poiseuille deck below sidesteps this a different way — see its own comment).
 
 ## Validation
 
@@ -69,6 +71,16 @@ python projects/08_compressible_fluid/tools/plot_shocktube.py projects/08_compre
     --deck projects/08_compressible_fluid/decks/riemann2d_config3.toml \
     --out projects/08_compressible_fluid/out/riemann2d_config3
 python projects/08_compressible_fluid/tools/plot_riemann2d.py projects/08_compressible_fluid/out/riemann2d_config3
+```
+
+`decks/poiseuille_channel.toml` — plane Poiseuille flow (`--channel`
+selects the viscous channel sim); see "Viscosity" below:
+
+```sh
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --channel \
+    --deck projects/08_compressible_fluid/decks/poiseuille_channel.toml \
+    --out projects/08_compressible_fluid/out/poiseuille_channel
+python projects/08_compressible_fluid/tools/plot_poiseuille.py projects/08_compressible_fluid/out/poiseuille_channel
 ```
 
 `--selftest` (no deck needed) runs four fast, deck-independent checks:
@@ -115,16 +127,54 @@ reproduce Kurganov & Tadmor (2002)'s 2D Riemann "Configuration 3" (four
 quadrant states, no exact solution, but a widely published reference
 density pattern to compare against qualitatively).
 
+## Viscosity: Newtonian stress + Fourier conduction
+
+`Euler2D::SetViscosity(mu, conductivity)` adds a Navier-Stokes viscous term
+on top of the inviscid Strang-split sweeps, via an extra explicit-diffusion
+sub-step each `Step()`. Two deliberate simplifications, both **exact** (zero
+error) for this project's own Poiseuille validation, though a genuinely
+general viscous flow would need the full tensor:
+
+- **Shear-only stress** (Stokes' hypothesis' bulk-viscosity correction
+  dropped): `tau_xx=2*mu*du/dx`, `tau_yy=2*mu*dv/dy`, `tau_xy=mu*(du/dy+dv/dx)`.
+- **Same-line derivatives only**: each viscous force term keeps only the
+  part of its outer derivative that stays row-local (`DiffuseX`) or
+  column-local (`DiffuseY`) — e.g. `d(tau_xy)/dy`'s `du/dy` part, not its
+  `dv/dx` part (a genuine mixed `d²/dxdy` term, which would need a
+  full-grid pass rather than independent lines). For Poiseuille flow
+  (`v≡0` everywhere, `u=u(y)` only), every dropped term is identically
+  zero — the simplification costs nothing there.
+
+Explicit diffusion has its own (usually tighter than the hyperbolic CFL's)
+parabolic stability limit, so `Step()` sub-cycles `DiffuseX`/`DiffuseY`
+against `0.4*dx_min²/max(mu, conductivity)` automatically — a deck's chosen
+`time.cfl` never needs to know about it.
+
+**No-slip / periodic boundaries.** `WallBC::NoSlipReflective` (ghost
+momentum negated, so velocity linearly extrapolates to exactly zero at the
+wall face) and `WallBC::Periodic` (ghost wraps to the far interior cell) are
+new alongside the existing `Outflow` (Phases 1-3's zero-gradient, unchanged
+default). `decks/poiseuille_channel.toml` uses periodic-x/no-slip-y; a
+constant body force (`SetBodyForceX`) drives the flow, the standard way to
+sustain a periodic channel without an actual streamwise pressure drop.
+
+**Validation.** Started from rest, `decks/poiseuille_channel.toml` spins up
+to the analytic steady parabolic profile `u(y) = (f/(2*mu))*y*(H-y)` —
+`tools/plot_poiseuille.py` measured **0.08% max error** against it (the
+residual is compressibility: `u_max`/soundspeed ≈ 0.1, not zero).
+
 ## File map
 
 | File | Role |
 |---|---|
 | `src/Euler1D.{hpp,cpp}` | 1D physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — the reference `kernels_euler1d.hpp` is cross-checked against. |
 | `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
-| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, plus the transverse-momentum HLLC extension. CPU only. |
+| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, and (Phase 4) the viscous diffusion sub-step + `WallBC` boundary conditions. CPU only. |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
 | `src/CompressibleSim2D.{hpp,cpp}` | `fw::Simulation` wrapper for the 2D four-quadrant Riemann problem. |
-| `src/main.cpp` | CLI entry point (`--2d` selects `CompressibleSim2D`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
+| `src/CompressibleSimChannel.{hpp,cpp}` | `fw::Simulation` wrapper for the viscous Poiseuille channel flow. |
+| `src/main.cpp` | CLI entry point (`--2d`/`--channel` select `CompressibleSim2D`/`CompressibleSimChannel`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |
+| `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |

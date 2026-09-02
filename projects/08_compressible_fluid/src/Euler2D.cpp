@@ -141,13 +141,42 @@ constexpr int kGhost = 2;
 using HllcFluxFn = Cons2D (*)(const Prim2D&, const Prim2D&, double);
 using ToPrimFn = Prim2D (*)(const Cons2D&, double);
 
-// Zero-gradient (transmissive/outflow) ghost cells, same convention as
-// Euler1D::ApplyBoundary.
-void ApplyBoundaryLine(std::vector<Cons2D>& u) {
+// Ghost-cell boundary fill for one padded line. Outflow reproduces
+// Euler1D::ApplyBoundary's zero-gradient convention exactly. Periodic wraps
+// each ghost to the interior cell the same distance in from the FAR edge
+// (so the line reads as one period of an infinite periodic sequence).
+// NoSlipReflective mirrors each ghost to the interior cell the same
+// distance in from its OWN (near) edge, with momentum negated, so velocity
+// linearly extrapolates to exactly zero at the wall face -- density/energy
+// are copied unchanged, since energy's kinetic term is invariant under a
+// velocity sign flip.
+void ApplyBoundaryLine(std::vector<Cons2D>& u, WallBC bc) {
     const int total = static_cast<int>(u.size());
+    const int n = total - 2 * kGhost;
     for (int g = 0; g < kGhost; ++g) {
-        u[static_cast<size_t>(g)] = u[static_cast<size_t>(kGhost)];
-        u[static_cast<size_t>(total - 1 - g)] = u[static_cast<size_t>(total - 1 - kGhost)];
+        const int leftGhost = g;
+        const int rightGhost = total - kGhost + g;
+        switch (bc) {
+        case WallBC::Outflow:
+            u[static_cast<size_t>(leftGhost)] = u[static_cast<size_t>(kGhost)];
+            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + n - 1)];
+            break;
+        case WallBC::Periodic:
+            u[static_cast<size_t>(leftGhost)] = u[static_cast<size_t>(kGhost + n - (kGhost - g))];
+            u[static_cast<size_t>(rightGhost)] = u[static_cast<size_t>(kGhost + g)];
+            break;
+        case WallBC::NoSlipReflective: {
+            Cons2D lm = u[static_cast<size_t>(kGhost + (kGhost - 1 - g))];
+            lm.momX = -lm.momX;
+            lm.momY = -lm.momY;
+            u[static_cast<size_t>(leftGhost)] = lm;
+            Cons2D rm = u[static_cast<size_t>(kGhost + n - 1 - g)];
+            rm.momX = -rm.momX;
+            rm.momY = -rm.momY;
+            u[static_cast<size_t>(rightGhost)] = rm;
+            break;
+        }
+        }
     }
 }
 
@@ -193,11 +222,11 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
 // fractional step dt, given its own ghost-padded flux operator -- the same
 // algorithm as Euler1D::Step, generalized over direction (HllcFluxX/Y).
 std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double dt, double dx, double gamma,
-                                    HllcFluxFn hllc) {
+                                    HllcFluxFn hllc, WallBC bc) {
     const int n = static_cast<int>(interior.size());
     std::vector<Cons2D> padded(static_cast<size_t>(n + 2 * kGhost));
     for (int i = 0; i < n; ++i) padded[static_cast<size_t>(i + kGhost)] = interior[static_cast<size_t>(i)];
-    ApplyBoundaryLine(padded);
+    ApplyBoundaryLine(padded, bc);
 
     const std::vector<Cons2D> k1 = LineRhs(padded, gamma, dx, hllc, ToPrim2D);
 
@@ -210,7 +239,7 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         c.momY += dt * d.momY;
         c.energy += dt * d.energy;
     }
-    ApplyBoundaryLine(stage1);
+    ApplyBoundaryLine(stage1, bc);
     const std::vector<Cons2D> k2 = LineRhs(stage1, gamma, dx, hllc, ToPrim2D);
 
     std::vector<Cons2D> result(static_cast<size_t>(n));
@@ -225,6 +254,44 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         out.energy = 0.5 * (a.energy + b.energy + dt * d2.energy);
     }
     return result;
+}
+
+// Central-difference Laplacian diffusion increment for one line (row or
+// column), shared by DiffuseX/DiffuseY. `normalIsX` selects which momentum
+// component is "normal" to this line's direction (gets the full tau_xx/
+// tau_yy coefficient 2*mu) vs "transverse" (gets the tau_xy/tau_yx
+// coefficient mu) -- see Euler2D.hpp's class comment for the cross-term
+// simplification this implements (this line-local Laplacian omits the
+// mixed d^2/dxdy term of the full stress divergence).
+std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, double mu, double conductivity,
+                                 double gamma, bool normalIsX) {
+    const int total = static_cast<int>(padded.size());
+    const int n = total - 2 * kGhost;
+    std::vector<Prim2D> prim(static_cast<size_t>(total));
+    for (int i = 0; i < total; ++i) prim[static_cast<size_t>(i)] = ToPrim2D(padded[static_cast<size_t>(i)], gamma);
+
+    const double invDx2 = 1.0 / (dx * dx);
+    std::vector<Cons2D> delta(static_cast<size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const int gi = i + kGhost;
+        const Prim2D& pm = prim[static_cast<size_t>(gi - 1)];
+        const Prim2D& p0 = prim[static_cast<size_t>(gi)];
+        const Prim2D& pp = prim[static_cast<size_t>(gi + 1)];
+        const double d2u = (pp.u - 2.0 * p0.u + pm.u) * invDx2;
+        const double d2v = (pp.v - 2.0 * p0.v + pm.v) * invDx2;
+        const double tM = pm.p / pm.rho, t0 = p0.p / p0.rho, tP = pp.p / pp.rho;
+        const double d2T = (tP - 2.0 * t0 + tM) * invDx2;
+        Cons2D& d = delta[static_cast<size_t>(i)];
+        if (normalIsX) {
+            d.momX = 2.0 * mu * d2u;
+            d.momY = mu * d2v;
+        } else {
+            d.momY = 2.0 * mu * d2v;
+            d.momX = mu * d2u;
+        }
+        d.energy = conductivity * d2T;
+    }
+    return delta;
 }
 
 } // namespace
@@ -254,7 +321,7 @@ void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
     std::vector<Cons2D> row(static_cast<size_t>(m_nx));
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) row[static_cast<size_t>(i)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated = AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX);
+        const std::vector<Cons2D> updated = AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX, m_bcX);
         for (int i = 0; i < m_nx; ++i) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(i)];
     }
 }
@@ -263,8 +330,47 @@ void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
     std::vector<Cons2D> col(static_cast<size_t>(m_ny));
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) col[static_cast<size_t>(j)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated = AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY);
+        const std::vector<Cons2D> updated = AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY, m_bcY);
         for (int j = 0; j < m_ny; ++j) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(j)];
+    }
+}
+
+void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
+    std::vector<Cons2D> padded(static_cast<size_t>(m_nx + 2 * kGhost));
+    for (int j = 0; j < m_ny; ++j) {
+        for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
+        ApplyBoundaryLine(padded, m_bcX);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_gamma, /*normalIsX=*/true);
+        for (int i = 0; i < m_nx; ++i) {
+            Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
+            c.momX += dt * delta[static_cast<size_t>(i)].momX;
+            c.momY += dt * delta[static_cast<size_t>(i)].momY;
+            c.energy += dt * delta[static_cast<size_t>(i)].energy;
+        }
+    }
+}
+
+void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
+    std::vector<Cons2D> padded(static_cast<size_t>(m_ny + 2 * kGhost));
+    for (int i = 0; i < m_nx; ++i) {
+        for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
+        ApplyBoundaryLine(padded, m_bcY);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_gamma, /*normalIsX=*/false);
+        for (int j = 0; j < m_ny; ++j) {
+            Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
+            c.momX += dt * delta[static_cast<size_t>(j)].momX;
+            c.momY += dt * delta[static_cast<size_t>(j)].momY;
+            c.energy += dt * delta[static_cast<size_t>(j)].energy;
+        }
+    }
+}
+
+void Euler2D::ApplyBodyForce(double dt) {
+    if (m_bodyForceX == 0.0) return;
+    for (Cons2D& c : m_u) {
+        const double u = c.momX / c.rho;
+        c.energy += m_bodyForceX * u * dt; // work done by the force (explicit, using pre-update u)
+        c.momX += m_bodyForceX * dt;
     }
 }
 
@@ -275,6 +381,24 @@ void Euler2D::Step(double dt) {
     SweepX(m_u, 0.5 * dt);
     SweepY(m_u, dt);
     SweepX(m_u, 0.5 * dt);
+
+    if (m_mu > 0.0 || m_conductivity > 0.0) {
+        // Explicit diffusion has a parabolic stability limit (dt <~
+        // dx^2/(2*coeff)), generally tighter than the hyperbolic CFL limit
+        // dt was chosen from (see CompressibleSim2D.cpp) once viscosity is
+        // resolved on a fine grid -- sub-cycle so correctness never depends
+        // on the caller's dt happening to already satisfy it.
+        const double minDx2 = std::min(m_dx * m_dx, m_dy * m_dy);
+        const double diffCoeff = std::max(m_mu, m_conductivity);
+        const double dtDiffMax = 0.4 * minDx2 / diffCoeff;
+        const int nSub = std::max(1, static_cast<int>(std::ceil(dt / dtDiffMax)));
+        const double subDt = dt / nSub;
+        for (int s = 0; s < nSub; ++s) {
+            DiffuseX(m_u, subDt);
+            DiffuseY(m_u, subDt);
+        }
+    }
+    ApplyBodyForce(dt);
 }
 
 double Euler2D::MaxWaveSpeedX() const {

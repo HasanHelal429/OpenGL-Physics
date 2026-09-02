@@ -1,5 +1,6 @@
 #include "CompressibleSim.hpp"
 #include "CompressibleSim2D.hpp"
+#include "CompressibleSimChannel.hpp"
 #include "Euler1D.hpp"
 #include "Euler2D.hpp"
 #include "kernels_euler1d.hpp"
@@ -28,6 +29,7 @@ struct Args {
     int substeps = 0;
     bool selftest = false;
     bool twoD = false;
+    bool channel = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -41,6 +43,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--2d") a.twoD = true;
+        else if (s == "--channel") a.channel = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -354,7 +357,7 @@ int main(int argc, char** argv) {
     if (a.deck.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
-                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--2d]\n"
+                     "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--2d|--channel]\n"
                      "  08_compressible_fluid --selftest\n");
         return 2;
     }
@@ -371,6 +374,11 @@ int main(int argc, char** argv) {
     opts.frames = a.frames;
     opts.substeps = a.substeps;
 
+    if (a.channel) {
+        cf::CompressibleSimChannel sim;
+        sim.Configure(deck);
+        return fw::RunHeadless(sim, deck, opts);
+    }
     if (a.twoD) {
         cf::CompressibleSim2D sim;
         sim.Configure(deck);
