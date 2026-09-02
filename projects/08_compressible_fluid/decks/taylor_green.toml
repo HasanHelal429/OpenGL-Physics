@@ -1,0 +1,29 @@
+title = "Compressible Navier-Stokes -- 2D Taylor-Green vortex decay"
+
+# The classic Taylor-Green (1937) vortex: a doubly-periodic array of
+# counter-rotating vortices with an exact viscous-decay solution
+# (incompressible NS): u,v decay as exp(-nu*k^2*t), kinetic energy (quadratic
+# in velocity) as exp(-2*nu*k^2*t). u0 is kept well below the sound speed
+# (soundspeed = sqrt(gamma*p0/rho0) ~ 1.18 here, u0=0.1 -> Mach ~0.08) so
+# compressible corrections stay a small effect, not a dominant one -- see
+# tools/plot_taylor_green.py for how close the measured decay rate actually
+# comes to the analytic incompressible prediction.
+[grid]
+n = 64
+length = 1.0
+
+[physics]
+gamma = 1.4
+rho0 = 1.0
+p0 = 1.0
+mu = 0.01
+conductivity = 0.0
+
+[taylor_green]
+u0 = 0.1
+wavenumber_multiplier = 1
+
+[time]
+cfl = 0.4
+substeps_per_frame = 40
+frames = 50

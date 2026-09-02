@@ -257,14 +257,25 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
 }
 
 // Central-difference Laplacian diffusion increment for one line (row or
-// column), shared by DiffuseX/DiffuseY. `normalIsX` selects which momentum
-// component is "normal" to this line's direction (gets the full tau_xx/
-// tau_yy coefficient 2*mu) vs "transverse" (gets the tau_xy/tau_yx
-// coefficient mu) -- see Euler2D.hpp's class comment for the cross-term
-// simplification this implements (this line-local Laplacian omits the
-// mixed d^2/dxdy term of the full stress divergence).
+// column), shared by DiffuseX/DiffuseY. Adds mu*d2(u)/dx_line^2 to momX and
+// mu*d2(v)/dx_line^2 to momY -- summed over both DiffuseX and DiffuseY, this
+// gives exactly mu*Laplacian(u) and mu*Laplacian(v), the correct
+// incompressible-limit reduction of the full Newtonian viscous stress
+// divergence (see Euler2D.hpp's class comment): for divergence-free flow,
+// d(tau_xx)/dx+d(tau_xy)/dy = 2*mu*d^2u/dx^2 + mu*d^2u/dy^2 + mu*d^2v/dxdy
+// collapses to mu*Laplacian(u) exactly, using du/dx=-dv/dy (incompressibility)
+// to rewrite the mixed term as -mu*d^2u/dx^2, which cancels one of the two
+// factors of 2*mu*d^2u/dx^2. Implementing that cancellation directly (a
+// uniform coefficient mu in every direction, dropping the mixed term
+// entirely) reproduces the same total instead of computing the identity
+// via two separate uncancelled pieces (this project's first attempt at
+// this function skipped that cancellation and used a coefficient of 2*mu
+// on the normal derivative alone -- exactly correct for a flow with no
+// dependence in the swept direction, i.e. Poiseuille, but silently 1.5x
+// too strong for a genuinely 2D velocity field, i.e. Taylor-Green -- see
+// docs/SIMULATION.md's Phase 4 postmortem for how the bug was caught).
 std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, double mu, double conductivity,
-                                 double gamma, bool normalIsX) {
+                                 double gamma) {
     const int total = static_cast<int>(padded.size());
     const int n = total - 2 * kGhost;
     std::vector<Prim2D> prim(static_cast<size_t>(total));
@@ -282,13 +293,8 @@ std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, do
         const double tM = pm.p / pm.rho, t0 = p0.p / p0.rho, tP = pp.p / pp.rho;
         const double d2T = (tP - 2.0 * t0 + tM) * invDx2;
         Cons2D& d = delta[static_cast<size_t>(i)];
-        if (normalIsX) {
-            d.momX = 2.0 * mu * d2u;
-            d.momY = mu * d2v;
-        } else {
-            d.momY = 2.0 * mu * d2v;
-            d.momX = mu * d2u;
-        }
+        d.momX = mu * d2u;
+        d.momY = mu * d2v;
         d.energy = conductivity * d2T;
     }
     return delta;
@@ -340,7 +346,7 @@ void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcX);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_gamma, /*normalIsX=*/true);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_gamma);
         for (int i = 0; i < m_nx; ++i) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
             c.momX += dt * delta[static_cast<size_t>(i)].momX;
@@ -355,7 +361,7 @@ void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
     for (int i = 0; i < m_nx; ++i) {
         for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcY);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_gamma, /*normalIsX=*/false);
+        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_gamma);
         for (int j = 0; j < m_ny; ++j) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
             c.momX += dt * delta[static_cast<size_t>(j)].momX;
