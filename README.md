@@ -45,6 +45,16 @@ projects/            One executable per simulation. Numbered by creation order.
                        (current): self-gravitating SPH star (GPU compute
                        shaders) in hydrostatic equilibrium, no black hole yet
                        — see its README.
+  07_grhd/            General-relativistic hydrodynamics: 1D flat-spacetime
+                       shock tube, then a fluid orbiting a Schwarzschild/Kerr
+                       black hole (Valencia formulation, HLLE, MinMod, RK2)
+                       — see its README and docs/SIMULATION.md.
+  08_compressible_fluid/ Compressible Euler/Navier-Stokes: the flat-spacetime,
+                       non-relativistic limit of 07_grhd's formalism (HLLC
+                       instead of HLLE, closed-form primitive recovery, no
+                       geometric source terms), 1D+2D, CPU+GPU, plus a
+                       Newtonian-viscosity extension validated against plane
+                       Poiseuille flow — see its README and docs/SIMULATION.md.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so
