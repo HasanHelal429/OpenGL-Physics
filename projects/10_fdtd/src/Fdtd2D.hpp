@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Cpml.hpp"
+#include "IncidentWave.hpp"
+#include "Materials.hpp"
 
 #include "framework/ComputeShader.hpp"
 #include "framework/Simulation.hpp"
@@ -20,16 +22,18 @@ namespace fdtd {
 // A source term added to E_z at one grid point (soft source): a broadband
 // Gaussian pulse or a ramped continuous wave.
 struct Source {
-    enum Kind { Gaussian, Sine };
+    enum Kind { Gaussian, Sine, Tfsf };
     Kind kind = Gaussian;
-    int i = 0, j = 0;
+    int i = 0, j = 0;       // grid point (soft point source; ignored for Tfsf)
     double amplitude = 1.0;
     double f0 = 0.05;       // centre / carrier frequency (cycles per unit time)
     double bandwidth = 0.0; // Gaussian: >0 sets tau; else tau from f0
     double t0 = 0.0;        // Gaussian centre time (0 -> auto, ~4 tau)
     double tau = 0.0;       // filled in at parse time
     double rampCycles = 3.0;// Sine: raised-cosine turn-on over this many periods
+    double angleDeg = 90.0; // Tfsf: plane-wave propagation direction from +x
 
+    // The scalar temporal waveform at time t (t < 0 -> 0).
     double operator()(double t) const;
 };
 
@@ -84,6 +88,13 @@ private:
     void UpdateE();
     void ApplyMur();
     void InjectSources();
+    void EnforcePec();
+
+    // TFSF plane-wave injection: incident field from the 1D auxiliary grid.
+    double IncidentEz(double x, double y) const;
+    void IncidentH(double x, double y, double& hx, double& hy) const;
+    void TfsfCorrectH();
+    void TfsfCorrectE();
 
     void InitGpu();
     void StepGpu(int substeps);
@@ -103,8 +114,21 @@ private:
     std::vector<double> m_ezPrev;      // previous-step E_z, for Mur
     std::vector<double> m_hxPrev, m_hyPrev;  // H(n-1/2), for the exact energy
     std::vector<double> m_ca, m_cb;    // E update coefficients (per cell)
-    double m_muInv = 1.0;             // 1/mu, uniform in Phase 1
+    std::vector<double> m_muInvCell;   // 1/mu_r per cell (H update)
     double m_energy = 0.0;
+
+    Materials m_mat;
+    bool m_hasPec = false;
+
+    // TFSF region: contour indices, propagation angle, causal reference point.
+    struct Tfsf {
+        bool active = false;
+        int i0 = 0, i1 = 0, j0 = 0, j1 = 0;
+        double kx = 0.0, ky = -1.0;   // unit propagation direction
+        double refX = 0.0, refY = 0.0;
+        Source wave;
+    } m_tfsf;
+    IncidentWave1D m_inc1d;
 
     // CPML: profiles per axis + the recursive-convolution auxiliary fields.
     // Trivial (b=1, a=0, kappa=1) away from the PML layer, so the same update

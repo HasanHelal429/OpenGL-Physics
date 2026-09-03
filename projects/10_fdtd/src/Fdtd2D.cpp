@@ -61,10 +61,20 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
     m_hyPrev.assign(n, 0.0);
     m_energy = 0.0;
 
-    // E update coefficients in ca/cb form (Phase 1: vacuum, so ca = 1).
+    // Materials -> E update coefficients ca/cb, per-cell 1/mu, PEC mask.
+    m_mat.Build(m_nx, m_ny, m_dx, m_dy, deck);
     m_ca.assign(n, 1.0);
-    m_cb.assign(n, m_dt);   // dt / eps, eps = 1
-    m_muInv = 1.0;
+    m_cb.assign(n, m_dt);
+    m_muInvCell.assign(n, 1.0);
+    for (std::size_t k = 0; k < n; ++k) {
+        const double eps = m_mat.epsR[k];
+        const double sg = m_mat.sigma[k];
+        const double denom = 1.0 + sg * m_dt / (2.0 * eps);
+        m_ca[k] = (1.0 - sg * m_dt / (2.0 * eps)) / denom;
+        m_cb[k] = (m_dt / eps) / denom;
+        m_muInvCell[k] = 1.0 / m_mat.muR[k];
+    }
+    m_hasPec = m_mat.AnyPec();
 
     // CPML: profiles (trivial unless boundary.type = "cpml") + auxiliary fields.
     m_pmlCells = deck.GetInt("boundary.pml_cells", 10);
@@ -79,17 +89,20 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
     m_psiEzy.assign(n, 0.0);
     m_psiHxy.assign(n, 0.0);
     m_psiHyx.assign(n, 0.0);
-    if (m_boundary == "cpml" && m_useGpu) {
-        std::fprintf(stderr, "[fdtd] CPML not yet on the GPU path -- using CPU\n");
+    if (m_useGpu && (m_boundary == "cpml" || m_mat.AnyDielectric() ||
+                     m_mat.AnyPec())) {
+        std::fprintf(stderr, "[fdtd] GPU path is plain-TMz + Mur only so far "
+                             "-- using CPU for this deck\n");
         m_useGpu = false;
     }
 
     m_sources.clear();
+    m_tfsf = Tfsf{};
     for (const auto& s : deck.GetTables("source")) {
         Source src;
         const std::string k = s.GetString("kind", "gaussian");
-        src.kind = (k == "sine") ? Source::Sine : Source::Gaussian;
-        // Position given in physical coords or fractional; accept x/y in cells.
+        src.kind = (k == "sine") ? Source::Sine
+                 : (k == "tfsf") ? Source::Tfsf : Source::Gaussian;
         src.i = std::clamp(static_cast<int>(std::lround(
                     s.GetDouble("x", 0.5 * (m_nx - 1) * m_dx) / m_dx)), 1, m_nx - 2);
         src.j = std::clamp(static_cast<int>(std::lround(
@@ -98,13 +111,44 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
         src.f0 = s.GetDouble("f0", 0.05);
         src.bandwidth = s.GetDouble("bandwidth", 0.0);
         src.rampCycles = s.GetDouble("ramp_cycles", 3.0);
-        if (src.kind == Source::Gaussian) {
-            // tau from bandwidth if given, else ~half a period at f0.
+        src.angleDeg = s.GetDouble("angle_deg", 90.0);
+        const std::string shape = s.GetString("waveform", "sine");  // tfsf: shape
+        const bool gaussianShape =
+            src.kind == Source::Gaussian || (src.kind == Source::Tfsf && shape == "gaussian");
+        if (gaussianShape) {
             src.tau = src.bandwidth > 0.0 ? 1.0 / (2.0 * kPi * src.bandwidth)
                                           : 0.5 / src.f0;
             src.t0 = s.GetDouble("t0", 4.0 * src.tau);
         }
-        m_sources.push_back(src);
+
+        if (src.kind == Source::Tfsf) {
+            const int pml = (m_boundary == "cpml") ? m_pmlCells : 0;
+            const int margin = deck.GetInt("tfsf.margin", 8);
+            const int c = pml + margin;
+            m_tfsf.active = true;
+            m_tfsf.i0 = c;               m_tfsf.i1 = m_nx - 1 - c;
+            m_tfsf.j0 = c;               m_tfsf.j1 = m_ny - 1 - c;
+            const double th = src.angleDeg * kPi / 180.0;
+            m_tfsf.kx = std::cos(th);
+            m_tfsf.ky = std::sin(th);
+            m_tfsf.refX = (m_tfsf.kx >= 0 ? m_tfsf.i0 : m_tfsf.i1) * m_dx;
+            m_tfsf.refY = (m_tfsf.ky >= 0 ? m_tfsf.j0 : m_tfsf.j1) * m_dy;
+            m_tfsf.wave = src;
+            m_tfsf.wave.kind = gaussianShape ? Source::Gaussian : Source::Sine;
+
+            // 1D auxiliary incident grid: reach = the box's projection onto
+            // the beam direction (all corners relative to the ref point).
+            double span = 0.0;
+            for (int cx : {m_tfsf.i0, m_tfsf.i1})
+                for (int cy : {m_tfsf.j0, m_tfsf.j1}) {
+                    const double xi = (cx * m_dx - m_tfsf.refX) * m_tfsf.kx +
+                                      (cy * m_dy - m_tfsf.refY) * m_tfsf.ky;
+                    span = std::max(span, xi);
+                }
+            m_inc1d.Configure(span, m_dx, m_dt, 2.0 * kPi * src.f0, th);
+        } else {
+            m_sources.push_back(src);
+        }
     }
 
     m_probes.clear();
@@ -118,11 +162,17 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
         }
     }
 
+    if (m_useGpu && m_tfsf.active) {
+        std::fprintf(stderr, "[fdtd] TFSF not on the GPU path -- using CPU\n");
+        m_useGpu = false;
+    }
+
     m_time = 0.0;
     m_step = 0;
     std::printf("[fdtd] %dx%d  dx=%.3g  dt=%.4g  courant=%.3f  boundary=%s  "
-                "steps=%ld\n",
-                m_nx, m_ny, m_dx, m_dt, m_courant, m_boundary.c_str(), m_totalSteps);
+                "steps=%ld%s\n",
+                m_nx, m_ny, m_dx, m_dt, m_courant, m_boundary.c_str(),
+                m_totalSteps, m_tfsf.active ? "  [TFSF]" : "");
 }
 
 void Fdtd2D::Reset() {
@@ -136,6 +186,7 @@ void Fdtd2D::Reset() {
     std::fill(m_psiEzy.begin(), m_psiEzy.end(), 0.0);
     std::fill(m_psiHxy.begin(), m_psiHxy.end(), 0.0);
     std::fill(m_psiHyx.begin(), m_psiHyx.end(), 0.0);
+    if (m_tfsf.active) m_inc1d.ResetState();
     m_energy = 0.0;
     m_time = 0.0;
     m_step = 0;
@@ -146,13 +197,12 @@ void Fdtd2D::Reset() {
 // (b = 1, a = 0, kappa = 1), so psi stays zero and these reduce exactly to the
 // plain Yee update -- no interior branch.
 void Fdtd2D::UpdateH() {
-    const double cH = m_dt * m_muInv;
     for (int j = 0; j < m_ny - 1; ++j) {
         for (int i = 0; i < m_nx; ++i) {
             const std::size_t p = idx(i, j);
             const double dEzdy = (m_ez[idx(i, j + 1)] - m_ez[p]) / m_dy;
             m_psiHxy[p] = m_cpmlY.bH[j] * m_psiHxy[p] + m_cpmlY.aH[j] * dEzdy;
-            m_hx[p] -= cH * (dEzdy / m_cpmlY.kH[j] + m_psiHxy[p]);
+            m_hx[p] -= m_dt * m_muInvCell[p] * (dEzdy / m_cpmlY.kH[j] + m_psiHxy[p]);
         }
     }
     for (int j = 0; j < m_ny; ++j) {
@@ -160,7 +210,7 @@ void Fdtd2D::UpdateH() {
             const std::size_t p = idx(i, j);
             const double dEzdx = (m_ez[idx(i + 1, j)] - m_ez[p]) / m_dx;
             m_psiHyx[p] = m_cpmlX.bH[i] * m_psiHyx[p] + m_cpmlX.aH[i] * dEzdx;
-            m_hy[p] += cH * (dEzdx / m_cpmlX.kH[i] + m_psiHyx[p]);
+            m_hy[p] += m_dt * m_muInvCell[p] * (dEzdx / m_cpmlX.kH[i] + m_psiHyx[p]);
         }
     }
 }
@@ -177,6 +227,66 @@ void Fdtd2D::UpdateE() {
                                 m_psiEzx[p] - m_psiEzy[p];
             m_ez[p] = m_ca[p] * m_ez[p] + m_cb[p] * curl;
         }
+    }
+}
+
+void Fdtd2D::EnforcePec() {
+    if (!m_hasPec) return;
+    for (std::size_t k = 0; k < m_ez.size(); ++k)
+        if (m_mat.pec[k]) m_ez[k] = 0.0;
+}
+
+double Fdtd2D::IncidentEz(double x, double y) const {
+    const double xi = (x - m_tfsf.refX) * m_tfsf.kx + (y - m_tfsf.refY) * m_tfsf.ky;
+    return m_inc1d.Ez(xi);
+}
+
+void Fdtd2D::IncidentH(double x, double y, double& hx, double& hy) const {
+    const double xi = (x - m_tfsf.refX) * m_tfsf.kx + (y - m_tfsf.refY) * m_tfsf.ky;
+    // The 1D grid's Hy ~ -Ez for a +xi-propagating wave; the physical
+    // transverse H that pairs with the outgoing Ez is +Ez, so negate.
+    const double hmag = -m_inc1d.Hmag(xi);
+    // H_inc = (1/eta) (k_hat x Ez zhat) = (ky, -kx) * H_transverse,  eta = 1
+    hx = m_tfsf.ky * hmag;
+    hy = -m_tfsf.kx * hmag;
+}
+
+// TF/SF corrections (Taflove ch. 5), one-sided incident-field consistency
+// terms added on the scattered side of the box contour.
+void Fdtd2D::TfsfCorrectH() {
+    if (!m_tfsf.active) return;
+    const Tfsf& b = m_tfsf;
+    const double cx = m_dt / m_dx, cy = m_dt / m_dy;
+    for (int j = b.j0; j <= b.j1; ++j) {
+        const double y = j * m_dy;
+        m_hy[idx(b.i0 - 1, j)] -= cx * IncidentEz(b.i0 * m_dx, y);
+        m_hy[idx(b.i1, j)]     += cx * IncidentEz(b.i1 * m_dx, y);
+    }
+    for (int i = b.i0; i <= b.i1; ++i) {
+        const double x = i * m_dx;
+        m_hx[idx(i, b.j0 - 1)] += cy * IncidentEz(x, b.j0 * m_dy);
+        m_hx[idx(i, b.j1)]     -= cy * IncidentEz(x, b.j1 * m_dy);
+    }
+}
+
+void Fdtd2D::TfsfCorrectE() {
+    if (!m_tfsf.active) return;
+    const Tfsf& b = m_tfsf;
+    const double cx = m_dt / m_dx, cy = m_dt / m_dy;
+    double hix, hiy;
+    for (int j = b.j0; j <= b.j1; ++j) {
+        const double y = j * m_dy;
+        IncidentH((b.i0 - 0.5) * m_dx, y, hix, hiy);
+        m_ez[idx(b.i0, j)] -= cx * hiy;
+        IncidentH((b.i1 + 0.5) * m_dx, y, hix, hiy);
+        m_ez[idx(b.i1, j)] += cx * hiy;
+    }
+    for (int i = b.i0; i <= b.i1; ++i) {
+        const double x = i * m_dx;
+        IncidentH(x, (b.j0 - 0.5) * m_dy, hix, hiy);
+        m_ez[idx(i, b.j0)] += cy * hix;
+        IncidentH(x, (b.j1 + 0.5) * m_dy, hix, hiy);
+        m_ez[idx(i, b.j1)] -= cy * hix;
     }
 }
 
@@ -211,9 +321,11 @@ void Fdtd2D::Step(int substeps) {
         return;
     }
     for (int s = 0; s < substeps; ++s) {
+        if (m_tfsf.active) m_inc1d.StepH();   // 1D Hy -> n+1/2 (from 1D Ez(n))
         m_hxPrev = m_hx;             // H(n-1/2)
         m_hyPrev = m_hy;
         UpdateH();                   // -> H(n+1/2), using E(n)
+        TfsfCorrectH();              // uses 1D Ez(n)
 
         // Exact conserved discrete energy, evaluated now (E(n), H(n±1/2)).
         double u = 0.0;
@@ -223,9 +335,12 @@ void Fdtd2D::Step(int substeps) {
 
         if (m_boundary == "mur") m_ezPrev = m_ez;
         UpdateE();                   // -> E(n+1), using H(n+1/2)
+        TfsfCorrectE();              // uses 1D Hy(n+1/2)
         InjectSources();
         if (m_boundary == "mur") ApplyMur();
-        // "pec": edge E_z cells are never written by UpdateE, stay 0.
+        EnforcePec();
+        if (m_tfsf.active) m_inc1d.StepE(m_tfsf.wave);   // 1D Ez -> n+1
+        // "pec"/"cpml": edge E_z cells are never written by UpdateE, stay 0.
         m_time += m_dt;
         ++m_step;
     }
@@ -298,8 +413,9 @@ void Fdtd2D::StepGpu(int substeps) {
     // Uniforms and buffer bindings that never change across substeps.
     m_kH.Use();
     m_kH.SetInt("uNx", m_nx); m_kH.SetInt("uNy", m_ny);
-    m_kH.SetFloat("uCx", static_cast<float>(m_dt * m_muInv / m_dx));
-    m_kH.SetFloat("uCy", static_cast<float>(m_dt * m_muInv / m_dy));
+    // The GPU path only runs for vacuum decks (mu_r = 1 everywhere).
+    m_kH.SetFloat("uCx", static_cast<float>(m_dt / m_dx));
+    m_kH.SetFloat("uCy", static_cast<float>(m_dt / m_dy));
     m_kE.Use();
     m_kE.SetInt("uNx", m_nx); m_kE.SetInt("uNy", m_ny);
     m_kE.SetFloat("uInvDx", static_cast<float>(invDx));
