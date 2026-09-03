@@ -5,9 +5,13 @@
 #include "framework/Deck.hpp"
 #include "framework/OutputWriter.hpp"
 
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
+#include <memory>
 #include <vector>
 
 namespace fdtd {
@@ -17,9 +21,11 @@ constexpr double kPi = 3.14159265358979323846;
 }
 
 Fdtd2D::~Fdtd2D() {
-    const GLuint bufs[] = {m_bEz, m_bHx, m_bHy, m_bCa, m_bCb, m_bEzPrev, m_bSrc};
+    const GLuint bufs[] = {m_bEz, m_bHx, m_bHy, m_bCa, m_bCb, m_bEzPrev, m_bSrc,
+                           m_fieldBuf, m_matBuf};
     for (GLuint b : bufs)
         if (b) glDeleteBuffers(1, &b);
+    if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
 double Source::operator()(double t) const {
@@ -531,6 +537,162 @@ fw::SimInfo Fdtd2D::Info() const {
         info.diagnostics.emplace_back(name);
     }
     return info;
+}
+
+// ------------------------------------------------------------- interactive
+
+namespace {
+
+const char* kViewVert = R"(#version 460 core
+void main() {
+    vec2 v[3] = vec2[3](vec2(-1.0,-1.0), vec2(3.0,-1.0), vec2(-1.0,3.0));
+    gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+}
+)";
+
+const char* kViewFrag = R"(#version 460 core
+out vec4 FragColor;
+layout(std430, binding = 0) readonly buffer FieldBuf { float field[]; };
+layout(std430, binding = 1) readonly buffer MatBuf { float mat[]; };  // 0 vac, 1 diel, 2 pec
+uniform vec2 uRes; uniform int uNx; uniform int uNy;
+uniform float uLx; uniform float uLy; uniform float uPixPerUnit; uniform vec2 uPanPix;
+uniform float uScale; uniform int uSigned; uniform float uGain; uniform float uGamma;
+
+vec3 magma(float t) {
+    t = clamp(t, 0.0, 1.0);
+    const vec3 c0=vec3(-0.002136,-0.000750,-0.005386), c1=vec3(0.251723,0.677631,2.494027);
+    const vec3 c2=vec3(8.353717,-3.577720,0.311613), c3=vec3(-27.668733,14.264731,-13.649213);
+    const vec3 c4=vec3(52.176140,-27.943606,12.944169), c5=vec3(-50.768525,29.046583,4.234153);
+    const vec3 c6=vec3(18.655705,-11.489774,-5.601962);
+    return clamp(c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6))))), 0.0, 1.0);
+}
+vec3 diverging(float s) {
+    vec3 lo=vec3(0.19,0.31,0.75), mid=vec3(0.98,0.98,0.98), hi=vec3(0.79,0.16,0.16);
+    return s < 0.0 ? mix(mid, lo, clamp(-s,0.0,1.0)) : mix(mid, hi, clamp(s,0.0,1.0));
+}
+void main() {
+    float wx = (gl_FragCoord.x - 0.5*uRes.x - uPanPix.x) / uPixPerUnit;
+    float wy = (gl_FragCoord.y - 0.5*uRes.y - uPanPix.y) / uPixPerUnit;
+    int i = int(floor((wx + 0.5*uLx) / (uLx/float(uNx))));
+    int j = int(floor((wy + 0.5*uLy) / (uLy/float(uNy))));
+    if (i<0||j<0||i>=uNx||j>=uNy) { FragColor = vec4(0.03,0.03,0.045,1.0); return; }
+    int p = j*uNx + i;
+    float v = field[p];
+    vec3 col;
+    if (uSigned == 1) {
+        float s = sign(v) * pow(clamp(abs(v/uScale)*uGain,0.0,1.0), uGamma);
+        col = diverging(clamp(s,-1.0,1.0));
+    } else {
+        col = magma(pow(clamp(v/uScale*uGain,0.0,1.0), uGamma));
+    }
+    float m = mat[p];
+    if (m > 1.5)      col = vec3(0.12);                 // PEC: dark solid
+    else if (m > 0.5) col = mix(col, vec3(0.35,0.55,0.5), 0.28);  // dielectric tint
+    FragColor = vec4(col, 1.0);
+}
+)";
+
+} // namespace
+
+void Fdtd2D::EnsureRenderResources() {
+    if (m_renderReady) return;
+    m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
+    glGenVertexArrays(1, &m_vao);
+    const int n = m_nx * m_ny;
+    glCreateBuffers(1, &m_fieldBuf);
+    glCreateBuffers(1, &m_matBuf);
+    glNamedBufferData(m_fieldBuf, n * sizeof(float), nullptr, GL_DYNAMIC_DRAW);
+    m_fieldScratch.assign(n, 0.0f);
+    m_matScratch.assign(n, 0.0f);
+    for (int k = 0; k < n; ++k)
+        m_matScratch[k] = m_mat.pec[k] ? 2.0f : (m_mat.epsR[k] != 1.0 ? 1.0f : 0.0f);
+    glNamedBufferData(m_matBuf, n * sizeof(float), m_matScratch.data(), GL_STATIC_DRAW);
+    m_text = std::make_unique<fw::TextRenderer>();
+    m_font = fw::Font::FromFile("C:\\Windows\\Fonts\\consola.ttf", 16.0f);
+    m_renderReady = true;
+}
+
+void Fdtd2D::RepackField() {
+    const int n = m_nx * m_ny;
+    for (int k = 0; k < n; ++k) {
+        const double h2 = m_hx[k] * m_hx[k] + m_hy[k] * m_hy[k];
+        switch (m_viewMode) {
+        case 1:  m_fieldScratch[k] = static_cast<float>(
+                     0.5 * (m_mat.epsR[k] * m_ez[k] * m_ez[k] + h2)); break;
+        case 2:  m_fieldScratch[k] = static_cast<float>(
+                     std::abs(m_ez[k]) * std::sqrt(h2)); break;
+        default: m_fieldScratch[k] = static_cast<float>(m_ez[k]); break;
+        }
+    }
+    glNamedBufferSubData(m_fieldBuf, 0, n * sizeof(float), m_fieldScratch.data());
+}
+
+void Fdtd2D::Render(int fbWidth, int fbHeight) {
+    EnsureRenderResources();
+    if (m_useGpu) SyncFromGpu();
+    RepackField();
+
+    float scale = 0.0f;
+    if (m_viewMode == 0)
+        for (float v : m_fieldScratch) scale = std::max(scale, std::abs(v));
+    else
+        for (float v : m_fieldScratch) scale = std::max(scale, v);
+    if (scale < 1e-12f) scale = 1.0f;
+
+    const double lx = (m_nx - 1) * m_dx, ly = (m_ny - 1) * m_dy;
+    const float pixPerUnit =
+        static_cast<float>(std::min(fbWidth / lx, fbHeight / ly)) * m_zoom;
+
+    glDisable(GL_DEPTH_TEST);
+    glClearColor(0.03f, 0.03f, 0.045f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    m_view.Use();
+    m_view.SetVec2("uRes", glm::vec2((float)fbWidth, (float)fbHeight));
+    m_view.SetInt("uNx", m_nx); m_view.SetInt("uNy", m_ny);
+    m_view.SetFloat("uLx", (float)lx); m_view.SetFloat("uLy", (float)ly);
+    m_view.SetFloat("uPixPerUnit", pixPerUnit);
+    m_view.SetVec2("uPanPix", m_panPix);
+    m_view.SetFloat("uScale", scale);
+    m_view.SetInt("uSigned", m_viewMode == 0 ? 1 : 0);
+    m_view.SetFloat("uGain", m_gain);
+    m_view.SetFloat("uGamma", m_gamma);
+    fw::ComputeShader::BindBuffer(0, m_fieldBuf);
+    fw::ComputeShader::BindBuffer(1, m_matBuf);
+    glBindVertexArray(m_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+
+    static const char* kNames[3] = {"Ez", "E-energy", "|S| (Poynting)"};
+    char line[160];
+    std::snprintf(line, sizeof(line),
+                  "field: %s (M)   t = %.1f   step %ld   [%s, %s]",
+                  kNames[m_viewMode], m_time, m_step, m_boundary.c_str(),
+                  m_tfsf.active ? "TFSF" : "soft src");
+    m_text->SetViewport(fbWidth, fbHeight);
+    m_text->Draw(m_font, line, glm::vec2(13.0f, 25.0f), glm::vec4(0, 0, 0, 0.55f));
+    m_text->Draw(m_font, line, glm::vec2(12.0f, 24.0f), glm::vec4(1, 1, 0.85f, 0.95f));
+    glEnable(GL_DEPTH_TEST);
+}
+
+void Fdtd2D::OnViewInput(const fw::ViewInput& in) {
+    if (in.dragging) { m_panPix.x += (float)in.dx; m_panPix.y -= (float)in.dy; }
+    if (in.scrollDelta != 0.0) {
+        m_zoom *= std::exp(0.12f * (float)in.scrollDelta);
+        m_zoom = std::clamp(m_zoom, 0.25f, 40.0f);
+    }
+}
+
+void Fdtd2D::OnKey(int key, int action) {
+    (void)action;
+    switch (key) {
+    case 'M': m_viewMode = (m_viewMode + 1) % 3; break;
+    case '[': m_gain = std::max(0.1f, m_gain * 0.8f); break;
+    case ']': m_gain = std::min(20.0f, m_gain * 1.25f); break;
+    case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break;
+    case '=': m_gamma = std::min(2.0f, m_gamma + 0.05f); break;
+    case '0': m_zoom = 1.0f; m_panPix = {0, 0}; m_gain = 1.0f; m_gamma = 0.7f; break;
+    default: break;
+    }
 }
 
 } // namespace fdtd

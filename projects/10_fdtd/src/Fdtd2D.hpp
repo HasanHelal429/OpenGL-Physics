@@ -5,12 +5,15 @@
 #include "Materials.hpp"
 
 #include "framework/ComputeShader.hpp"
+#include "framework/Shader.hpp"
 #include "framework/Simulation.hpp"
+#include "framework/Text.hpp"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,6 +60,10 @@ public:
     void Step(int substeps) override;
     void Snapshot(fw::OutputWriter& writer) override;
     fw::SimInfo Info() const override;
+
+    void Render(int fbWidth, int fbHeight) override;
+    void OnViewInput(const fw::ViewInput& in) override;
+    void OnKey(int key, int action) override;
 
     // Force the compute backend on (needs a current GL context); default is
     // read from the deck's solver.backend, else CPU.
@@ -143,6 +150,19 @@ private:
 
     double m_time = 0.0;
     long m_step = 0;
+
+    // --- interactive view (never allocated on the headless path) ------
+    void EnsureRenderResources();
+    void RepackField();
+    bool m_renderReady = false;
+    fw::Shader m_view;
+    GLuint m_vao = 0, m_fieldBuf = 0, m_matBuf = 0;
+    std::vector<float> m_fieldScratch, m_matScratch;
+    int m_viewMode = 0;              // 0 Ez, 1 E-energy, 2 |S|
+    float m_zoom = 1.0f, m_gain = 1.0f, m_gamma = 0.7f;
+    glm::vec2 m_panPix{0.0f, 0.0f};
+    std::unique_ptr<fw::TextRenderer> m_text;
+    fw::Font m_font;
 
     // --- GPU compute backend -------------------------------------------
     bool m_useGpu = false;
