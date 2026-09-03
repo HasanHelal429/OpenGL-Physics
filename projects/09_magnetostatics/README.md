@@ -1,8 +1,9 @@
 # 09_magnetostatics
 
-2D magnetostatics on the `fw::Simulation` / deck / headless model, plus (later
-phases) a 3D Biot-Savart field and a relativistic Boris test-particle pusher.
-See `Magnetostatics_Plan.md` for the full design and phase plan.
+2D magnetostatics on the `fw::Simulation` / deck / headless model, a 3D
+Biot-Savart field, and a relativistic Boris test-particle pusher.
+`Magnetostatics_Plan.md` has the design and phase plan; `docs/SIMULATION.md`
+is the full writeup (methods, the multigrid boundary gotcha, validation).
 
 The out-of-plane current problem is the same 5-point Poisson stencil as
 `Physics Simulations/Electromagnetism/Poisson_Solver/poisson.py`, but solved
