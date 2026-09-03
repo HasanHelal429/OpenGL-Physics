@@ -115,6 +115,42 @@ python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressib
 field frame-by-frame (drawing every deck obstacle as a solid disk) — the
 vortex street is far more legible as a movie than any single static frame.
 
+## Interactive mode
+
+Any `--scene` deck can also be watched live instead of run headless to disk:
+
+```sh
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --interactive --scene \
+    --deck projects/08_compressible_fluid/decks/cylinder_re100.toml
+```
+
+This opens a real window (`fw::SimApp`) with the usual HUD (play/pause,
+step, speed, reset, record-to-disk, `F12` screenshot) and a live heatmap of
+one scalar field at a time — `CompressibleSimScene::Render()` re-packs the
+chosen field from `Euler2D::PrimAt` into a small GPU buffer every frame
+(the solver's state lives on the CPU, so there's no persistent GPU copy to
+just re-bind) and draws it with a `magma`-colormapped fullscreen-quad
+shader, the same technique `05_tdse_gpu`'s live view uses. Obstacle cells
+are overlaid as a flat color so the cylinder itself is always visible
+regardless of which field is selected.
+
+Keys:
+
+| Key | Effect |
+|---|---|
+| `M` | Cycle the displayed field: density -> speed -> vorticity -> tracer |
+| `[` / `]` | Decrease / increase colormap gain |
+| `-` / `=` | Decrease / increase the gamma curve (lower lifts faint detail) |
+| `0` | Reset zoom, pan, gain, and gamma |
+| drag / scroll | Pan / zoom the view |
+
+Bare `--interactive` (no `--scene`) opens the 1D shock tube instead
+(`CompressibleSim`), which still has full play/pause/step/record controls
+but currently draws nothing — only `CompressibleSimScene` overrides
+`Render()` so far (see `framework/Simulation.hpp`: rendering hooks are
+optional and default to a no-op, the same fallback `07_grhd`'s own sim
+classes currently rely on).
+
 `--selftest` (no deck needed) runs five fast, deck-independent checks:
 HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
 conservation-identity check (mass and energy exactly conserved, momentum
@@ -428,8 +464,8 @@ for the dispatch design (one compute pass per fractional step over the
 | `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`) with an optional position-dependent inflow profile, the obstacle cell-masking pass, and the passive scalar tracer field. CPU only (OpenMP-parallelized, see "Performance"). |
 | `src/kernels_euler2d.hpp` | GLSL compute-shader port of `Euler2D`'s core inviscid method (same formulas, transliterated; axis-parameterized kernels covering both X and Y sweeps) — exercised only by `--selftest`, see "Performance". |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
-| `src/CompressibleSimScene.{hpp,cpp}` | The single, generic `fw::Simulation` for every 2D scenario (see "The generic scene schema" above) — grid/physics/boundary/obstacles/initial-condition/probes/tracer, all parsed from deck tables. |
-| `src/main.cpp` | CLI entry point (`--scene` selects `CompressibleSimScene`; bare `--deck` is the 1D `CompressibleSim`) + `--selftest` (HLLC consistency, conservation identities, 1D GPU-vs-CPU cross-check, vortex advection, 2D GPU-vs-CPU cross-check). |
+| `src/CompressibleSimScene.{hpp,cpp}` | The single, generic `fw::Simulation` for every 2D scenario (see "The generic scene schema" above) — grid/physics/boundary/obstacles/initial-condition/probes/tracer, all parsed from deck tables. Also the only sim in this project with a live view: overrides `Render`/`OnViewInput`/`OnKey` to draw a `magma`-colormapped heatmap of density/speed/vorticity/tracer (see "Interactive mode" above). |
+| `src/main.cpp` | CLI entry point (`--scene` selects `CompressibleSimScene`; bare `--deck` is the 1D `CompressibleSim`; `--interactive` opens either live via `fw::SimApp` instead of running headless) + `--selftest` (HLLC consistency, conservation identities, 1D GPU-vs-CPU cross-check, vortex advection, 2D GPU-vs-CPU cross-check). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |

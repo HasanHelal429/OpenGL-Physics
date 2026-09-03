@@ -9,6 +9,7 @@
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
+#include "framework/SimApp.hpp"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
@@ -29,6 +30,7 @@ struct Args {
     int substeps = 0;
     bool selftest = false;
     bool scene = false;
+    bool interactive = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -42,6 +44,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--scene") a.scene = true;
+        else if (s == "--interactive") a.interactive = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -545,9 +548,35 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage:\n"
                      "  08_compressible_fluid --deck <f.toml> --out <dir> [--frames N] [--substeps N] [--scene]\n"
+                     "  08_compressible_fluid --interactive --deck <f.toml> [--scene]\n"
                      "  08_compressible_fluid --selftest\n");
         return 2;
     }
+
+    if (a.interactive) {
+        // No fw::GLContext::CreateHidden call here -- unlike the headless
+        // branches below, fw::SimApp's base Application opens its own real
+        // (visible) GLFW window + GL context, and Configure() runs from
+        // inside SimApp::OnStart() once that context exists.
+        fw::Deck deck = fw::Deck::FromFile(a.deck);
+        // Only CompressibleSimScene overrides Render() (see its class
+        // comment) -- the 1D CompressibleSim still opens interactively
+        // (play/pause/step/record all work via the HUD) but draws nothing,
+        // the same "rendering hooks are optional" fallback
+        // framework/Simulation.hpp documents and 07_grhd's own sim classes
+        // currently rely on for the same reason.
+        if (a.scene) {
+            cf::CompressibleSimScene sim;
+            fw::SimApp app(sim, deck, deck.GetString("title", "Compressible Navier-Stokes -- generic 2D scene"));
+            app.Run();
+        } else {
+            cf::CompressibleSim sim;
+            fw::SimApp app(sim, deck, deck.GetString("title", "Compressible Navier-Stokes -- 1D shock tube"));
+            app.Run();
+        }
+        return 0;
+    }
+
     if (a.out.empty()) {
         std::fprintf(stderr, "error: needs --out <dir>\n");
         return 2;

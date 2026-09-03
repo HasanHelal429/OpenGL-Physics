@@ -1,5 +1,6 @@
 #include "CompressibleSimScene.hpp"
 
+#include "framework/ComputeShader.hpp"
 #include "framework/Deck.hpp"
 #include "framework/OutputWriter.hpp"
 
@@ -7,12 +8,84 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 
 namespace cf {
 
 namespace {
 
 constexpr double kPi = 3.14159265358979323846;
+
+// Fullscreen-triangle trick (LearnOpenGL/Mardern GL folklore, also used by
+// 05_tdse_gpu's TdseSim::kViewVert): 3 vertices, no VBO, covering the whole
+// viewport -- gl_VertexID picks a corner far enough outside [-1,1] that the
+// rasterizer still clips it to a full-screen quad.
+const char* kViewVert = R"(#version 460 core
+void main() {
+    vec2 v[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+    gl_Position = vec4(v[gl_VertexID], 0.0, 1.0);
+}
+)";
+
+// Screen pixel -> world coords -> grid cell, exactly 05_tdse_gpu's
+// TdseSim::kViewFrag's approach generalized to a non-square nx*ny grid: wx/wy
+// are offsets from the DOMAIN CENTER (not its lower-left corner), so
+// `wx + 0.5*uLx` recovers a position relative to the domain's own local
+// origin regardless of the solver's absolute xMin/yMin -- the same reason
+// CompressibleSimScene::Render() only ever needs to pass uLx/uLy, not xMin/yMin.
+const char* kViewFrag = R"(#version 460 core
+out vec4 FragColor;
+
+layout(std430, binding = 0) readonly buffer FieldBuf { float field[]; };
+layout(std430, binding = 1) readonly buffer MaskBuf { float mask[]; };
+
+uniform vec2 uRes;
+uniform int uNx;
+uniform int uNy;
+uniform float uLx;
+uniform float uLy;
+uniform float uPixPerUnit;
+uniform vec2 uPanPix;
+uniform float uFieldMin;
+uniform float uFieldMax;
+uniform float uGain;
+uniform float uGammaView;
+
+// Polynomial fit of matplotlib 'magma' -- identical LUT to
+// 05_tdse_gpu/src/TdseSim.cpp's kViewFrag, reused verbatim.
+vec3 magma(float t) {
+    t = clamp(t, 0.0, 1.0);
+    const vec3 c0 = vec3(-0.002136, -0.000750, -0.005386);
+    const vec3 c1 = vec3(0.251723, 0.677631, 2.494027);
+    const vec3 c2 = vec3(8.353717, -3.577720, 0.311613);
+    const vec3 c3 = vec3(-27.668733, 14.264731, -13.649213);
+    const vec3 c4 = vec3(52.176140, -27.943606, 12.944169);
+    const vec3 c5 = vec3(-50.768525, 29.046583, 4.234153);
+    const vec3 c6 = vec3(18.655705, -11.489774, -5.601962);
+    return clamp(c0 + t * (c1 + t * (c2 + t * (c3 + t * (c4 + t * (c5 + t * c6))))), 0.0, 1.0);
+}
+
+void main() {
+    float wx = (gl_FragCoord.x - 0.5 * uRes.x - uPanPix.x) / uPixPerUnit;
+    float wy = (gl_FragCoord.y - 0.5 * uRes.y - uPanPix.y) / uPixPerUnit;
+    float dx = uLx / float(uNx);
+    float dy = uLy / float(uNy);
+    int i = int(floor((wx + 0.5 * uLx) / dx));
+    int j = int(floor((wy + 0.5 * uLy) / dy));
+    if (i < 0 || j < 0 || i >= uNx || j >= uNy) {
+        FragColor = vec4(0.03, 0.03, 0.045, 1.0); // outside the domain
+        return;
+    }
+    int idx = j * uNx + i;
+    if (mask[idx] > 0.5) {
+        FragColor = vec4(0.16, 0.16, 0.18, 1.0); // obstacle: flat, no field color
+        return;
+    }
+    float t = clamp((field[idx] - uFieldMin) / max(uFieldMax - uFieldMin, 1e-12), 0.0, 1.0);
+    t = pow(clamp(uGain * t, 0.0, 1.0), uGammaView);
+    FragColor = vec4(magma(t), 1.0);
+}
+)";
 
 WallBC ParseWallBC(const std::string& s) {
     if (s == "outflow") return WallBC::Outflow;
@@ -150,6 +223,12 @@ std::function<Prim2D(double, double)> BuildInitialCondition(const fw::Deck& deck
 }
 
 } // namespace
+
+CompressibleSimScene::~CompressibleSimScene() {
+    if (m_fieldBuf) glDeleteBuffers(1, &m_fieldBuf);
+    if (m_maskBuf) glDeleteBuffers(1, &m_maskBuf);
+    if (m_vao) glDeleteVertexArrays(1, &m_vao);
+}
 
 void CompressibleSimScene::Configure(const fw::Deck& deck) {
     m_title = deck.GetString("title", m_title);
@@ -314,6 +393,132 @@ fw::SimInfo CompressibleSimScene::Info() const {
         info.diagnostics.push_back(probe.name + "_p");
     }
     return info;
+}
+
+void CompressibleSimScene::EnsureRenderResources() {
+    if (m_renderReady) return;
+    m_view = fw::Shader::FromSource(kViewVert, kViewFrag);
+    glGenVertexArrays(1, &m_vao);
+    glCreateBuffers(1, &m_fieldBuf);
+    glCreateBuffers(1, &m_maskBuf);
+    const size_t numCells = static_cast<size_t>(m_solver.Nx()) * static_cast<size_t>(m_solver.Ny());
+    glNamedBufferData(m_fieldBuf, static_cast<GLsizeiptr>(numCells * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(m_maskBuf, static_cast<GLsizeiptr>(numCells * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
+    m_fieldScratch.assign(numCells, 0.0f);
+    m_maskScratch.assign(numCells, 0.0f);
+    m_renderReady = true;
+}
+
+void CompressibleSimScene::Render(int fbWidth, int fbHeight) {
+    EnsureRenderResources();
+    const int nx = m_solver.Nx(), ny = m_solver.Ny();
+    const double dx = m_solver.Dx(), dy = m_solver.Dy();
+
+    // Re-pack the currently selected scalar field from the CPU-resident
+    // solver state every frame (see the class comment for why there's no
+    // persistent GPU copy to just re-bind), tracking min/max as we go so
+    // the colormap always auto-scales to what's actually on screen right
+    // now -- there's no fixed physical range for e.g. vorticity to
+    // normalize against ahead of time.
+    float fieldMin = std::numeric_limits<float>::max();
+    float fieldMax = std::numeric_limits<float>::lowest();
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const size_t idx = static_cast<size_t>(j * nx + i);
+            const Prim2D pr = m_solver.PrimAt(i, j);
+            float value;
+            switch (m_renderMode) {
+            case 1: // speed
+                value = static_cast<float>(std::sqrt(pr.u * pr.u + pr.v * pr.v));
+                break;
+            case 2: { // vorticity: dv/dx - du/dy, central difference (clamped at the domain edge,
+                      // like Euler2D.cpp's own zero-gradient boundary treatment -- an approximation
+                      // there, fine for a live view that isn't a quantitative diagnostic)
+                const int im1 = std::max(i - 1, 0), ip1 = std::min(i + 1, nx - 1);
+                const int jm1 = std::max(j - 1, 0), jp1 = std::min(j + 1, ny - 1);
+                const double dvdx = (m_solver.PrimAt(ip1, j).v - m_solver.PrimAt(im1, j).v) / (2.0 * dx);
+                const double dudy = (m_solver.PrimAt(i, jp1).u - m_solver.PrimAt(i, jm1).u) / (2.0 * dy);
+                value = static_cast<float>(dvdx - dudy);
+                break;
+            }
+            case 3: // tracer
+                value = static_cast<float>(pr.tracer);
+                break;
+            default: // density
+                value = static_cast<float>(pr.rho);
+                break;
+            }
+            m_fieldScratch[idx] = value;
+            m_maskScratch[idx] = m_solver.IsSolidAt(i, j) ? 1.0f : 0.0f;
+            fieldMin = std::min(fieldMin, value);
+            fieldMax = std::max(fieldMax, value);
+        }
+    }
+    glNamedBufferSubData(m_fieldBuf, 0, static_cast<GLsizeiptr>(m_fieldScratch.size() * sizeof(float)),
+                         m_fieldScratch.data());
+    glNamedBufferSubData(m_maskBuf, 0, static_cast<GLsizeiptr>(m_maskScratch.size() * sizeof(float)),
+                         m_maskScratch.data());
+
+    const double lx = nx * dx, ly = ny * dy;
+    // Fit the WHOLE domain inside the window regardless of its aspect ratio
+    // (the cylinder deck's 25x8 domain is far from square, unlike
+    // 05_tdse_gpu's always-square grid, which is why this differs from that
+    // sim's pixPerUnit formula) -- min() of the two per-axis fits, so
+    // neither dimension overflows the viewport.
+    const float pixPerUnit =
+        static_cast<float>(std::min(fbWidth / lx, fbHeight / ly)) * m_zoom;
+
+    glDisable(GL_DEPTH_TEST);
+    m_view.Use();
+    m_view.SetVec2("uRes", glm::vec2(static_cast<float>(fbWidth), static_cast<float>(fbHeight)));
+    m_view.SetInt("uNx", nx);
+    m_view.SetInt("uNy", ny);
+    m_view.SetFloat("uLx", static_cast<float>(lx));
+    m_view.SetFloat("uLy", static_cast<float>(ly));
+    m_view.SetFloat("uPixPerUnit", pixPerUnit);
+    m_view.SetVec2("uPanPix", m_panPix);
+    m_view.SetFloat("uFieldMin", fieldMin);
+    m_view.SetFloat("uFieldMax", fieldMax);
+    m_view.SetFloat("uGain", m_viewGain);
+    m_view.SetFloat("uGammaView", m_viewGamma);
+
+    fw::ComputeShader::BindBuffer(0, m_fieldBuf);
+    fw::ComputeShader::BindBuffer(1, m_maskBuf);
+
+    glBindVertexArray(m_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 3);
+    glBindVertexArray(0);
+    glEnable(GL_DEPTH_TEST);
+}
+
+void CompressibleSimScene::OnViewInput(const fw::ViewInput& in) {
+    if (in.dragging) {
+        m_panPix.x += static_cast<float>(in.dx);
+        m_panPix.y -= static_cast<float>(in.dy); // screen y-down -> world y-up
+    }
+    if (in.scrollDelta != 0.0) {
+        m_zoom *= std::exp(0.12f * static_cast<float>(in.scrollDelta));
+        m_zoom = std::clamp(m_zoom, 0.2f, 80.0f);
+    }
+}
+
+void CompressibleSimScene::OnKey(int key, int action) {
+    (void)action;
+    switch (key) {
+    case 'M': m_renderMode = (m_renderMode + 1) % 4; break;
+    case '[': m_viewGain = std::max(0.15f, m_viewGain * 0.85f); break;
+    case ']': m_viewGain = std::min(12.0f, m_viewGain * 1.18f); break;
+    case '-': m_viewGamma = std::max(0.2f, m_viewGamma - 0.05f); break;
+    case '=': m_viewGamma = std::min(2.5f, m_viewGamma + 0.05f); break;
+    case '0':
+        m_zoom = 1.0f;
+        m_panPix = {0.0f, 0.0f};
+        m_viewGain = 1.0f;
+        m_viewGamma = 1.0f;
+        break;
+    default:
+        break;
+    }
 }
 
 } // namespace cf
