@@ -1,0 +1,5 @@
+# Headless run output (raw .npy frames + diagnostics) -- regenerate by running
+# the sim against a deck, see README.md.
+out/
+
+__pycache__/
