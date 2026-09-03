@@ -27,14 +27,16 @@ the full Courant number `S = c dt sqrt(1/dx^2 + 1/dy^2)`, stable for `S <= 1`.
 cmake --build --preset release --target 10_fdtd
 EXE=./build/release/projects/10_fdtd/10_fdtd.exe
 
-$EXE --selftest        # CFL limit, PEC-box energy conservation, wave speed
-$EXE --gpu-selftest    # GPU compute backend vs the CPU reference
-$EXE --cpml-selftest   # CPML boundary reflection (short vs long domain)
+$EXE --selftest         # CFL limit, PEC-box energy conservation, wave speed
+$EXE --gpu-selftest     # GPU compute backend vs the CPU reference
+$EXE --cpml-selftest    # CPML boundary reflection (short vs long domain)
+$EXE --fresnel-selftest # s-pol Fresnel R(theta) via TFSF phasor subtraction
 
 $EXE --deck projects/10_fdtd/decks/pulse_mur.toml --out out/pulse [--gpu]
 python projects/10_fdtd/tools/plot_probe.py out/pulse
 $EXE --deck projects/10_fdtd/decks/dipole.toml --out out/dipole
 python projects/10_fdtd/tools/plot_dipole.py out/dipole   # vs the 2D Green's function
+python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle sweep
 ```
 
 ## Status
@@ -52,7 +54,14 @@ python projects/10_fdtd/tools/plot_dipole.py out/dipole   # vs the 2D Green's fu
       Green's-function check. `--cpml-selftest`: -81 dB reflection with 12
       cells. `plot_dipole.py`: CW point source vs `(i/4)H0^(1)(kr)` --
       2% amplitude, 0.9997 complex (amplitude+phase) correlation
-- [ ] Phase 3 -- materials + Fresnel + TEz
+- [x] Phase 3a -- per-cell eps/mu/sigma + PEC mask (`Materials.hpp`: slab /
+      halfspace / box / cylinder shapes), TFSF plane-wave source with a 1D
+      auxiliary incident grid (`IncidentWave.hpp`, dispersion-matched dxi so
+      the TF/SF cancellation stays clean at oblique incidence: -276 dB
+      normal, -50 dB at 20 deg off-axis). `--fresnel-selftest` +
+      `tools/plot_fresnel.py`: s-pol reflectance R(theta) matches Fresnel to
+      < 2% from 0 to 70 deg
+- [ ] Phase 3b -- TEz mode (p-polarisation, Brewster angle)
 - [ ] Phase 4 -- PEC scatterers + radiation patterns
 - [ ] Phase 5 -- interactive view
 - [ ] Phase 6 -- docs + Studies + website media
@@ -64,3 +73,4 @@ python projects/10_fdtd/tools/plot_dipole.py out/dipole   # vs the 2D Green's fu
 | `pulse_mur.toml` | Gaussian point source, first-order Mur boundary |
 | `pulse_box.toml` | same in a closed PEC box (energy-conservation check) |
 | `dipole.toml` | CW line source in a CPML box (2D Green's-function check) |
+| `slab_fresnel.toml` | TFSF plane wave onto a dielectric half-space |

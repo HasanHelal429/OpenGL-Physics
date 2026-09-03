@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -13,6 +14,8 @@
 #include <vector>
 
 namespace {
+
+constexpr double kPi = 3.14159265358979323846;
 
 struct Args {
     std::string deck;
@@ -23,6 +26,7 @@ struct Args {
     bool selftest = false;
     bool gpuSelftest = false;
     bool cpmlSelftest = false;
+    bool fresnelSelftest = false;
     bool gpu = false;
 };
 
@@ -39,6 +43,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--gpu-selftest") a.gpuSelftest = true;
         else if (s == "--cpml-selftest") a.cpmlSelftest = true;
+        else if (s == "--fresnel-selftest") a.fresnelSelftest = true;
         else if (s == "--gpu") a.gpu = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -259,6 +264,100 @@ bool CpmlSelfTest() {
     return ok;
 }
 
+// s-polarisation Fresnel reflectance. For each incidence angle, run the TFSF
+// plane-wave deck twice -- with and without the dielectric half-space -- and
+// subtract the Ez phasors on a row just above the interface (the reflected
+// beam still fully overlaps the incident footprint there). The interface sits
+// high in the domain and the measurement window is short, so it closes before
+// the transmitted wave's echo off the (vacuum-tuned) CPML in the dielectric
+// can return -- the thorough angle sweep is tools/plot_fresnel.py.
+bool FresnelSelfTest() {
+    bool ok = true;
+    const double n2 = 2.0, epsR = n2 * n2, f0 = 0.05;
+    const int nx = 320, ny = 320, pml = 12, margin = 10;
+    const int iface = 245, probeRow = iface + 8;
+    const double w = 2.0 * kPi * f0;
+
+    auto phasorRow = [&](bool slab, double propDeg) {
+        char buf[900];
+        std::snprintf(buf, sizeof(buf), R"(
+[grid]
+nx = %d
+ny = %d
+dx = 1.0
+courant = 0.5
+[boundary]
+type = "cpml"
+pml_cells = %d
+[tfsf]
+margin = %d
+[time]
+steps = 1
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = %.4f
+amplitude = 1.0
+angle_deg = %.4f
+ramp_cycles = 4
+%s)", nx, ny, pml, margin, f0, propDeg,
+            slab ? "[[material]]\nshape=\"halfspace\"\naxis=\"y\"\npos=245\n"
+                   "side=\"lo\"\neps_r=4.0\n"
+                 : "");
+        fdtd::Fdtd2D sim;
+        fw::Deck d = fw::Deck::FromString(buf);
+        sim.Configure(d);
+        const int period = static_cast<int>(std::round(1.0 / f0 / sim.Dt()));
+        sim.Step(15 * period);                  // short: beat the dielectric-PML echo
+        const int measure = 4 * period;
+        std::vector<std::complex<double>> row(nx, 0.0);
+        for (int k = 0; k < measure; ++k) {
+            sim.Step(1);
+            const auto& ez = sim.Ez();
+            const auto ph = std::exp(std::complex<double>(0.0, w * sim.Time()));
+            for (int i = 0; i < nx; ++i)
+                row[i] += ez[static_cast<std::size_t>(probeRow) * nx + i] * ph;
+        }
+        for (auto& v : row) v *= 2.0 / double(measure);
+        return row;
+    };
+
+    // incident amplitude from a no-slab run at normal incidence
+    const auto inc0 = phasorRow(false, 270.0);
+    double Ei = 0.0;
+    for (int i = nx / 3; i < 2 * nx / 3; ++i) Ei += std::abs(inc0[i]);
+    Ei /= (nx / 3);
+
+    std::printf("  theta_i    R_fdtd    R_fresnel   err   "
+                "(full sweep: tools/plot_fresnel.py)\n");
+    for (double thetaDeg : {0.0, 20.0, 40.0, 55.0}) {
+        const double prop = 270.0 - thetaDeg;
+        const auto tot = phasorRow(true, prop);
+        const auto inc = phasorRow(false, prop);
+        std::vector<double> refl(nx);
+        double rmax = 0.0;
+        for (int i = 0; i < nx; ++i) {
+            refl[i] = std::abs(tot[i] - inc[i]);
+            rmax = std::max(rmax, refl[i]);
+        }
+        double er = 0.0;
+        int cnt = 0;
+        for (int i = 0; i < nx; ++i)
+            if (refl[i] > 0.6 * rmax) { er += refl[i]; ++cnt; }
+        const double R = (er / cnt / Ei) * (er / cnt / Ei);
+
+        const double thi = thetaDeg * kPi / 180.0;
+        const double ctt = std::sqrt(1.0 - std::pow(std::sin(thi) / n2, 2));
+        const double rs = (std::cos(thi) - n2 * ctt) / (std::cos(thi) + n2 * ctt);
+        const double Rf = rs * rs;
+        std::printf("  %5.0f deg   %.4f    %.4f      %.4f\n",
+                    thetaDeg, R, Rf, std::abs(R - Rf));
+        if (std::abs(R - Rf) > 0.025) ok = false;
+    }
+    std::printf("fresnel-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -267,6 +366,7 @@ int main(int argc, char** argv) {
     if (a.selftest) return SelfTest() ? 0 : 1;
     if (a.gpuSelftest) return GpuSelfTest() ? 0 : 1;
     if (a.cpmlSelftest) return CpmlSelfTest() ? 0 : 1;
+    if (a.fresnelSelftest) return FresnelSelfTest() ? 0 : 1;
 
     if (a.deck.empty()) {
         std::fprintf(stderr,

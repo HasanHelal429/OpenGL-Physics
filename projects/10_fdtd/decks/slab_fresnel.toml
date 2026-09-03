@@ -1,0 +1,42 @@
+title = "Plane wave onto a dielectric half-space -- Fresnel R(theta)"
+
+# A TFSF plane wave at angle_deg from +x (90 = straight down the -y... here
+# 270 sends it downward) hits a dielectric half-space filling the lower part
+# of the domain. In the scattered-field strip above the TFSF box only the
+# reflected wave is present; deep in the dielectric only the transmitted
+# wave. tools/plot_fresnel.py sweeps the angle and compares R, T to the
+# s-polarisation Fresnel coefficients.
+[grid]
+nx = 360
+ny = 360
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 12
+
+[tfsf]
+margin = 10
+
+[time]
+steps = 2400
+substeps_per_frame = 6
+
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = 0.05
+amplitude = 1.0
+angle_deg = 250.0        # down and to the left
+ramp_cycles = 4
+
+[[material]]
+shape = "halfspace"
+axis = "y"
+pos = 150.0
+side = "lo"
+eps_r = 4.0              # n = 2
+
+[probe]
+points = [180.0, 240.0, 180.0, 60.0]
