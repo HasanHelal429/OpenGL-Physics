@@ -326,13 +326,15 @@ in a perfectly symmetric simulation ever breaks the symmetry needed to
 reach the (stable) shedding limit cycle instead. A real cylinder always
 sheds because a real flow always carries some asymmetric disturbance;
 the "clean" perfectly symmetric numerical case is the artificial one. The
-fix has two parts, both in `CompressibleSimCylinder`: a small *permanent*
-geometric offset of the cylinder off the centerline (`cylinder.y_offset_d`,
-default 2% of `D`) — persistent, so the instability always has something
-to grow from, not just a one-time nudge that convects away before the
-wake even forms — plus a smaller, one-time antisymmetric velocity bump in
-the initial condition to seed the growth faster than waiting on the
-offset's much smaller steady-state asymmetry alone.
+fix has two parts, both expressed purely as deck data (see section 7 for
+the generic scene schema all of this now runs through): a small
+*permanent* geometric offset of the `[[obstacles]]` circle's `center` off
+the centerline (2% of `D` in `decks/cylinder_re100.toml`) — persistent, so
+the instability always has something to grow from, not just a one-time
+nudge that convects away before the wake even forms — plus a smaller,
+one-time antisymmetric velocity bump via `[initial_condition.perturbation]`
+to seed the growth faster than waiting on the offset's much smaller
+steady-state asymmetry alone.
 
 ### 6.3 Validation, and an honest read on a real discrepancy
 
@@ -359,6 +361,55 @@ measured value implies an effective Reynolds number of roughly 65, a
 sizable but physically coherent reduction from the nominal 100. None of
 these individually or together are surprising; a finer grid and a longer
 run are the natural next step to close the gap, not attempted here.
+
+---
+
+## 7. From four hardcoded scenarios to one data-driven scene schema
+
+Through Phases 1-4 and sections 5-6, each new validation target got its
+own C++ `fw::Simulation` class: `CompressibleSim2D` for the Riemann
+problems, `CompressibleSimChannel` for Poiseuille, `CompressibleSimTaylorGreen`
+for the vortex, `CompressibleSimCylinder` for the obstacle flow — each with
+its own `Configure()` hardcoding that scenario's grid setup, boundary
+conditions, initial condition, and (for the cylinder) obstacle geometry and
+symmetry-breaking perturbation, with the deck supplying only the *scalar
+parameters* within that fixed structure. This was a real, working design,
+and it's also why the cylinder deck was noticeably *sparser* than it should
+have been: `cylinder.y_offset_d`, `cylinder.perturb_amplitude`, and
+`cylinder.tracer_stripe_width_d` all had silent C++-side defaults never
+written into the deck at all — a reader opening the deck expecting it to
+be the complete, reproducible specification of the run would get a
+misleading picture of what was actually controlling the physics.
+
+The fix chosen was the larger of two options considered: not just making
+each existing scenario deck *complete* (listing every value it silently
+defaulted), but replacing all four scenario classes with **one**,
+`CompressibleSimScene`, driven entirely by deck content — grid, physics,
+per-side boundary conditions (with an optional inflow profile), an
+obstacle list, an initial-condition *type* (with an optional perturbation
+modifier), named probes, and a tracer toggle (see the project README's
+"The generic scene schema" section for the exact schema fields). Every
+existing scenario is now a *deck* under this one schema, not a *class* —
+adding a genuinely new combination of existing pieces (a different
+obstacle position, a different boundary layout, Poiseuille flow with a
+tracer) needs zero new C++. A genuinely new *shape* of initial condition,
+inflow profile, or obstacle still needs one new named case in
+`CompressibleSimScene.cpp` — the same scope of change `WallBC` already
+represents (a fixed enum of named cases, not a full expression language),
+deliberately chosen over building something more general than any actual
+use case has needed so far.
+
+**Validation.** Every one of the four existing decks was rewritten under
+the new schema and re-run; every result reproduced *bit-for-bit* identical
+output to the pre-refactor version — same final-frame density/pressure
+ranges for the Riemann problem, same 0.08%/1.56% Poiseuille/Taylor-Green
+errors, same St=0.1377 cylinder Strouhal number, same tracer field values
+to the last float. This is a strong check specifically because the new
+class's code path is written completely independently of the four it
+replaces (parsing generic deck tables into closures, rather than reading
+scenario-specific keys directly) — reproducing every prior numerical
+result exactly means the generic parsing captures precisely the same
+physics as each specialized class did, not an approximation of it.
 
 ---
 

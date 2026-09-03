@@ -1,0 +1,319 @@
+#include "CompressibleSimScene.hpp"
+
+#include "framework/Deck.hpp"
+#include "framework/OutputWriter.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdio>
+
+namespace cf {
+
+namespace {
+
+constexpr double kPi = 3.14159265358979323846;
+
+WallBC ParseWallBC(const std::string& s) {
+    if (s == "outflow") return WallBC::Outflow;
+    if (s == "periodic") return WallBC::Periodic;
+    if (s == "no_slip") return WallBC::NoSlipReflective;
+    if (s == "free_slip") return WallBC::FreeSlipReflective;
+    if (s == "inflow") return WallBC::Inflow;
+    std::fprintf(stderr, "warning: unknown boundary type '%s', defaulting to outflow\n", s.c_str());
+    return WallBC::Outflow;
+}
+
+// One side's parsed [boundary.<side>] table: its WallBC, and (only
+// meaningful for Inflow) the fixed base state plus an optional named
+// profile pattern varying that state along the side's own coordinate.
+struct SideConfig {
+    WallBC bc = WallBC::Outflow;
+    Prim2D state;
+    bool hasProfile = false;
+    std::string profileType;
+    double profileStripeWidth = 1.0;
+};
+
+SideConfig ParseSide(const fw::Deck& deck, const std::string& sideKey) {
+    SideConfig sc;
+    sc.bc = ParseWallBC(deck.GetString(sideKey + ".type", "outflow"));
+    if (sc.bc != WallBC::Inflow) return sc;
+    sc.state = Prim2D{
+        deck.GetDouble(sideKey + ".rho", 1.0),
+        deck.GetDouble(sideKey + ".u", 0.0),
+        deck.GetDouble(sideKey + ".v", 0.0),
+        deck.GetDouble(sideKey + ".p", 1.0),
+        deck.GetDouble(sideKey + ".tracer", 0.0),
+    };
+    if (deck.Has(sideKey + ".profile.type")) {
+        sc.hasProfile = true;
+        sc.profileType = deck.GetString(sideKey + ".profile.type", "uniform");
+        sc.profileStripeWidth = deck.GetDouble(sideKey + ".profile.stripe_width", 1.0);
+    }
+    return sc;
+}
+
+Prim2D ReadPrim(const fw::Deck& deck, const std::string& key, const Prim2D& fallback) {
+    return Prim2D{
+        deck.GetDouble(key + ".rho", fallback.rho),
+        deck.GetDouble(key + ".u", fallback.u),
+        deck.GetDouble(key + ".v", fallback.v),
+        deck.GetDouble(key + ".p", fallback.p),
+        deck.GetDouble(key + ".tracer", fallback.tracer),
+    };
+}
+
+Prim2D ReadQuadrant(const fw::Deck& deck, const std::string& key) {
+    const std::vector<double> v = deck.GetDoubleArray(key);
+    return Prim2D{v[0], v[1], v[2], v[3]};
+}
+
+// Builds the full initial-condition function from [initial_condition]
+// (+ an optional [initial_condition.perturbation]) -- see
+// CompressibleSimScene.hpp's class comment for why this is a closed-over
+// std::function rather than something re-read from the deck at Reset() time.
+std::function<Prim2D(double, double)> BuildInitialCondition(const fw::Deck& deck) {
+    const std::string icType = deck.GetString("initial_condition.type", "uniform");
+    std::function<Prim2D(double, double)> baseIc;
+
+    if (icType == "uniform") {
+        const Prim2D state = ReadPrim(deck, "initial_condition", Prim2D{1.0, 0.0, 0.0, 1.0, 0.0});
+        baseIc = [state](double, double) { return state; };
+    } else if (icType == "riemann_quadrants") {
+        // Four constant states in the four quadrants of the domain, split
+        // at (x0,y0) -- the classic genuinely-2D Riemann problem (e.g.
+        // Kurganov & Tadmor 2002's "Configuration 3", decks/
+        // riemann2d_config3.toml).
+        const double x0 = deck.GetDouble("initial_condition.x0", 0.5);
+        const double y0 = deck.GetDouble("initial_condition.y0", 0.5);
+        const Prim2D ne = ReadQuadrant(deck, "initial_condition.ne");
+        const Prim2D nw = ReadQuadrant(deck, "initial_condition.nw");
+        const Prim2D sw = ReadQuadrant(deck, "initial_condition.sw");
+        const Prim2D se = ReadQuadrant(deck, "initial_condition.se");
+        baseIc = [=](double x, double y) {
+            if (y >= y0) return x >= x0 ? ne : nw;
+            return x >= x0 ? se : sw;
+        };
+    } else if (icType == "taylor_green_vortex") {
+        // The classic Taylor-Green (1937) vortex pair -- see
+        // decks/taylor_green.toml and docs/SIMULATION.md's Phase 4 section
+        // for the analytic viscous-decay solution this validates against.
+        // Assumes a square domain (length derived from the x-extent alone);
+        // every deck that actually uses this IC type has one.
+        const double rho0 = deck.GetDouble("initial_condition.rho0", 1.0);
+        const double p0 = deck.GetDouble("initial_condition.p0", 1.0);
+        const double u0 = deck.GetDouble("initial_condition.u0", 0.1);
+        const double length = deck.GetDouble("grid.x_max", 1.0) - deck.GetDouble("grid.x_min", 0.0);
+        const int waveNumberMultiplier = deck.GetInt("initial_condition.wavenumber_multiplier", 1);
+        const double k = 2.0 * kPi * waveNumberMultiplier / length;
+        baseIc = [=](double x, double y) {
+            const double u = u0 * std::cos(k * x) * std::sin(k * y);
+            const double v = -u0 * std::sin(k * x) * std::cos(k * y);
+            const double p = p0 - 0.25 * rho0 * u0 * u0 * (std::cos(2.0 * k * x) + std::cos(2.0 * k * y));
+            return Prim2D{rho0, u, v, p};
+        };
+    } else {
+        std::fprintf(stderr, "warning: unknown initial_condition.type '%s', defaulting to uniform rest\n",
+                     icType.c_str());
+        baseIc = [](double, double) { return Prim2D{1.0, 0.0, 0.0, 1.0}; };
+    }
+
+    if (!deck.Has("initial_condition.perturbation.type")) return baseIc;
+    const std::string pertType = deck.GetString("initial_condition.perturbation.type", "");
+    if (pertType != "antisymmetric_gaussian") {
+        std::fprintf(stderr, "warning: unknown initial_condition.perturbation.type '%s', ignoring\n",
+                     pertType.c_str());
+        return baseIc;
+    }
+    // A one-time antisymmetric velocity bump, localized near `center`
+    // (Gaussian, width `sigma`), opposite sign above/below `center`'s y --
+    // the belt-and-suspenders symmetry-breaker cylinder_re100.toml needs on
+    // top of its off-center obstacle placement (see docs/SIMULATION.md
+    // section 6.2 for why a perfectly symmetric setup never sheds at all
+    // without one). `amplitude` is a fraction of the base state's own u.
+    const std::vector<double> center = deck.GetDoubleArray("initial_condition.perturbation.center");
+    const double cx = center.size() > 0 ? center[0] : 0.0;
+    const double cy = center.size() > 1 ? center[1] : 0.0;
+    const double sigma = deck.GetDouble("initial_condition.perturbation.sigma", 1.0);
+    const double amplitude = deck.GetDouble("initial_condition.perturbation.amplitude", 0.0);
+    const std::string component = deck.GetString("initial_condition.perturbation.component", "v");
+    return [=](double x, double y) {
+        Prim2D p = baseIc(x, y);
+        const double dxp = x - cx, dyp = y - cy;
+        const double r2 = dxp * dxp + dyp * dyp;
+        const double sign = dyp >= 0.0 ? 1.0 : -1.0;
+        const double pert = amplitude * p.u * sign * std::exp(-r2 / (2.0 * sigma * sigma));
+        if (component == "u") p.u += pert; else p.v += pert;
+        return p;
+    };
+}
+
+} // namespace
+
+void CompressibleSimScene::Configure(const fw::Deck& deck) {
+    m_title = deck.GetString("title", m_title);
+
+    const int nx = deck.GetInt("grid.nx", 100);
+    const int ny = deck.GetInt("grid.ny", 100);
+    const double xMin = deck.GetDouble("grid.x_min", 0.0);
+    const double xMax = deck.GetDouble("grid.x_max", 1.0);
+    const double yMin = deck.GetDouble("grid.y_min", 0.0);
+    const double yMax = deck.GetDouble("grid.y_max", 1.0);
+    const double gamma = deck.GetDouble("physics.gamma", 1.4);
+    const double mu = deck.GetDouble("physics.mu", 0.0);
+    const double conductivity = deck.GetDouble("physics.conductivity", 0.0);
+    const double tracerDiffusivity = deck.GetDouble("physics.tracer_diffusivity", 0.0);
+    const double bodyForceX = deck.GetDouble("physics.body_force_x", 0.0);
+
+    m_solver.Init(nx, ny, xMin, xMax, yMin, yMax, gamma);
+    m_solver.SetViscosity(mu, conductivity);
+    m_solver.SetTracerDiffusivity(tracerDiffusivity);
+    m_solver.SetBodyForceX(bodyForceX);
+
+    const SideConfig left = ParseSide(deck, "boundary.left");
+    const SideConfig right = ParseSide(deck, "boundary.right");
+    const SideConfig bottom = ParseSide(deck, "boundary.bottom");
+    const SideConfig top = ParseSide(deck, "boundary.top");
+    m_solver.SetBoundaryConditions(left.bc, right.bc, bottom.bc, top.bc);
+
+    // Euler2D's Inflow BC uses one shared state/profile for every side
+    // that's Inflow (see Euler2D::SetInflowState/SetInflowProfile) -- fine
+    // as long as no deck needs two DIFFERENT inflow states on two
+    // different sides (none does), so only the first Inflow side found is
+    // used here.
+    for (const SideConfig* sc : {&left, &right, &bottom, &top}) {
+        if (sc->bc != WallBC::Inflow) continue;
+        m_solver.SetInflowState(sc->state);
+        if (sc->hasProfile && sc->profileType == "tracer_stripes") {
+            const Prim2D base = sc->state;
+            const double stripeWidth = sc->profileStripeWidth;
+            m_solver.SetInflowProfile([=](double coord) {
+                Prim2D p = base;
+                const int band = static_cast<int>(std::floor(coord / stripeWidth));
+                p.tracer = (band % 2 == 0) ? 1.0 : 0.0;
+                return p;
+            });
+        } else if (sc->hasProfile) {
+            std::fprintf(stderr, "warning: unknown inflow profile type '%s', using the fixed state instead\n",
+                         sc->profileType.c_str());
+        }
+        break;
+    }
+
+    std::vector<std::array<double, 3>> obstacleCircles; // {cx, cy, radius}
+    for (const fw::Deck& obs : deck.GetTables("obstacles")) {
+        const std::string shape = obs.GetString("shape", "circle");
+        if (shape != "circle") {
+            std::fprintf(stderr, "warning: unsupported obstacle shape '%s', ignoring\n", shape.c_str());
+            continue;
+        }
+        const std::vector<double> center = obs.GetDoubleArray("center");
+        const double radius = obs.GetDouble("radius", 0.0);
+        obstacleCircles.push_back({center.size() > 0 ? center[0] : 0.0, center.size() > 1 ? center[1] : 0.0, radius});
+    }
+    if (!obstacleCircles.empty()) {
+        m_solver.SetObstacleMask([obstacleCircles](double x, double y) {
+            for (const std::array<double, 3>& c : obstacleCircles) {
+                const double dx = x - c[0], dy = y - c[1];
+                if (dx * dx + dy * dy <= c[2] * c[2]) return true;
+            }
+            return false;
+        });
+    }
+
+    m_icFn = BuildInitialCondition(deck);
+    Reset();
+
+    m_probes.clear();
+    for (const fw::Deck& p : deck.GetTables("probes")) {
+        const std::string name = p.GetString("name", "probe");
+        const double x = p.GetDouble("x", 0.0);
+        const double y = p.GetDouble("y", 0.0);
+        const int i = std::clamp(static_cast<int>((x - xMin) / m_solver.Dx()), 0, nx - 1);
+        const int j = std::clamp(static_cast<int>((y - yMin) / m_solver.Dy()), 0, ny - 1);
+        m_probes.push_back({name, i, j});
+    }
+
+    m_writeTracer = deck.GetBool("output.write_tracer", false);
+
+    m_cfl = deck.GetDouble("time.cfl", 0.4);
+    m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 20);
+    // Fixed dt from the (post-Reset, i.e. including any perturbation) max
+    // wave speed -- see decks/cylinder_re100.toml's comment via
+    // CompressibleSimCylinder's original version of this line for why a
+    // fixed dt is safe for every scenario this schema currently expresses.
+    m_dt = m_cfl / (m_solver.MaxWaveSpeedX() / m_solver.Dx() + m_solver.MaxWaveSpeedY() / m_solver.Dy());
+}
+
+void CompressibleSimScene::Reset() {
+    m_solver.SetInitialCondition(m_icFn);
+}
+
+void CompressibleSimScene::Step(int substeps) {
+    for (int i = 0; i < substeps; ++i) m_solver.Step(m_dt);
+}
+
+void CompressibleSimScene::Snapshot(fw::OutputWriter& writer) {
+    const int nx = m_solver.Nx(), ny = m_solver.Ny();
+    std::vector<float> rho(static_cast<size_t>(nx * ny)), u(static_cast<size_t>(nx * ny)),
+        v(static_cast<size_t>(nx * ny)), p(static_cast<size_t>(nx * ny));
+    std::vector<float> tracer;
+    if (m_writeTracer) tracer.resize(static_cast<size_t>(nx * ny));
+
+    double kineticEnergy = 0.0, uMax = 0.0;
+    const double cellArea = m_solver.Dx() * m_solver.Dy();
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const Prim2D pr = m_solver.PrimAt(i, j);
+            const size_t idx = static_cast<size_t>(j * nx + i);
+            rho[idx] = static_cast<float>(pr.rho);
+            u[idx] = static_cast<float>(pr.u);
+            v[idx] = static_cast<float>(pr.v);
+            p[idx] = static_cast<float>(pr.p);
+            if (m_writeTracer) tracer[idx] = static_cast<float>(pr.tracer);
+            kineticEnergy += 0.5 * pr.rho * (pr.u * pr.u + pr.v * pr.v) * cellArea;
+            uMax = std::max(uMax, pr.u);
+        }
+    }
+    writer.WriteField("rho", rho.data(), fw::NpyDtype::F4, ny, nx);
+    writer.WriteField("u", u.data(), fw::NpyDtype::F4, ny, nx);
+    writer.WriteField("v", v.data(), fw::NpyDtype::F4, ny, nx);
+    writer.WriteField("p", p.data(), fw::NpyDtype::F4, ny, nx);
+    if (m_writeTracer) writer.WriteField("tracer", tracer.data(), fw::NpyDtype::F4, ny, nx);
+
+    writer.WriteScalar("mass_total", m_solver.TotalMass());
+    writer.WriteScalar("energy_total", m_solver.TotalEnergy());
+    writer.WriteScalar("kinetic_energy", kineticEnergy);
+    writer.WriteScalar("u_max", uMax);
+    for (const Probe& probe : m_probes) {
+        const Prim2D val = m_solver.PrimAt(probe.i, probe.j);
+        writer.WriteScalar(probe.name + "_rho", val.rho);
+        writer.WriteScalar(probe.name + "_u", val.u);
+        writer.WriteScalar(probe.name + "_v", val.v);
+        writer.WriteScalar(probe.name + "_p", val.p);
+    }
+}
+
+fw::SimInfo CompressibleSimScene::Info() const {
+    fw::SimInfo info;
+    info.title = m_title;
+    info.gridNx = m_solver.Nx();
+    info.gridNy = m_solver.Ny();
+    info.lx = m_solver.Nx() * m_solver.Dx();
+    info.ly = m_solver.Ny() * m_solver.Dy();
+    info.dt = m_dt;
+    info.substepsPerFrame = m_substepsPerFrame;
+    info.frameFields = {"rho", "u", "v", "p"};
+    if (m_writeTracer) info.frameFields.push_back("tracer");
+    info.diagnostics = {"mass_total", "energy_total", "kinetic_energy", "u_max"};
+    for (const Probe& probe : m_probes) {
+        info.diagnostics.push_back(probe.name + "_rho");
+        info.diagnostics.push_back(probe.name + "_u");
+        info.diagnostics.push_back(probe.name + "_v");
+        info.diagnostics.push_back(probe.name + "_p");
+    }
+    return info;
+}
+
+} // namespace cf

@@ -43,9 +43,14 @@ def main():
 
     with open(os.path.join(d, "deck.toml"), "rb") as f:
         deck = tomllib.load(f)
-    diameter = deck["cylinder"]["diameter"]
-    u_inf = deck["cylinder"]["u_inf"]
-    reynolds = deck["cylinder"]["reynolds"]
+    # Generic-scene schema: no dedicated [cylinder] convenience table --
+    # diameter/u_inf/Reynolds are derived from the raw obstacle/boundary/
+    # physics values the deck actually specifies.
+    diameter = 2.0 * deck["obstacles"][0]["radius"]
+    u_inf = deck["boundary"]["left"]["u"]
+    rho0 = deck["boundary"]["left"]["rho"]
+    mu = deck["physics"]["mu"]
+    reynolds = rho0 * u_inf * diameter / mu
 
     data = np.genfromtxt(os.path.join(d, "diagnostics.csv"), delimiter=",", names=True)
     t = data["t"]

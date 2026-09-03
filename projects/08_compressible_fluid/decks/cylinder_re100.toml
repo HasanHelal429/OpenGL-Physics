@@ -2,40 +2,101 @@ title = "Compressible Navier-Stokes -- cylinder vortex shedding, Re=100"
 
 # Flow past a circular cylinder in a channel, mirroring the geometry/BCs of
 # ../../../Physics Simulations/Fluid Mechanics/MAC_Grid_Solver's
-# Cylinder_Vortex_Shedding.ipynb: Re=100 is comfortably inside the 2D
-# laminar periodic-shedding window (onset ~Re_c=47; real 3D wakes
-# transition ~Re=190). mach=0.2 keeps this weakly compressible (soundspeed
-# = U_inf/mach = 5, so even the ~2x-U_inf peak surface speed potential-flow
-# theory predicts near the cylinder stays well subsonic) without the
-# acoustic stiffness a much lower Mach number would need a preconditioner
-# to handle well. cells_per_d=8 is a first-pass resolution compromise
-# (coarser than the Python reference's own already-flagged 12) chosen for
-# a tractable single-run compute budget -- see tools/plot_strouhal.py and
-# the project README for what this run actually found and whether it's
-# resolution-sensitive.
-[cylinder]
-diameter = 1.0
-reynolds = 100.0
-u_inf = 1.0
-blockage = 0.125
-upstream_d = 5.0
-downstream_d = 20.0
-cells_per_d = 8.0
-probe_distance_d = 4.0
+# Cylinder_Vortex_Shedding.ipynb: D=1, Re=100 (comfortably inside the 2D
+# laminar periodic-shedding window, onset ~Re_c=47; real 3D wakes
+# transition ~Re=190), U_inf=1, blockage D/H=0.125, 5D upstream / 20D
+# downstream, cells_per_d=8 (a first-pass resolution compromise, coarser
+# even than the Python reference's own flagged-as-suboptimal 12 -- see
+# docs/SIMULATION.md section 6.3 for what this run actually found and
+# whether it's resolution-sensitive). mach=0.2 (soundspeed=U_inf/mach=5)
+# keeps this weakly compressible without the acoustic stiffness a much
+# lower Mach number would need a preconditioner to handle well.
+#
+# mu = rho0*U_inf*D/Re = 1*1*1/100 = 0.01
+# p0 = rho0*(U_inf/mach)^2/gamma = 1*25/1.4 = 17.857142857142858
+[grid]
+nx = 200
+ny = 64
+x_min = 0.0
+x_max = 25.0
+y_min = 0.0
+y_max = 8.0
 
 [physics]
 gamma = 1.4
-rho0 = 1.0
-mach = 0.2
+mu = 0.01
+conductivity = 0.0
 
+[boundary.left]
+type = "inflow"
+rho = 1.0
+u = 1.0
+v = 0.0
+p = 17.857142857142858
+
+# A passive dye tracer, fed continuously as alternating 1D-wide bands at
+# the inflow (not just a one-time initial-condition pulse -- that would
+# wash downstream and out of the domain long before this run is over).
+[boundary.left.profile]
+type = "tracer_stripes"
+stripe_width = 1.0
+
+[boundary.right]
+type = "outflow"
+[boundary.bottom]
+type = "free_slip"
+[boundary.top]
+type = "free_slip"
+
+[[obstacles]]
+shape = "circle"
+# center.x = upstream_d*D = 5*1; center.y = height/2 + a small permanent
+# offset off the exact centerline (0.02*D) -- this domain/mask/BC set is
+# otherwise symmetric to floating-point precision, and a perfectly
+# symmetric setup never sheds at all (see docs/SIMULATION.md section 6.2).
+center = [5.0, 4.02]
+radius = 0.5
+
+[initial_condition]
+type = "uniform"
+rho = 1.0
+u = 1.0
+v = 0.0
+p = 17.857142857142858
+
+# A second, belt-and-suspenders symmetry-breaker on top of the obstacle's
+# permanent offset above -- a one-time antisymmetric velocity bump that
+# seeds the shedding instability faster than waiting on the offset's much
+# smaller steady-state asymmetry alone (see docs/SIMULATION.md section 6.2).
+[initial_condition.perturbation]
+type = "antisymmetric_gaussian"
+center = [5.0, 4.02]
+sigma = 1.0
+amplitude = 0.02
+component = "v"
+
+# Downstream velocity probe on the (undisturbed) centerline -- v there
+# oscillates at the shedding frequency because vortices shed alternately
+# from the top/bottom of the cylinder, deflecting the wake first one way
+# then the other. tools/plot_strouhal.py reads this run's probe_v column.
+[[probes]]
+name = "probe"
+x = 9.0
+y = 4.0
+
+[output]
+write_tracer = true
+
+# dt is fixed at ~0.0034 (CFL=0.3, lower than this project's usual 0.4 as
+# a safety margin -- see docs/SIMULATION.md section 6 for why this flow's
+# peak velocity isn't provably bounded by its initial condition the way
+# the Riemann-problem/Poiseuille/Taylor-Green decks' are), so
+# frames*substeps_per_frame*dt ~ 320*120*0.0034 =~ 131 time units -- enough
+# for the impulsive-start transient to decay (shedding period ~1/St~6.3,
+# so this is ~20 periods) plus a genuine measurement window for the FFT
+# (~15 periods) after discarding an initial transient in analysis (see
+# tools/plot_strouhal.py's --transient).
 [time]
-# dt is fixed at ~0.0034 (CFL=0.3 against the initial uniform-inflow wave
-# speed, see CompressibleSimCylinder.cpp's comment), so
-# frames*substeps_per_frame*dt ~ 320*120*0.0034 =~ 131 time units --
-# enough for the impulsive-start transient to decay (shedding period
-# ~1/St~6.3, so this is ~20 periods) plus a genuine measurement window
-# for the FFT (~15 periods) after discarding an initial transient in
-# analysis (see tools/plot_strouhal.py's --transient).
 cfl = 0.3
 substeps_per_frame = 120
 frames = 320

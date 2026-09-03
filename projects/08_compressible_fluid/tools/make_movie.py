@@ -7,18 +7,17 @@ tracer field (Prim2D::tracer -- currently only decks/cylinder_re100.toml's
 inflow dye stripes do), a second panel renders that too, showing how the
 shed vortices actually mix and roll up fluid from different streamlines --
 vorticity shows where the rotation is, the tracer shows what it's doing to
-the fluid. Works for any 2D run (--2d/--channel/--taylor-green/--cylinder);
-the obstacle mask (if the deck has one) is drawn as a solid disk so the
-cylinder itself doesn't show up as a raw zero-velocity artifact.
+the fluid. Works for any --scene 2D run; every obstacle in the deck's
+[[obstacles]] list is drawn as a solid disk so it doesn't show up as a raw
+zero-velocity artifact.
 
     python make_movie.py <results_dir> [--fps 30] [--stride 1] [--vmax V] [--out movie.mp4]
 
 Reads manifest.json + frames/u_*.npy + frames/v_*.npy (+ frames/tracer_*.npy
-if present, + deck.toml's [cylinder] table, if present, to draw the
-obstacle). Uses imageio (bundled ffmpeg via imageio-ffmpeg, not the system
-PATH) so this works even where a system ffmpeg isn't installed; falls back
-to a PNG sequence if that import fails -- same convention as
-06_tidal_disruption/tools/make_movie.py.
+if present, + deck.toml's [[obstacles]] tables, if present). Uses imageio
+(bundled ffmpeg via imageio-ffmpeg, not the system PATH) so this works even
+where a system ffmpeg isn't installed; falls back to a PNG sequence if that
+import fails -- same convention as 06_tidal_disruption/tools/make_movie.py.
 """
 
 import argparse
@@ -61,29 +60,22 @@ def main():
     tracer_frames = sorted(glob.glob(os.path.join(d, "frames", "tracer_*.npy")))[:: args.stride]
     has_tracer = len(tracer_frames) == len(u_frames) and len(tracer_frames) > 0
     if not u_frames:
-        sys.exit("no u_*.npy frames found -- this tool is for 2D runs (--2d/--channel/"
-                  "--taylor-green/--cylinder), not the 1D shock tube")
+        sys.exit("no u_*.npy frames found -- this tool is for --scene 2D runs, not the 1D shock tube")
 
     nx, ny = manifest["grid"]["nx"], manifest["grid"]["ny"]
     lx, ly = manifest["grid"]["lx"], manifest["grid"]["ly"]
     dx = lx / nx
 
     deck_path = os.path.join(d, "deck.toml")
-    cyl = None
+    obstacles = []
     if tomllib is not None and os.path.exists(deck_path):
         with open(deck_path, "rb") as f:
             deck = tomllib.load(f)
-        if "cylinder" in deck:
-            c = deck["cylinder"]
-            diameter = c.get("diameter", 1.0)
-            upstream_d = c.get("upstream_d", 5.0)
-            blockage = c.get("blockage", 0.125)
-            y_offset_d = c.get("y_offset_d", 0.02)
-            cyl = {
-                "x": upstream_d * diameter,
-                "y": diameter / blockage / 2.0 + y_offset_d * diameter,
-                "r": diameter / 2.0,
-            }
+        for obs in deck.get("obstacles", []):
+            if obs.get("shape", "circle") != "circle":
+                continue
+            center = obs.get("center", [0.0, 0.0])
+            obstacles.append({"x": center[0], "y": center[1], "r": obs.get("radius", 0.0)})
 
     def vorticity(u, v):
         dvdx = np.gradient(v, dx, axis=1)
@@ -121,8 +113,8 @@ def main():
         ax_vort.set_xlabel("x")
 
     for a in axes:
-        if cyl is not None:
-            a.add_patch(Circle((cyl["x"], cyl["y"]), cyl["r"], facecolor="0.3", edgecolor="k", zorder=5))
+        for obs in obstacles:
+            a.add_patch(Circle((obs["x"], obs["y"]), obs["r"], facecolor="0.3", edgecolor="k", zorder=5))
     txt = ax_vort.text(0.01, 0.98, "", transform=ax_vort.transAxes, color="k", va="top",
                         fontsize=9, family="monospace",
                         bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2))
