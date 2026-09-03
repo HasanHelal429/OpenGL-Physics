@@ -25,6 +25,7 @@ EXE=./build/release/projects/09_magnetostatics/09_magnetostatics.exe
 $EXE --selftest        # manufactured-solution convergence (2nd order)
 $EXE --mg-scaling      # multigrid W-cycle count vs grid size (flat)
 $EXE --biot-selftest   # GPU Biot-Savart vs analytic loop / Helmholtz
+$EXE --boris-selftest  # relativistic pusher: cyclotron / E x B / energy
 
 $EXE --deck projects/09_magnetostatics/decks/wire.toml --out out/wire
 python projects/09_magnetostatics/tools/plot_wire.py out/wire
@@ -46,7 +47,8 @@ Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
       view (heatmap, field-lines, live wire editing) + `--render-check`
 - [x] Phase 3 -- 3D Biot-Savart on the GPU (`[[coil]]` loop / solenoid /
       helmholtz, xy/xz/yz slice) + `--biot-selftest`
-- [ ] Phase 4 -- Boris pusher
+- [x] Phase 4 -- relativistic Boris test-particle pusher (`[background]` B/E,
+      `[[charge]]`), trajectory trails + per-charge diagnostics, `--boris-selftest`
 - [ ] Phase 5 -- docs + Studies + website media
 
 ## Decks
@@ -58,6 +60,9 @@ Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
 | `playground.toml` | three wires, lighter grid | for `--interactive` |
 | `loop.toml` | one 3D current loop, xz slice | on-axis `B_z = mu0 I R^2/2(R^2+z^2)^{3/2}` (<0.03%) |
 | `helmholtz.toml` | Helmholtz pair, xz slice | centre field vs `(4/5)^{3/2} mu0 I/R` (3e-5), `d^2B/dz^2 ~ 0` |
+| `cyclotron.toml` | one charge in uniform B | orbit radius / period / `KE` (pusher: r to 3e-7, `dgamma` 1e-15) |
+| `exb_drift.toml` | two opposite charges, crossed E, B | drift together at `v_d = E x B / B^2` (1e-5) |
+| `magnetic_bottle.toml` | charge in a mirror trap (two like-current loops) | bounces between throats; `mu` conserved bounce-to-bounce ~3.5% |
 
 ## Solver notes
 

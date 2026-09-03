@@ -112,8 +112,10 @@ constexpr double kPi = 3.14159265358979323846;
 MagnetostaticsSim::~MagnetostaticsSim() {
     if (m_fieldBuf) glDeleteBuffers(1, &m_fieldBuf);
     if (m_lineVbo) glDeleteBuffers(1, &m_lineVbo);
+    if (m_trailVbo) glDeleteBuffers(1, &m_trailVbo);
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
     if (m_lineVao) glDeleteVertexArrays(1, &m_lineVao);
+    if (m_trailVao) glDeleteVertexArrays(1, &m_trailVao);
 }
 
 void MagnetostaticsSim::Configure(const fw::Deck& deck) {
@@ -150,6 +152,65 @@ void MagnetostaticsSim::Configure(const fw::Deck& deck) {
     }
     if (m_useBiot) m_biot.Init(m_grid);
     UpdateField();
+
+    // --- test-particle pusher -----------------------------------------
+    m_c = deck.GetDouble("physics.c", 1.0);
+    auto vec3 = [](const std::vector<double>& a, glm::dvec3 def) {
+        return a.size() == 3 ? glm::dvec3(a[0], a[1], a[2]) : def;
+    };
+    m_bgB = vec3(deck.GetDoubleArray("background.B"), glm::dvec3(0.0));
+    m_bgE = vec3(deck.GetDoubleArray("background.E"), glm::dvec3(0.0));
+    m_dt = deck.GetDouble("time.dt", 0.0);
+    m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 1);
+
+    m_charges.clear();
+    for (const auto& ct : deck.GetTables("charge")) {
+        TestCharge p;
+        p.qm = ct.GetDouble("q_over_m", 1.0);
+        p.x = vec3(ct.GetDoubleArray("x0"), glm::dvec3(0.0));
+        const glm::dvec3 v0 = vec3(ct.GetDoubleArray("v0"), glm::dvec3(0.0));
+        const double v2 = glm::dot(v0, v0);
+        const double gamma = 1.0 / std::sqrt(std::max(1e-30, 1.0 - v2 / (m_c * m_c)));
+        p.u = gamma * v0;
+        const auto col = ct.GetDoubleArray("color");
+        if (col.size() == 3)
+            p.color = glm::vec3((float)col[0], (float)col[1], (float)col[2]);
+        m_charges.push_back(p);
+    }
+    m_chargesInit = m_charges;
+    m_step = 0;
+    m_time = 0.0;
+}
+
+void MagnetostaticsSim::SampleB2D(double x, double y, double& bx, double& by) const {
+    const double dx = m_grid.dx(), dy = m_grid.dy();
+    double fi = (x + 0.5 * m_grid.lx) / dx - 0.5;
+    double fj = (y + 0.5 * m_grid.ly) / dy - 0.5;
+    int i = std::clamp(static_cast<int>(std::floor(fi)), 0, m_grid.nx - 2);
+    int j = std::clamp(static_cast<int>(std::floor(fj)), 0, m_grid.ny - 2);
+    double tx = std::clamp(fi - i, 0.0, 1.0), ty = std::clamp(fj - j, 0.0, 1.0);
+    auto lerp2 = [&](const std::vector<double>& f) {
+        return (1 - tx) * (1 - ty) * f[m_grid.idx(i, j)] +
+               tx * (1 - ty) * f[m_grid.idx(i + 1, j)] +
+               (1 - tx) * ty * f[m_grid.idx(i, j + 1)] +
+               tx * ty * f[m_grid.idx(i + 1, j + 1)];
+    };
+    bx = lerp2(m_Bx);
+    by = lerp2(m_By);
+}
+
+void MagnetostaticsSim::SampleField(const glm::dvec3& r, glm::dvec3& E,
+                                    glm::dvec3& B) const {
+    E = m_bgE;
+    B = m_bgB;
+    if (m_useBiot) {
+        B += BiotSavartAt(m_segments, r, m_mu0);
+    } else if (!m_sources.wires.empty()) {
+        // 2D in-plane field (z-invariant for the out-of-plane line currents).
+        double bx, by;
+        SampleB2D(r.x, r.y, bx, by);
+        B += glm::dvec3(bx, by, 0.0);
+    }
 }
 
 void MagnetostaticsSim::UpdateField(bool warmStart) {
@@ -158,6 +219,21 @@ void MagnetostaticsSim::UpdateField(bool warmStart) {
     else           SolvePoissonPath(warmStart);
     m_lastSolveMs = std::chrono::duration<double, std::milli>(
                         std::chrono::steady_clock::now() - t0).count();
+
+    // Fold a uniform background field into the display grid so a
+    // background-only deck (cyclotron / E x B) still shows a field, not black.
+    if (glm::dot(m_bgB, m_bgB) > 0.0) {
+        const glm::dvec2 ip = m_plane.InPlane(m_bgB);
+        const double perp = m_plane.kind == SlicePlane::XZ ? m_bgB.y
+                          : m_plane.kind == SlicePlane::YZ ? m_bgB.x
+                          : m_bgB.z;
+        for (int k = 0; k < m_grid.count(); ++k) {
+            m_Bx[k] += ip.x;
+            m_By[k] += ip.y;
+            m_Bz[k] += perp;
+        }
+    }
+
     RebuildAvoidPoints();
     m_fieldDirty = true;
 
@@ -223,18 +299,41 @@ void MagnetostaticsSim::RebuildAvoidPoints() {
             m_avoidPts.push_back(m_plane.InPlane(s.mid));
 }
 
-void MagnetostaticsSim::Reset() { UpdateField(); }
+void MagnetostaticsSim::Reset() {
+    UpdateField();
+    m_charges = m_chargesInit;
+    m_step = 0;
+    m_time = 0.0;
+    m_fieldDirty = true;
+}
 
-void MagnetostaticsSim::Step(int /*substeps*/) {}
+void MagnetostaticsSim::Step(int substeps) {
+    if (m_charges.empty() || m_dt == 0.0) return;
+    for (int s = 0; s < substeps; ++s) {
+        for (TestCharge& p : m_charges) {
+            glm::dvec3 E, B;
+            SampleField(p.x, E, B);
+            BorisPush(p, E, B, m_dt, m_c);
+            p.trail.push_back(glm::vec3(p.x));
+            if (p.trail.size() > p.trailCap) p.trail.pop_front();
+        }
+        m_time += m_dt;
+        ++m_step;
+    }
+    m_fieldDirty = true;   // refresh the trail VBO
+}
 
 void MagnetostaticsSim::Snapshot(fw::OutputWriter& writer) {
-    // Bx, By are the two in-plane components of the slice; Bz is the
-    // out-of-plane one (identically zero on the Poisson / xy path).
-    writer.WriteField("A_z", m_Az.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
-    writer.WriteField("Bx", m_Bx.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
-    writer.WriteField("By", m_By.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
-    writer.WriteField("Bz", m_Bz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
-    writer.WriteField("Jz", m_Jz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+    // Fields are static -- write them once, on the first frame. Bx, By are the
+    // two in-plane components of the slice; Bz is the out-of-plane one
+    // (identically zero on the Poisson / xy path).
+    if (m_step == 0) {
+        writer.WriteField("A_z", m_Az.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+        writer.WriteField("Bx", m_Bx.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+        writer.WriteField("By", m_By.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+        writer.WriteField("Bz", m_Bz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+        writer.WriteField("Jz", m_Jz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+    }
 
     double bmax = 0.0;
     for (int k = 0; k < m_grid.count(); ++k)
@@ -243,6 +342,27 @@ void MagnetostaticsSim::Snapshot(fw::OutputWriter& writer) {
     writer.WriteScalar("B_max", std::sqrt(bmax));
     writer.WriteScalar("solve_iterations", m_lastSolve.iterations);
     writer.WriteScalar("solve_residual", m_lastSolve.residual);
+
+    char name[24];
+    for (std::size_t k = 0; k < m_charges.size(); ++k) {
+        const TestCharge& p = m_charges[k];
+        glm::dvec3 E, B;
+        SampleField(p.x, E, B);
+        const glm::dvec3 v = p.velocity(m_c);
+        const double bmag = glm::length(B);
+        const double vpar = bmag > 1e-30 ? glm::dot(v, B) / bmag : 0.0;
+        const double vperp2 = std::max(0.0, glm::dot(v, v) - vpar * vpar);
+        auto put = [&](const char* f, double val) {
+            std::snprintf(name, sizeof(name), "q%zu_%s", k, f);
+            writer.WriteScalar(name, val);
+        };
+        put("x", p.x.x); put("y", p.x.y); put("z", p.x.z);
+        put("speed", glm::length(v));
+        put("gamma", p.gamma(m_c));
+        put("ke", p.keSpecific(m_c));
+        put("vpar", vpar);
+        put("mu", bmag > 1e-30 ? vperp2 / bmag : 0.0);
+    }
 }
 
 fw::SimInfo MagnetostaticsSim::Info() const {
@@ -252,10 +372,16 @@ fw::SimInfo MagnetostaticsSim::Info() const {
     info.gridNy = m_grid.ny;
     info.lx = m_grid.lx;
     info.ly = m_grid.ly;
-    info.dt = 0.0;
-    info.substepsPerFrame = 1;
+    info.dt = m_dt;
+    info.substepsPerFrame = m_substepsPerFrame;
     info.frameFields = {"A_z", "Bx", "By", "Bz", "Jz"};
     info.diagnostics = {"B_max", "solve_iterations", "solve_residual"};
+    char name[24];
+    for (std::size_t k = 0; k < m_charges.size(); ++k)
+        for (const char* f : {"x", "y", "z", "speed", "gamma", "ke", "vpar", "mu"}) {
+            std::snprintf(name, sizeof(name), "q%zu_%s", k, f);
+            info.diagnostics.emplace_back(name);
+        }
     return info;
 }
 
@@ -276,6 +402,13 @@ void MagnetostaticsSim::EnsureRenderResources() {
     glGenBuffers(1, &m_lineVbo);
     glBindVertexArray(m_lineVao);
     glBindBuffer(GL_ARRAY_BUFFER, m_lineVbo);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
+    glEnableVertexAttribArray(0);
+
+    glGenVertexArrays(1, &m_trailVao);
+    glGenBuffers(1, &m_trailVbo);
+    glBindVertexArray(m_trailVao);
+    glBindBuffer(GL_ARRAY_BUFFER, m_trailVbo);
     glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), nullptr);
     glEnableVertexAttribArray(0);
     glBindVertexArray(0);
@@ -447,15 +580,50 @@ void MagnetostaticsSim::Render(int fbWidth, int fbHeight) {
         glDisable(GL_BLEND);
     }
 
+    // Test-particle trails (3D positions projected into the slice plane).
+    if (!m_charges.empty()) {
+        m_line.Use();
+        m_line.SetVec2("uRes", glm::vec2((float)fbWidth, (float)fbHeight));
+        m_line.SetFloat("uPixPerUnit", pixPerUnit);
+        m_line.SetVec2("uPanPix", m_panPix);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        for (const TestCharge& p : m_charges) {
+            if (p.trail.size() < 2) continue;
+            std::vector<float> v;
+            v.reserve(p.trail.size() * 2);
+            for (const glm::vec3& t : p.trail) {
+                const glm::dvec2 ip = m_plane.InPlane(glm::dvec3(t));
+                v.push_back((float)ip.x);
+                v.push_back((float)ip.y);
+            }
+            glBindVertexArray(m_trailVao);
+            glBindBuffer(GL_ARRAY_BUFFER, m_trailVbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(v.size() * sizeof(float)),
+                         v.data(), GL_DYNAMIC_DRAW);
+            m_line.SetVec4("uColor", glm::vec4(p.color, 0.9f));
+            glDrawArrays(GL_LINE_STRIP, 0, static_cast<int>(v.size() / 2));
+        }
+        glBindVertexArray(0);
+        glDisable(GL_BLEND);
+    }
+
     static const char* kModeNames[5] = {"|B|", "Bx", "By", "Bz", "A_z"};
     const std::size_t nSrc =
         m_useBiot ? m_coils.size() : m_sources.wires.size();
     char line[192];
-    std::snprintf(line, sizeof(line),
-                  "field: %s (M)   lines: %s (L)   %s %d/%zu: arrows move   (%.1f ms/update)",
-                  kModeNames[m_mode], m_showLines ? "on" : "off",
-                  m_useBiot ? "coil" : "wire",
-                  nSrc ? m_activeWire + 1 : 0, nSrc, m_lastSolveMs);
+    if (m_charges.empty())
+        std::snprintf(line, sizeof(line),
+                      "field: %s (M)   lines: %s (L)   %s %d/%zu: arrows move   (%.1f ms/update)",
+                      kModeNames[m_mode], m_showLines ? "on" : "off",
+                      m_useBiot ? "coil" : "wire",
+                      nSrc ? m_activeWire + 1 : 0, nSrc, m_lastSolveMs);
+    else
+        std::snprintf(line, sizeof(line),
+                      "field: %s (M)   lines: %s (L)   %zu charge(s)   t = %.2f",
+                      kModeNames[m_mode], m_showLines ? "on" : "off",
+                      m_charges.size(), m_time);
     m_text->SetViewport(fbWidth, fbHeight);
     m_text->Draw(m_font, line, glm::vec2(12.0f, 24.0f),
                  glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
