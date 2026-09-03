@@ -150,8 +150,6 @@ double Minmod(double a, double b) {
 }
 
 constexpr int kGhost = 2;
-using HllcFluxFn = Cons2D (*)(const Prim2D&, const Prim2D&, double);
-using ToPrimFn = Prim2D (*)(const Cons2D&, double);
 
 // Ghost-cell boundary fill for one padded line, independent conditions on
 // each side. Outflow reproduces Euler1D::ApplyBoundary's zero-gradient
@@ -227,16 +225,22 @@ void ApplyBoundaryLine(std::vector<Cons2D>& u, WallBC bcLeft, WallBC bcRight, co
     }
 }
 
+} // namespace
+
 // -dF/dx (or -dF/dy) per interior cell of a ghost-padded line -- identical
 // structure to Euler1D::Rhs, generalized over Cons2D and a direction-specific
-// HLLC flux.
-std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double dx, HllcFluxFn hllc, ToPrimFn toPrim) {
+// HLLC flux. Writes into ws.prim/faceL/faceR and dudtOut (a Workspace field
+// selected by the caller, e.g. ws.k1 or ws.k2) instead of allocating fresh
+// vectors every call -- see Euler2D.hpp's Workspace comment for why.
+void Euler2D::LineRhs(const std::vector<Cons2D>& u, double dx, HllcFluxFn hllc, Workspace& ws,
+                       std::vector<Cons2D>& dudtOut) const {
     const int total = static_cast<int>(u.size());
     const int n = total - 2 * kGhost;
-    std::vector<Prim2D> prim(static_cast<size_t>(total));
-    for (int i = 0; i < total; ++i) prim[static_cast<size_t>(i)] = toPrim(u[static_cast<size_t>(i)], gamma);
+    std::vector<Prim2D>& prim = ws.prim;
+    for (int i = 0; i < total; ++i) prim[static_cast<size_t>(i)] = ToPrim2D(u[static_cast<size_t>(i)], m_gamma);
 
-    std::vector<Prim2D> faceL(static_cast<size_t>(total)), faceR(static_cast<size_t>(total));
+    std::vector<Prim2D>& faceL = ws.faceL;
+    std::vector<Prim2D>& faceR = ws.faceR;
     for (int i = 0; i < total; ++i) faceL[static_cast<size_t>(i)] = faceR[static_cast<size_t>(i)] = prim[static_cast<size_t>(i)];
     for (int i = 1; i < total - 1; ++i) {
         const Prim2D& pm = prim[static_cast<size_t>(i - 1)];
@@ -253,12 +257,12 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
                                                 p0.p + 0.5 * dP, p0.tracer + 0.5 * dTracer};
     }
 
-    std::vector<Cons2D> dudt(static_cast<size_t>(n));
-    Cons2D fluxPrev = hllc(faceR[static_cast<size_t>(kGhost - 1)], faceL[static_cast<size_t>(kGhost)], gamma);
+    dudtOut.resize(static_cast<size_t>(n)); // no-op after the first call: Workspace::EnsureSize already sized this
+    Cons2D fluxPrev = hllc(faceR[static_cast<size_t>(kGhost - 1)], faceL[static_cast<size_t>(kGhost)], m_gamma);
     for (int i = 0; i < n; ++i) {
         const int gi = i + kGhost;
-        const Cons2D fluxNext = hllc(faceR[static_cast<size_t>(gi)], faceL[static_cast<size_t>(gi + 1)], gamma);
-        Cons2D& d = dudt[static_cast<size_t>(i)];
+        const Cons2D fluxNext = hllc(faceR[static_cast<size_t>(gi)], faceL[static_cast<size_t>(gi + 1)], m_gamma);
+        Cons2D& d = dudtOut[static_cast<size_t>(i)];
         d.rho = -(fluxNext.rho - fluxPrev.rho) / dx;
         d.momX = -(fluxNext.momX - fluxPrev.momX) / dx;
         d.momY = -(fluxNext.momY - fluxPrev.momY) / dx;
@@ -266,26 +270,28 @@ std::vector<Cons2D> LineRhs(const std::vector<Cons2D>& u, double gamma, double d
         d.rhoTracer = -(fluxNext.rhoTracer - fluxPrev.rhoTracer) / dx;
         fluxPrev = fluxNext;
     }
-    return dudt;
 }
 
 // RK2 (Heun) update of one interior line (a grid row or column) over a
 // fractional step dt, given its own ghost-padded flux operator -- the same
 // algorithm as Euler1D::Step, generalized over direction (HllcFluxX/Y).
-std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double dt, double dx, double gamma,
-                                    HllcFluxFn hllc, WallBC bcLeft, WallBC bcRight, const Cons2D& inflowCons,
-                                    BoundaryAxis axis) {
+// Writes the result into resultOut (a Workspace field, e.g. ws.result)
+// instead of returning a freshly-allocated vector.
+void Euler2D::AdvanceLineRK2(const std::vector<Cons2D>& interior, double dt, double dx, HllcFluxFn hllc,
+                              WallBC bcLeft, WallBC bcRight, const Cons2D& inflowCons, BoundaryAxis axis,
+                              Workspace& ws, std::vector<Cons2D>& resultOut) const {
     const int n = static_cast<int>(interior.size());
-    std::vector<Cons2D> padded(static_cast<size_t>(n + 2 * kGhost));
+    std::vector<Cons2D>& padded = ws.padded;
     for (int i = 0; i < n; ++i) padded[static_cast<size_t>(i + kGhost)] = interior[static_cast<size_t>(i)];
     ApplyBoundaryLine(padded, bcLeft, bcRight, inflowCons, axis);
 
-    const std::vector<Cons2D> k1 = LineRhs(padded, gamma, dx, hllc, ToPrim2D);
+    LineRhs(padded, dx, hllc, ws, ws.k1);
 
-    std::vector<Cons2D> stage1 = padded;
+    std::vector<Cons2D>& stage1 = ws.stage1;
+    stage1 = padded; // vector assignment into an already-correctly-sized buffer: copies elements, no reallocation
     for (int i = 0; i < n; ++i) {
         Cons2D& c = stage1[static_cast<size_t>(i + kGhost)];
-        const Cons2D& d = k1[static_cast<size_t>(i)];
+        const Cons2D& d = ws.k1[static_cast<size_t>(i)];
         c.rho += dt * d.rho;
         c.momX += dt * d.momX;
         c.momY += dt * d.momY;
@@ -293,21 +299,20 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
         c.rhoTracer += dt * d.rhoTracer;
     }
     ApplyBoundaryLine(stage1, bcLeft, bcRight, inflowCons, axis);
-    const std::vector<Cons2D> k2 = LineRhs(stage1, gamma, dx, hllc, ToPrim2D);
+    LineRhs(stage1, dx, hllc, ws, ws.k2);
 
-    std::vector<Cons2D> result(static_cast<size_t>(n));
+    resultOut.resize(static_cast<size_t>(n)); // no-op after the first call
     for (int i = 0; i < n; ++i) {
         const Cons2D& a = padded[static_cast<size_t>(i + kGhost)];
         const Cons2D& b = stage1[static_cast<size_t>(i + kGhost)];
-        const Cons2D& d2 = k2[static_cast<size_t>(i)];
-        Cons2D& out = result[static_cast<size_t>(i)];
+        const Cons2D& d2 = ws.k2[static_cast<size_t>(i)];
+        Cons2D& out = resultOut[static_cast<size_t>(i)];
         out.rho = 0.5 * (a.rho + b.rho + dt * d2.rho);
         out.momX = 0.5 * (a.momX + b.momX + dt * d2.momX);
         out.momY = 0.5 * (a.momY + b.momY + dt * d2.momY);
         out.energy = 0.5 * (a.energy + b.energy + dt * d2.energy);
         out.rhoTracer = 0.5 * (a.rhoTracer + b.rhoTracer + dt * d2.rhoTracer);
     }
-    return result;
 }
 
 // Central-difference Laplacian diffusion increment for one line (row or
@@ -328,15 +333,23 @@ std::vector<Cons2D> AdvanceLineRK2(const std::vector<Cons2D>& interior, double d
 // dependence in the swept direction, i.e. Poiseuille, but silently 1.5x
 // too strong for a genuinely 2D velocity field, i.e. Taylor-Green -- see
 // docs/SIMULATION.md's Phase 4 postmortem for how the bug was caught).
-std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, double mu, double conductivity,
-                                 double tracerDiffusivity, double gamma) {
+//
+// deltaOut (ws.delta) is a REUSED buffer -- unlike a fresh allocation, it is
+// not implicitly zero-initialized, so every field of every element must be
+// explicitly assigned each call (in particular .rho, which nothing upstream
+// of Euler2D actually reads, and .rhoTracer, which DOES get read by
+// DiffuseX/DiffuseY whenever m_tracerDiffusivity<=0 -- the default). Getting
+// this wrong would silently leak a previous call's diffusion increment into
+// the current one.
+void Euler2D::LineDiffuse(const std::vector<Cons2D>& padded, double dx, Workspace& ws,
+                           std::vector<Cons2D>& deltaOut) const {
     const int total = static_cast<int>(padded.size());
     const int n = total - 2 * kGhost;
-    std::vector<Prim2D> prim(static_cast<size_t>(total));
-    for (int i = 0; i < total; ++i) prim[static_cast<size_t>(i)] = ToPrim2D(padded[static_cast<size_t>(i)], gamma);
+    std::vector<Prim2D>& prim = ws.prim;
+    for (int i = 0; i < total; ++i) prim[static_cast<size_t>(i)] = ToPrim2D(padded[static_cast<size_t>(i)], m_gamma);
 
     const double invDx2 = 1.0 / (dx * dx);
-    std::vector<Cons2D> delta(static_cast<size_t>(n));
+    deltaOut.resize(static_cast<size_t>(n)); // no-op after the first call
     for (int i = 0; i < n; ++i) {
         const int gi = i + kGhost;
         const Prim2D& pm = prim[static_cast<size_t>(gi - 1)];
@@ -346,24 +359,37 @@ std::vector<Cons2D> LineDiffuse(const std::vector<Cons2D>& padded, double dx, do
         const double d2v = (pp.v - 2.0 * p0.v + pm.v) * invDx2;
         const double tM = pm.p / pm.rho, t0 = p0.p / p0.rho, tP = pp.p / pp.rho;
         const double d2T = (tP - 2.0 * t0 + tM) * invDx2;
-        Cons2D& d = delta[static_cast<size_t>(i)];
-        d.momX = mu * d2u;
-        d.momY = mu * d2v;
-        d.energy = conductivity * d2T;
+        Cons2D& d = deltaOut[static_cast<size_t>(i)];
+        d.rho = 0.0;
+        d.momX = m_mu * d2u;
+        d.momY = m_mu * d2v;
+        d.energy = m_conductivity * d2T;
         // Tracer diffusion (Fick's law, constant-density-weighted form
         // mu*Laplacian(tracer)): zero by default, since a dye-visualization
         // tracer usually wants sharp interfaces limited only by the
         // scheme's own numerical dissipation, not an explicit smoothing on
         // top of it -- SetTracerDiffusivity opts into a nonzero value.
-        if (tracerDiffusivity > 0.0) {
+        d.rhoTracer = 0.0;
+        if (m_tracerDiffusivity > 0.0) {
             const double d2Tracer = (pp.tracer - 2.0 * p0.tracer + pm.tracer) * invDx2;
-            d.rhoTracer = tracerDiffusivity * d2Tracer;
+            d.rhoTracer = m_tracerDiffusivity * d2Tracer;
         }
     }
-    return delta;
 }
 
-} // namespace
+void Euler2D::Workspace::EnsureSize(int n) {
+    const int total = n + 2 * kGhost;
+    interior.resize(static_cast<size_t>(n));
+    padded.resize(static_cast<size_t>(total));
+    stage1.resize(static_cast<size_t>(total));
+    prim.resize(static_cast<size_t>(total));
+    faceL.resize(static_cast<size_t>(total));
+    faceR.resize(static_cast<size_t>(total));
+    k1.resize(static_cast<size_t>(n));
+    k2.resize(static_cast<size_t>(n));
+    result.resize(static_cast<size_t>(n));
+    delta.resize(static_cast<size_t>(n));
+}
 
 void Euler2D::Init(int nx, int ny, double xMin, double xMax, double yMin, double yMax, double gamma) {
     m_nx = nx;
@@ -374,6 +400,12 @@ void Euler2D::Init(int nx, int ny, double xMin, double xMax, double yMin, double
     m_dy = (yMax - yMin) / static_cast<double>(ny);
     m_gamma = gamma;
     m_u.assign(static_cast<size_t>(nx * ny), Cons2D{});
+    // One Workspace each for now (single-threaded) -- see Euler2D.hpp's
+    // Workspace comment for the planned per-thread extension.
+    m_workspacesX.assign(1, Workspace{});
+    m_workspacesX[0].EnsureSize(nx);
+    m_workspacesY.assign(1, Workspace{});
+    m_workspacesY[0].EnsureSize(ny);
 }
 
 void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)>& f) {
@@ -387,61 +419,63 @@ void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)
 }
 
 void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
-    std::vector<Cons2D> row(static_cast<size_t>(m_nx));
+    Workspace& ws = m_workspacesX[0];
+    std::vector<Cons2D>& row = ws.interior;
     for (int j = 0; j < m_ny; ++j) {
         const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) row[static_cast<size_t>(i)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated =
-            AdvanceLineRK2(row, dt, m_dx, m_gamma, HllcFluxX, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
-        for (int i = 0; i < m_nx; ++i) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(i)];
+        AdvanceLineRK2(row, dt, m_dx, HllcFluxX, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X, ws, ws.result);
+        for (int i = 0; i < m_nx; ++i) grid[static_cast<size_t>(j * m_nx + i)] = ws.result[static_cast<size_t>(i)];
     }
 }
 
 void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
-    std::vector<Cons2D> col(static_cast<size_t>(m_ny));
+    Workspace& ws = m_workspacesY[0];
+    std::vector<Cons2D>& col = ws.interior;
     for (int i = 0; i < m_nx; ++i) {
         const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) col[static_cast<size_t>(j)] = grid[static_cast<size_t>(j * m_nx + i)];
-        const std::vector<Cons2D> updated =
-            AdvanceLineRK2(col, dt, m_dy, m_gamma, HllcFluxY, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
-        for (int j = 0; j < m_ny; ++j) grid[static_cast<size_t>(j * m_nx + i)] = updated[static_cast<size_t>(j)];
+        AdvanceLineRK2(col, dt, m_dy, HllcFluxY, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y, ws, ws.result);
+        for (int j = 0; j < m_ny; ++j) grid[static_cast<size_t>(j * m_nx + i)] = ws.result[static_cast<size_t>(j)];
     }
 }
 
 void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
-    std::vector<Cons2D> padded(static_cast<size_t>(m_nx + 2 * kGhost));
+    Workspace& ws = m_workspacesX[0];
+    std::vector<Cons2D>& padded = ws.padded;
     for (int j = 0; j < m_ny; ++j) {
         const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcLeft, m_bcRight, inflowCons, BoundaryAxis::X);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dx, m_mu, m_conductivity, m_tracerDiffusivity, m_gamma);
+        LineDiffuse(padded, m_dx, ws, ws.delta);
         for (int i = 0; i < m_nx; ++i) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
-            c.momX += dt * delta[static_cast<size_t>(i)].momX;
-            c.momY += dt * delta[static_cast<size_t>(i)].momY;
-            c.energy += dt * delta[static_cast<size_t>(i)].energy;
-            c.rhoTracer += dt * delta[static_cast<size_t>(i)].rhoTracer;
+            c.momX += dt * ws.delta[static_cast<size_t>(i)].momX;
+            c.momY += dt * ws.delta[static_cast<size_t>(i)].momY;
+            c.energy += dt * ws.delta[static_cast<size_t>(i)].energy;
+            c.rhoTracer += dt * ws.delta[static_cast<size_t>(i)].rhoTracer;
         }
     }
 }
 
 void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
-    std::vector<Cons2D> padded(static_cast<size_t>(m_ny + 2 * kGhost));
+    Workspace& ws = m_workspacesY[0];
+    std::vector<Cons2D>& padded = ws.padded;
     for (int i = 0; i < m_nx; ++i) {
         const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
         ApplyBoundaryLine(padded, m_bcBottom, m_bcTop, inflowCons, BoundaryAxis::Y);
-        const std::vector<Cons2D> delta = LineDiffuse(padded, m_dy, m_mu, m_conductivity, m_tracerDiffusivity, m_gamma);
+        LineDiffuse(padded, m_dy, ws, ws.delta);
         for (int j = 0; j < m_ny; ++j) {
             Cons2D& c = grid[static_cast<size_t>(j * m_nx + i)];
-            c.momX += dt * delta[static_cast<size_t>(j)].momX;
-            c.momY += dt * delta[static_cast<size_t>(j)].momY;
-            c.energy += dt * delta[static_cast<size_t>(j)].energy;
-            c.rhoTracer += dt * delta[static_cast<size_t>(j)].rhoTracer;
+            c.momX += dt * ws.delta[static_cast<size_t>(j)].momX;
+            c.momY += dt * ws.delta[static_cast<size_t>(j)].momY;
+            c.energy += dt * ws.delta[static_cast<size_t>(j)].energy;
+            c.rhoTracer += dt * ws.delta[static_cast<size_t>(j)].rhoTracer;
         }
     }
 }
