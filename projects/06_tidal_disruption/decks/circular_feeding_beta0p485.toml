@@ -1,0 +1,36 @@
+title = "Circular feeding -- n=1.5 star, M_bh=10 M_star, beta=0.485 (~4 orbits)"
+
+# A modest bump above decks/circular_feeding_beta0p47.toml's documented
+# stable trickle (beta=0.47: 0.9%->6.5% mass loss over 4 orbits, no
+# runaway). That scan found beta=0.5 already runs away to ~99%
+# disruption within ~2 orbits (Roche-lobe-overflow feedback instability
+# -- stripping grows the star's own Roche-lobe-filling radius, stripping
+# more). beta=0.485 sits between the two, untested by that scan -- run a
+# short --frames override first to confirm it stays in the stable
+# trickle regime before trusting the full production run.
+[star]
+ic_file = "ic/star_n1.5_circular_beta0p485.bin"
+
+[gravity]
+G = 1.0
+softening = 0.02
+
+[sph]
+h_init = 0.157
+eta = 1.2
+h_iters = 3
+K = 0.424217
+gamma = 1.666667
+visc_alpha = 1.0
+visc_beta = 2.0
+
+[blackhole]
+enabled = true
+type = "point"
+mass = 10.0
+
+[time]
+# period=18.60 at r=4.4421 (beta=0.485); frames*substeps_per_frame*dt=78, ~4.2 orbits.
+dt = 0.01
+substeps_per_frame = 20
+frames = 390
