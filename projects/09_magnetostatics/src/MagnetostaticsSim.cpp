@@ -22,9 +22,15 @@ void MagnetostaticsSim::Configure(const fw::Deck& deck) {
     m_solveOpt.tol = deck.GetDouble("solver.tol", 1e-9);
     m_solveOpt.maxIterations = deck.GetInt("solver.max_iterations", 200000);
     m_solveOpt.omega = deck.GetDouble("solver.omega", -1.0);
+    m_mgOpt.tol = deck.GetDouble("solver.tol", 1e-9);
+    m_mgOpt.maxCycles = deck.GetInt("solver.max_cycles", 100);
+
+    m_method = deck.GetString("solver.method", "multigrid");
 
     const std::string bc = deck.GetString("solver.boundary", "dirichlet");
     m_solveOpt.edgeBC = (bc == "neumann") ? BC::Neumann : BC::Dirichlet;
+    // The multigrid path handles only the all-edges-Dirichlet boundary.
+    if (m_solveOpt.edgeBC == BC::Neumann) m_method = "rbgs";
 
     m_Jz = BuildCurrent(m_grid, deck);
     if (m_solveOpt.edgeBC == BC::Neumann) {
@@ -41,13 +47,24 @@ void MagnetostaticsSim::SolveField() {
     for (int k = 0; k < m_grid.count(); ++k) rhs[k] = -m_mu0 * m_Jz[k];
 
     m_Az.assign(m_grid.count(), 0.0);
-    m_lastSolve = SolvePoisson(m_grid, rhs, m_fixedMask, m_fixedValues, m_Az,
-                               m_solveOpt);
+    if (m_method == "multigrid") {
+        const MultigridResult r = SolvePoissonMultigrid(
+            m_grid, rhs, m_fixedValues, m_Az, m_mgOpt);
+        m_lastSolve.iterations = r.cycles;
+        m_lastSolve.residual = r.residual;
+        m_lastSolve.converged = r.converged;
+        std::printf("[magnetostatics] multigrid: %d V-cycles (%d levels), "
+                    "residual %.3e%s\n",
+                    r.cycles, r.levels, r.residual,
+                    r.converged ? "" : "  (NOT converged)");
+    } else {
+        m_lastSolve = SolvePoisson(m_grid, rhs, m_fixedMask, m_fixedValues,
+                                   m_Az, m_solveOpt);
+        std::printf("[magnetostatics] rbgs: %d iterations, residual %.3e%s\n",
+                    m_lastSolve.iterations, m_lastSolve.residual,
+                    m_lastSolve.converged ? "" : "  (NOT converged)");
+    }
     CurlZ(m_grid, m_Az, m_Bx, m_By);
-
-    std::printf("[magnetostatics] solve: %d iterations, residual %.3e%s\n",
-                m_lastSolve.iterations, m_lastSolve.residual,
-                m_lastSolve.converged ? "" : "  (NOT converged)");
 }
 
 void MagnetostaticsSim::Reset() {

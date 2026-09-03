@@ -1,11 +1,13 @@
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
 #include "MagnetostaticsSim.hpp"
+#include "Multigrid.hpp"
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -23,6 +25,7 @@ struct Args {
     int substeps = 0;
     bool interactive = false;
     bool selftest = false;
+    bool mgScaling = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -36,6 +39,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
+        else if (s == "--mg-scaling") a.mgScaling = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -109,6 +113,73 @@ bool SelfTest() {
     return ok;
 }
 
+// Multigrid scaling check: the same manufactured problem, solved by the
+// V-cycle at a range of grid sizes. Text-book multigrid converges in a
+// V-cycle count that is essentially independent of the grid -- the property
+// that makes live re-solving practical. Also confirms the V-cycle reaches
+// the same discrete solution as RB-GS (interior L2 error still ~h^2).
+bool MgScaling() {
+    const double Lx = 2.0, Ly = 2.0;
+    const double kx = kPi / Lx, ky = kPi / Ly;
+    const int sizes[] = {64, 128, 256, 512, 1024};
+
+    auto exact = [&](double x, double y) {
+        return std::sin(kx * (x + 0.5 * Lx)) * std::sin(ky * (y + 0.5 * Ly));
+    };
+
+    std::printf("mg-scaling: V-cycles to relative residual 1e-9\n");
+    std::printf("    nx   V-cycles   levels   L2 error     ms\n");
+
+    double prevErr = 0.0;
+    bool ok = true;
+    for (int idx = 0; idx < 5; ++idx) {
+        mag::Grid g;
+        g.nx = g.ny = sizes[idx];
+        g.lx = Lx;
+        g.ly = Ly;
+
+        std::vector<double> rhs(g.count(), 0.0), u(g.count(), 0.0), fixed(g.count(), 0.0);
+        for (int j = 0; j < g.ny; ++j)
+            for (int i = 0; i < g.nx; ++i) {
+                const std::size_t p = g.idx(i, j);
+                const double a = exact(g.x(i), g.y(j));
+                rhs[p] = -(kx * kx + ky * ky) * a;
+                if (g.onBoundary(i, j)) fixed[p] = a;
+            }
+
+        mag::MultigridOptions opt;
+        opt.tol = 1e-9;
+        opt.maxCycles = 50;
+        const auto t0 = std::chrono::steady_clock::now();
+        const mag::MultigridResult r =
+            mag::SolvePoissonMultigrid(g, rhs, fixed, u, opt);
+        const double ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - t0)
+                              .count();
+
+        double se = 0.0;
+        int n = 0;
+        for (int j = 1; j < g.ny - 1; ++j)
+            for (int i = 1; i < g.nx - 1; ++i) {
+                const double e = u[g.idx(i, j)] - exact(g.x(i), g.y(j));
+                se += e * e;
+                ++n;
+            }
+        const double l2 = std::sqrt(se / n);
+        const double ratio = idx == 0 ? 0.0 : prevErr / l2;
+        std::printf("  %5d   %6d   %6d   %.3e  %7.1f   %s\n",
+                    g.nx, r.cycles, r.levels, l2, ms,
+                    idx == 0 ? "" :
+                    (ratio > 3.5 && ratio < 4.5 ? "(2nd order)" : "(?? order)"));
+        if (!r.converged) ok = false;
+        if (r.cycles > 15) ok = false;              // "flat" == small, bounded
+        if (idx > 0 && (ratio < 3.3 || ratio > 4.7)) ok = false;
+        prevErr = l2;
+    }
+    std::printf("mg-scaling: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -117,12 +188,16 @@ int main(int argc, char** argv) {
     if (a.selftest) {
         return SelfTest() ? 0 : 1;
     }
+    if (a.mgScaling) {
+        return MgScaling() ? 0 : 1;
+    }
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
                      "  09_magnetostatics --deck <f.toml> --out <dir> [--frames N]\n"
-                     "  09_magnetostatics --selftest\n");
+                     "  09_magnetostatics --selftest      (field-solver convergence)\n"
+                     "  09_magnetostatics --mg-scaling    (multigrid V-cycle scaling)\n");
         return 2;
     }
 
