@@ -22,6 +22,7 @@ struct Args {
     bool interactive = false;
     bool selftest = false;
     bool gpuSelftest = false;
+    bool cpmlSelftest = false;
     bool gpu = false;
 };
 
@@ -37,6 +38,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--gpu-selftest") a.gpuSelftest = true;
+        else if (s == "--cpml-selftest") a.cpmlSelftest = true;
         else if (s == "--gpu") a.gpu = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -64,6 +66,34 @@ f0 = %.4f
 amplitude = 1.0
 )", n, n, courant, boundary, steps, srcKind,
         0.5 * (n - 1), 0.5 * (n - 1), f0);
+    return buf;
+}
+
+// A vertical strip domain with the source `srcFromTop` cells below the top
+// edge and a probe `probeFromTop` cells below the top -- so the near-top
+// physics is identical for any ny, and only a reflection off the FAR (bottom)
+// boundary distinguishes a short domain from a long reference one.
+std::string MakeStripDeck(int nx, int ny, const char* boundary, int pml,
+                          int srcFromTop, double f0) {
+    char buf[700];
+    std::snprintf(buf, sizeof(buf), R"(
+[grid]
+nx = %d
+ny = %d
+dx = 1.0
+courant = 0.5
+[boundary]
+type = "%s"
+pml_cells = %d
+[time]
+steps = 1
+[[source]]
+kind = "gaussian"
+x = %.1f
+y = %.1f
+f0 = %.4f
+amplitude = 1.0
+)", nx, ny, boundary, pml, 0.5 * (nx - 1), double(ny - 1 - srcFromTop), f0);
     return buf;
 }
 
@@ -183,6 +213,52 @@ bool GpuSelfTest() {
     return ok;
 }
 
+// CPML boundary reflection: run a short CPML domain and a long reference
+// domain that share their near-top region; the difference at a probe, before
+// the reference's own far boundary can respond, is the short domain's
+// PML reflection.
+bool CpmlSelfTest() {
+    bool ok = true;
+    const int nx = 160, pml = 12;
+    const int srcFromTop = 45, probeFromTop = 75;
+    const double f0 = 0.06;
+
+    const int nyShort = 150;     // bottom PML inner edge ~63 cells below probe
+    const int nyLong = 600;      // bottom ~525 cells below probe -- silent in-window
+
+    auto run = [&](int ny, int steps, std::vector<double>& trace) {
+        fdtd::Fdtd2D sim;
+        fw::Deck d = fw::Deck::FromString(
+            MakeStripDeck(nx, ny, "cpml", pml, srcFromTop, f0));
+        sim.Configure(d);
+        const std::size_t pr =
+            static_cast<std::size_t>(ny - 1 - probeFromTop) * nx + nx / 2;
+        trace.clear();
+        for (int k = 0; k < steps; ++k) {
+            sim.Step(1);
+            trace.push_back(sim.Ez()[pr]);
+        }
+    };
+
+    const int steps = 700;       // ~ round trip to the short domain's far wall
+    std::vector<double> a, b;
+    run(nyShort, steps, a);
+    run(nyLong, steps, b);
+
+    double incident = 0.0, resid = 0.0;
+    for (int k = 0; k < steps; ++k) {
+        incident = std::max(incident, std::abs(b[k]));
+        resid = std::max(resid, std::abs(a[k] - b[k]));
+    }
+    const double dB = 20.0 * std::log10(resid / incident);
+    std::printf("  CPML (%d cells): incident |Ez|=%.3e  residual=%.3e  "
+                "reflection = %.1f dB\n", pml, incident, resid, dB);
+    if (dB > -40.0) ok = false;
+
+    std::printf("cpml-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -190,6 +266,7 @@ int main(int argc, char** argv) {
 
     if (a.selftest) return SelfTest() ? 0 : 1;
     if (a.gpuSelftest) return GpuSelfTest() ? 0 : 1;
+    if (a.cpmlSelftest) return CpmlSelfTest() ? 0 : 1;
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
