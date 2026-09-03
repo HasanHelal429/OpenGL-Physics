@@ -2,6 +2,7 @@
 
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
+#include "Multigrid.hpp"
 
 #include "framework/Simulation.hpp"
 
@@ -43,7 +44,9 @@ private:
     Grid m_grid;
     double m_mu0 = 1.0;
     std::string m_title = "2D Magnetostatics";
+    std::string m_method = "multigrid";   // "multigrid" | "rbgs"
     SolveOptions m_solveOpt;
+    MultigridOptions m_mgOpt;
 
     std::vector<double> m_Jz;
     std::vector<double> m_Az;
