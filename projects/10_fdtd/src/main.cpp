@@ -3,6 +3,12 @@
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
+#include "framework/SimApp.hpp"
+
+#include <glad/glad.h>
+#include <stb_image_write.h>   // implementation in framework/src/SimApp.cpp
+
+#include <cstring>
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +35,7 @@ struct Args {
     bool fresnelSelftest = false;
     bool pecSelftest = false;
     bool gpu = false;
+    std::string renderCheck;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -46,6 +53,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--cpml-selftest") a.cpmlSelftest = true;
         else if (s == "--fresnel-selftest") a.fresnelSelftest = true;
         else if (s == "--pec-selftest") a.pecSelftest = true;
+        else if (s == "--render-check") a.renderCheck = next();
         else if (s == "--gpu") a.gpu = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -445,9 +453,48 @@ int main(int argc, char** argv) {
     fw::Deck deck = fw::Deck::FromFile(a.deck);
 
     if (a.interactive) {
-        std::fprintf(stderr, "interactive view lands in Phase 5\n");
-        return 2;
+        fdtd::Fdtd2D sim;
+        fw::SimApp app(sim, deck, deck.GetString("title", "2D FDTD (TMz)"));
+        app.Run();
+        return 0;
     }
+
+    // Offscreen one-frame render to PNG (headless-verify, per 08's FBO trick).
+    if (!a.renderCheck.empty()) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        const int W = 1000, H = 1000;
+        GLuint fbo = 0, color = 0, depth = 0;
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(1, &color);
+        glBindTexture(GL_TEXTURE_2D, color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+        glGenRenderbuffers(1, &depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+        glViewport(0, 0, W, H);
+        fdtd::Fdtd2D sim;
+        sim.Configure(deck);
+        const int warm = deck.GetInt("time.substeps_per_frame", 4) *
+                         std::min(deck.GetInt("time.steps", 800) /
+                                  std::max(1, deck.GetInt("time.substeps_per_frame", 4)),
+                                  260);
+        if (warm > 1) sim.Step(warm);
+        sim.Render(W, H);
+        sim.Render(W, H);
+        glFinish();
+        std::vector<unsigned char> px((size_t)W * H * 4), flip(px.size());
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        for (int y = 0; y < H; ++y)
+            std::memcpy(&flip[(size_t)y * W * 4], &px[(size_t)(H - 1 - y) * W * 4], (size_t)W * 4);
+        stbi_write_png(a.renderCheck.c_str(), W, H, 4, flip.data(), W * 4);
+        std::printf("render-check -> %s\n", a.renderCheck.c_str());
+        return 0;
+    }
+
     if (a.out.empty()) {
         std::fprintf(stderr, "error: headless mode needs --out <dir>\n");
         return 2;

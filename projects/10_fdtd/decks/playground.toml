@@ -1,0 +1,41 @@
+title = "FDTD playground"
+
+# A lighter grid for the interactive view (--interactive): a CW point source
+# radiating past a dielectric cylinder (a crude lens -- watch the wavefronts
+# bend and focus) and a PEC strip (a hard reflector casting a shadow).
+# M cycles Ez / E-energy / |S|; [ ] gain, - = gamma; drag / scroll to pan+zoom.
+[grid]
+nx = 260
+ny = 260
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[time]
+steps = 100000
+substeps_per_frame = 6
+
+[[source]]
+kind = "sine"
+x = 55.0
+y = 130.0
+f0 = 0.05
+amplitude = 1.0
+ramp_cycles = 3
+
+[[material]]
+shape = "cylinder"
+x = 150.0
+y = 130.0
+radius = 28.0
+eps_r = 2.5
+
+[[pec]]
+shape = "box"
+x = 200.0
+y = 70.0
+half_x = 1.5
+half_y = 26.0

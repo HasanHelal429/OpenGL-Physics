@@ -73,7 +73,9 @@ python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle swee
       centre-fed half-wave PEC dipole -- correct broadside pattern with deep
       axis nulls (~0.89 vs the idealised thin-wire formula; the rest is the
       2D fat-strip vs 3D-filament difference)
-- [ ] Phase 5 -- interactive view
+- [x] Phase 5 -- `--interactive` fw::SimApp view (CPU backend -- fast enough
+      at 256^2): live Ez / E-energy / |S| heatmap (M cycles), dielectric tint +
+      PEC solid overlay, pan/zoom/gain/gamma, `--render-check <png>`
 - [ ] Phase 6 -- docs + Studies + website media
 
 ## Decks
@@ -86,3 +88,4 @@ python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle swee
 | `slab_fresnel.toml` | TFSF plane wave onto a dielectric half-space |
 | `cylinder_scatter.toml` | TFSF plane wave onto a PEC cylinder (Mie check) |
 | `dipole_antenna.toml` | centre-fed half-wave PEC dipole |
+| `playground.toml` | CW source + dielectric lens + PEC strip (`--interactive`) |
