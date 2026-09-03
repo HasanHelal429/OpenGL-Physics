@@ -1,0 +1,25 @@
+title = "Infinite straight wire"
+
+# A single out-of-plane line current at the origin. The analytic field is
+# B_phi = mu0 * I / (2*pi*r); the square A_z = 0 boundary distorts it only
+# near the domain edge, so the check is run on an annulus well inside.
+[grid]
+nx = 512
+ny = 512
+lx = 8.0
+ly = 8.0
+
+[physics]
+mu0 = 1.0
+
+[solver]
+tol = 1e-8
+
+[time]
+frames = 1
+
+[[wire]]
+x = 0.0
+y = 0.0
+current = 1.0
+radius = 0.05

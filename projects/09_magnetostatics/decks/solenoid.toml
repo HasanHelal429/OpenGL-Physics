@@ -1,0 +1,35 @@
+title = "Solenoid cross-section (opposite current sheets)"
+
+# Two opposite out-of-plane current strips spanning most of a wide domain --
+# the 2D idealisation of a solenoid cut lengthwise. With width >> gap the end
+# effects are small and, in the central column, the field between the sheets
+# is uniform at B_x ~ mu0 * K_s (K_s = I / width) and ~0 outside.
+[grid]
+nx = 640
+ny = 256
+lx = 10.0
+ly = 4.0
+
+[physics]
+mu0 = 1.0
+
+[solver]
+tol = 1e-8
+boundary = "neumann"   # natural far boundary: don't drag the uniform field back to zero at the wall
+
+[time]
+frames = 1
+
+[[strip]]
+x = 0.0
+y = 0.5
+width = 8.0
+height = 0.1
+current = 4.0
+
+[[strip]]
+x = 0.0
+y = -0.5
+width = 8.0
+height = 0.1
+current = -4.0
