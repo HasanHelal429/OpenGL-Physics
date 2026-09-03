@@ -1,16 +1,25 @@
 #include "Fdtd2D.hpp"
 
+#include "kernels_fdtd.hpp"
+
 #include "framework/Deck.hpp"
 #include "framework/OutputWriter.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace fdtd {
 
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+}
+
+Fdtd2D::~Fdtd2D() {
+    const GLuint bufs[] = {m_bEz, m_bHx, m_bHy, m_bCa, m_bCb, m_bEzPrev, m_bSrc};
+    for (GLuint b : bufs)
+        if (b) glDeleteBuffers(1, &b);
 }
 
 double Source::operator()(double t) const {
@@ -35,6 +44,7 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
     m_courant = deck.GetDouble("grid.courant", 0.5);
     m_title = deck.GetString("title", "2D FDTD (TMz)");
     m_boundary = deck.GetString("boundary.type", "mur");
+    if (deck.GetString("solver.backend", "cpu") == "gpu") m_useGpu = true;
 
     // Square-cell CFL; the general form carries the aspect ratio.
     m_dt = m_courant / (m_c * std::sqrt(1.0 / (m_dx * m_dx) + 1.0 / (m_dy * m_dy)));
@@ -107,6 +117,7 @@ void Fdtd2D::Reset() {
     m_energy = 0.0;
     m_time = 0.0;
     m_step = 0;
+    if (m_gpuInit) UploadToGpu();
 }
 
 void Fdtd2D::UpdateH() {
@@ -160,6 +171,11 @@ void Fdtd2D::InjectSources() {
 }
 
 void Fdtd2D::Step(int substeps) {
+    if (m_useGpu) {
+        if (!m_gpuInit) InitGpu();
+        StepGpu(substeps);
+        return;
+    }
     for (int s = 0; s < substeps; ++s) {
         m_hxPrev = m_hx;             // H(n-1/2)
         m_hyPrev = m_hy;
@@ -188,7 +204,148 @@ double Fdtd2D::NaiveEnergy() const {
     return 0.5 * u * m_dx * m_dy;
 }
 
+// -------------------------------------------------------------- GPU backend
+
+namespace {
+GLuint MakeBuf(const void* data, GLsizeiptr bytes) {
+    GLuint b = 0;
+    glCreateBuffers(1, &b);
+    glNamedBufferData(b, bytes, data, GL_DYNAMIC_DRAW);
+    return b;
+}
+}
+
+void Fdtd2D::InitGpu() {
+    m_kH = fw::ComputeShader::FromSource(kernels::UpdateH());
+    m_kE = fw::ComputeShader::FromSource(kernels::UpdateE());
+    m_kCopyPrev = fw::ComputeShader::FromSource(kernels::CopyPrev());
+    m_kInject = fw::ComputeShader::FromSource(kernels::Inject());
+    m_kMur = fw::ComputeShader::FromSource(kernels::Mur());
+
+    const int n = m_nx * m_ny;
+    m_scratch.assign(n, 0.0f);
+    std::vector<float> caF(m_ca.begin(), m_ca.end());
+    std::vector<float> cbF(m_cb.begin(), m_cb.end());
+
+    m_bEz = MakeBuf(nullptr, n * sizeof(float));
+    m_bHx = MakeBuf(nullptr, n * sizeof(float));
+    m_bHy = MakeBuf(nullptr, n * sizeof(float));
+    m_bEzPrev = MakeBuf(nullptr, n * sizeof(float));
+    m_bCa = MakeBuf(caF.data(), n * sizeof(float));
+    m_bCb = MakeBuf(cbF.data(), n * sizeof(float));
+    m_bSrc = MakeBuf(nullptr, std::max<std::size_t>(1, m_sources.size()) * sizeof(glm::vec2));
+    m_srcStage.resize(std::max<std::size_t>(1, m_sources.size()));
+
+    m_gpuInit = true;
+    UploadToGpu();
+}
+
+void Fdtd2D::UploadToGpu() {
+    const int n = m_nx * m_ny;
+    auto up = [&](GLuint b, const std::vector<double>& src) {
+        for (int k = 0; k < n; ++k) m_scratch[k] = static_cast<float>(src[k]);
+        glNamedBufferSubData(b, 0, n * sizeof(float), m_scratch.data());
+    };
+    up(m_bEz, m_ez);
+    up(m_bHx, m_hx);
+    up(m_bHy, m_hy);
+    up(m_bEzPrev, m_ezPrev);
+    m_cpuStale = false;
+}
+
+void Fdtd2D::StepGpu(int substeps) {
+    const int n = m_nx * m_ny;
+    const GLuint gx = (m_nx + 15) / 16, gy = (m_ny + 15) / 16;
+    const bool mur = m_boundary == "mur";
+    const double invDx = 1.0 / m_dx, invDy = 1.0 / m_dy;
+    const double coefX = (m_c * m_dt - m_dx) / (m_c * m_dt + m_dx);
+    const double coefY = (m_c * m_dt - m_dy) / (m_c * m_dt + m_dy);
+
+    // Uniforms and buffer bindings that never change across substeps.
+    m_kH.Use();
+    m_kH.SetInt("uNx", m_nx); m_kH.SetInt("uNy", m_ny);
+    m_kH.SetFloat("uCx", static_cast<float>(m_dt * m_muInv / m_dx));
+    m_kH.SetFloat("uCy", static_cast<float>(m_dt * m_muInv / m_dy));
+    m_kE.Use();
+    m_kE.SetInt("uNx", m_nx); m_kE.SetInt("uNy", m_ny);
+    m_kE.SetFloat("uInvDx", static_cast<float>(invDx));
+    m_kE.SetFloat("uInvDy", static_cast<float>(invDy));
+    m_kCopyPrev.Use();
+    m_kCopyPrev.SetInt("uN", n);
+    m_kMur.Use();
+    m_kMur.SetInt("uNx", m_nx); m_kMur.SetInt("uNy", m_ny);
+    m_kMur.SetFloat("uCoefX", static_cast<float>(coefX));
+    m_kMur.SetFloat("uCoefY", static_cast<float>(coefY));
+
+    fw::ComputeShader::BindBuffer(0, m_bEz);
+    fw::ComputeShader::BindBuffer(1, m_bHx);
+    fw::ComputeShader::BindBuffer(2, m_bHy);
+    fw::ComputeShader::BindBuffer(3, m_bCa);
+    fw::ComputeShader::BindBuffer(4, m_bCb);
+    fw::ComputeShader::BindBuffer(5, m_bEzPrev);
+    fw::ComputeShader::BindBuffer(6, m_bSrc);
+
+    for (int s = 0; s < substeps; ++s) {
+        m_kH.Use();
+        m_kH.Dispatch(gx, gy);
+        fw::ComputeShader::Barrier();
+
+        if (mur) {
+            m_kCopyPrev.Use();
+            m_kCopyPrev.Dispatch((n + 255) / 256);
+            fw::ComputeShader::Barrier();
+        }
+
+        m_kE.Use();
+        m_kE.Dispatch(gx, gy);
+        fw::ComputeShader::Barrier();
+
+        // sources
+        if (!m_sources.empty()) {
+            for (std::size_t k = 0; k < m_sources.size(); ++k) {
+                const Source& src = m_sources[k];
+                m_srcStage[k] = glm::vec2(
+                    static_cast<float>(idx(src.i, src.j)),
+                    static_cast<float>(src(m_time)));
+            }
+            glNamedBufferSubData(m_bSrc, 0,
+                                 m_srcStage.size() * sizeof(glm::vec2),
+                                 m_srcStage.data());
+            m_kInject.Use();
+            m_kInject.SetInt("uCount", static_cast<int>(m_sources.size()));
+            m_kInject.Dispatch(
+                static_cast<GLuint>((m_sources.size() + 63) / 64));
+            fw::ComputeShader::Barrier();
+        }
+
+        if (mur) {
+            m_kMur.Use();
+            m_kMur.Dispatch(gx, gy);
+            fw::ComputeShader::Barrier();
+        }
+
+        m_time += m_dt;
+        ++m_step;
+    }
+    m_cpuStale = true;
+}
+
+void Fdtd2D::SyncFromGpu() {
+    if (!m_gpuInit || !m_cpuStale) return;
+    const int n = m_nx * m_ny;
+    auto down = [&](GLuint b, std::vector<double>& dst) {
+        glGetNamedBufferSubData(b, 0, n * sizeof(float), m_scratch.data());
+        for (int k = 0; k < n; ++k) dst[k] = m_scratch[k];
+    };
+    down(m_bEz, m_ez);
+    down(m_bHx, m_hx);
+    down(m_bHy, m_hy);
+    m_energy = NaiveEnergy();   // GPU path: prev-H not tracked, use the naive sum
+    m_cpuStale = false;
+}
+
 void Fdtd2D::Snapshot(fw::OutputWriter& writer) {
+    if (m_useGpu) SyncFromGpu();
     writer.WriteField("Ez", m_ez.data(), fw::NpyDtype::F8, m_ny, m_nx);
     writer.WriteScalar("energy", TotalEnergy());
     double ezmax = 0.0;
