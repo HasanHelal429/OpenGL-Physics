@@ -1,0 +1,27 @@
+title = "Gaussian pulse, first-order Mur boundary"
+
+# A broadband Gaussian point source radiating outward; the first-order Mur
+# ABC should let most of it leave the domain (residual reflection ~1-5%,
+# which is why Phase 2 replaces it with CPML).
+[grid]
+nx = 300
+ny = 300
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "mur"
+
+[time]
+steps = 900
+substeps_per_frame = 6
+
+[[source]]
+kind = "gaussian"
+x = 150.0
+y = 150.0
+f0 = 0.06
+amplitude = 1.0
+
+[probe]
+points = [150.0, 150.0, 220.0, 150.0, 285.0, 150.0]
