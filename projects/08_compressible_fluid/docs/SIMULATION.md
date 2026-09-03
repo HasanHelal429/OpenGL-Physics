@@ -362,7 +362,100 @@ run are the natural next step to close the gap, not attempted here.
 
 ---
 
-## 7. What further extension would need
+## 8. Performance: complexity, the bottleneck that measurement actually found, and what fixed it
+
+### 8.1 Asymptotic scaling
+
+Let `n` be linear grid resolution (`nx≈ny≈n`, domain size fixed), `N=n²`
+cells. The CFL-limited timestep shrinks as `dt~1/n`, so the number of
+steps for a fixed simulated time scales as `O(n)`; work per step is
+`O(N)=O(n²)`. Total inviscid cost is therefore `O(n)·O(n²)=O(n³)=O(N^1.5)` —
+the standard, unavoidable scaling for an explicit hyperbolic scheme (2×
+resolution in each direction → 8× cost). Nothing to fix here; it's inherent
+to explicit time-stepping.
+
+**The one real asymptotic risk**: `Euler2D::Step`'s diffusion sub-cycling
+uses an *explicit* treatment with its own parabolic stability limit,
+`dtDiffMax~h²/μ`. Since this shrinks as `h²` while the outer CFL `dt` only
+shrinks as `h`, the number of diffusion sub-steps grows as `nSub~1/h~n`,
+making the viscous part of the cost scale as `O(n)·O(n)·O(n²)=O(n⁴)=O(N²)`
+— quadratic in cell count, not `N^1.5`. Checked against the actual cylinder
+deck (`cells_per_d=8`, `μ=0.01`): `nSub` computes to exactly **1** today, so
+this costs nothing currently, but it's a wall that would appear immediately
+if resolution were increased (e.g. to close the 13% Strouhal gap, section
+6.3) or Reynolds number raised (smaller `μ`). Not fixed here — the standard
+remedy is an implicit or ADI (alternating-direction-implicit) treatment of
+the viscous terms, a separate, larger change scoped only if actually needed.
+
+### 8.2 What was actually slow, and the surprise in fixing it
+
+Before any of the changes below, `LineRhs`/`AdvanceLineRK2`/`LineDiffuse`
+were free functions that heap-allocated fresh `std::vector`s on every
+single call — ~11 allocations per line, per `Step()`. For the validated
+cylinder-shedding deck (200×64 grid, 38,400 steps), that works out to
+**~169 million heap allocations** for one run. The naive expectation was
+that this allocator churn was the dominant cost (typical allocator
+overhead assumptions put this at potentially 50%+ of runtime).
+
+**Measurement disagreed.** Converting these to `Euler2D` member functions
+writing into per-object, reused scratch buffers (`Workspace`, sized once in
+`Init()`) — eliminating essentially all of that allocation — gave a real
+but modest **~6-7% wall-clock improvement** (cylinder deck: ~3m30s →
+~3m17s, reproducible across repeat runs). Far smaller than the allocation
+count would suggest: this allocator evidently already handles many
+small, same-sized, short-lived allocations cheaply (a fast per-thread
+free-list path is the likely explanation), so allocator overhead was never
+the dominant fraction of runtime here. The actual dominant cost is the
+arithmetic and branching in HLLC flux evaluation, the five-way `WallBC`
+switch in `ApplyBoundaryLine`, and primitive recovery (each involving
+several divisions and a `sqrt` per interface) — ordinary floating-point and
+control-flow work, not allocator pressure.
+
+This is worth stating plainly because it's a real, checkable lesson: a
+plausible-sounding complexity argument ("169 million allocations must
+dominate") turned out to be wrong once actually measured, and the fix
+was still worth doing (it removes allocator-contention risk that *would*
+have mattered once the next change made everything run concurrently — see
+below) but for a different reason than originally assumed. One correctness
+trap surfaced during this refactor, also worth naming: `LineDiffuse`'s
+output buffer relied on a *fresh* vector's implicit zero-initialization for
+`.rho` (never explicitly set) and `.rhoTracer` (only set when
+`m_tracerDiffusivity>0`, not the default) — a *reused* buffer doesn't get
+that for free, and missing this would have silently leaked a previous
+call's diffusion increment into the tracer field under the default
+configuration. Caught and fixed before merging, but a reminder that buffer
+reuse refactors need an explicit audit of every field for implicit-zero-init
+dependencies, not just a mechanical "stop allocating" pass.
+
+### 8.3 Parallelization: the real win
+
+Every row in a `SweepX`/`DiffuseX` call (and every column in
+`SweepY`/`DiffuseY`) is fully independent of every other row/column within
+that call — no cross-line data dependency anywhere in the reconstruction,
+HLLC flux, or RK2 update. This makes the sweeps embarrassingly parallel,
+and unlike the allocation question above, the benefit here didn't need
+measuring to predict: `#pragma omp parallel for` over each sweep's outer
+loop, with `Workspace` promoted to one-per-OpenMP-thread (indexed by
+`omp_get_thread_num()`, sized to `omp_get_max_threads()` in `Init()` — a
+direct extension of section 8.2's buffer-reuse structure, which already
+separated "per-line scratch state" from "the object's own state" and made
+this promotion a one-line change per sweep rather than a redesign).
+
+**Measured result** (16 logical cores): the cylinder deck dropped from
+~3m17s to **~1m22s — a reproducible ~2.4× speedup**. Well short of 16×
+(expected: modest line lengths relative to thread count, per-call thread
+spin-up/synchronization overhead, and the serial row/column
+extraction-and-write-back either side of each parallel region all eat into
+the theoretical ceiling), but a real, substantial, and free-going-forward
+win — every future deck run benefits automatically, no per-deck tuning
+needed. Validated identically to every prior change: `--selftest`'s four
+checks, Poiseuille (0.08%), Taylor-Green (1.56%), and the cylinder's
+Strouhal number all reproduce bit-for-bit identical results with
+parallelism on, confirming no data races were introduced.
+
+---
+
+## 9. What further extension would need
 
 Not attempted here, but worth naming so the scope boundary is explicit
 rather than implicit:

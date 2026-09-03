@@ -1,3 +1,5 @@
+find_package(OpenMP REQUIRED)
+
 add_executable(08_compressible_fluid
     src/main.cpp
     src/Euler1D.cpp
@@ -9,4 +11,7 @@ add_executable(08_compressible_fluid
     src/CompressibleSimCylinder.cpp
 )
 
-target_link_libraries(08_compressible_fluid PRIVATE physgl)
+target_link_libraries(08_compressible_fluid PRIVATE
+    physgl
+    OpenMP::OpenMP_CXX
+)

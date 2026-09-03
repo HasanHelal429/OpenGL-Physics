@@ -1,5 +1,7 @@
 #include "Euler2D.hpp"
 
+#include <omp.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -400,12 +402,20 @@ void Euler2D::Init(int nx, int ny, double xMin, double xMax, double yMin, double
     m_dy = (yMax - yMin) / static_cast<double>(ny);
     m_gamma = gamma;
     m_u.assign(static_cast<size_t>(nx * ny), Cons2D{});
-    // One Workspace each for now (single-threaded) -- see Euler2D.hpp's
-    // Workspace comment for the planned per-thread extension.
-    m_workspacesX.assign(1, Workspace{});
-    m_workspacesX[0].EnsureSize(nx);
-    m_workspacesY.assign(1, Workspace{});
-    m_workspacesY[0].EnsureSize(ny);
+    // One Workspace per OpenMP thread, sized to the upper bound
+    // omp_get_max_threads() reports right now -- SweepX/SweepY/DiffuseX/
+    // DiffuseY index into this by omp_get_thread_num() inside a
+    // #pragma omp parallel for, which is always < the parallel region's
+    // actual team size, itself always <= omp_get_max_threads() as long as
+    // nothing later calls omp_set_num_threads() with a larger value (this
+    // project never does). Each thread's buffers are therefore fully
+    // private -- no shared mutable state between threads, so no data races
+    // and no allocator contention from allocating inside a parallel loop.
+    const int numThreads = omp_get_max_threads();
+    m_workspacesX.assign(static_cast<size_t>(numThreads), Workspace{});
+    for (Workspace& ws : m_workspacesX) ws.EnsureSize(nx);
+    m_workspacesY.assign(static_cast<size_t>(numThreads), Workspace{});
+    for (Workspace& ws : m_workspacesY) ws.EnsureSize(ny);
 }
 
 void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)>& f) {
@@ -418,10 +428,17 @@ void Euler2D::SetInitialCondition(const std::function<Prim2D(double x, double y)
     }
 }
 
+// Each row is fully independent of every other row within one SweepX call
+// (no cross-row data dependency: HllcFluxX/reconstruction/RK2 only ever
+// read/write within the single line being processed), so parallelizing the
+// j loop is safe as long as each thread has its own Workspace (m_workspacesX
+// is sized to omp_get_max_threads() in Init(), see its comment there) --
+// no shared mutable state between threads.
 void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
-    Workspace& ws = m_workspacesX[0];
-    std::vector<Cons2D>& row = ws.interior;
+    #pragma omp parallel for
     for (int j = 0; j < m_ny; ++j) {
+        Workspace& ws = m_workspacesX[static_cast<size_t>(omp_get_thread_num())];
+        std::vector<Cons2D>& row = ws.interior;
         const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) row[static_cast<size_t>(i)] = grid[static_cast<size_t>(j * m_nx + i)];
@@ -430,10 +447,12 @@ void Euler2D::SweepX(std::vector<Cons2D>& grid, double dt) const {
     }
 }
 
+// Same independence argument as SweepX, over columns instead of rows.
 void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
-    Workspace& ws = m_workspacesY[0];
-    std::vector<Cons2D>& col = ws.interior;
+    #pragma omp parallel for
     for (int i = 0; i < m_nx; ++i) {
+        Workspace& ws = m_workspacesY[static_cast<size_t>(omp_get_thread_num())];
+        std::vector<Cons2D>& col = ws.interior;
         const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) col[static_cast<size_t>(j)] = grid[static_cast<size_t>(j * m_nx + i)];
@@ -443,9 +462,10 @@ void Euler2D::SweepY(std::vector<Cons2D>& grid, double dt) const {
 }
 
 void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
-    Workspace& ws = m_workspacesX[0];
-    std::vector<Cons2D>& padded = ws.padded;
+    #pragma omp parallel for
     for (int j = 0; j < m_ny; ++j) {
+        Workspace& ws = m_workspacesX[static_cast<size_t>(omp_get_thread_num())];
+        std::vector<Cons2D>& padded = ws.padded;
         const double y = m_yMin + (static_cast<double>(j) + 0.5) * m_dy;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(y), m_gamma);
         for (int i = 0; i < m_nx; ++i) padded[static_cast<size_t>(i + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
@@ -462,9 +482,10 @@ void Euler2D::DiffuseX(std::vector<Cons2D>& grid, double dt) const {
 }
 
 void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
-    Workspace& ws = m_workspacesY[0];
-    std::vector<Cons2D>& padded = ws.padded;
+    #pragma omp parallel for
     for (int i = 0; i < m_nx; ++i) {
+        Workspace& ws = m_workspacesY[static_cast<size_t>(omp_get_thread_num())];
+        std::vector<Cons2D>& padded = ws.padded;
         const double x = m_xMin + (static_cast<double>(i) + 0.5) * m_dx;
         const Cons2D inflowCons = ToCons2D(InflowStateAt(x), m_gamma);
         for (int j = 0; j < m_ny; ++j) padded[static_cast<size_t>(j + kGhost)] = grid[static_cast<size_t>(j * m_nx + i)];
@@ -482,7 +503,10 @@ void Euler2D::DiffuseY(std::vector<Cons2D>& grid, double dt) const {
 
 void Euler2D::ApplyBodyForce(double dt) {
     if (m_bodyForceX == 0.0) return;
-    for (Cons2D& c : m_u) {
+    const int total = static_cast<int>(m_u.size());
+    #pragma omp parallel for
+    for (int idx = 0; idx < total; ++idx) {
+        Cons2D& c = m_u[static_cast<size_t>(idx)];
         const double u = c.momX / c.rho;
         c.energy += m_bodyForceX * u * dt; // work done by the force (explicit, using pre-update u)
         c.momX += m_bodyForceX * dt;
@@ -516,9 +540,11 @@ void Euler2D::SetObstacleMask(const std::function<bool(double x, double y)>& isS
 // sudden kinetic-to-internal-energy conversion this isn't meant to model.
 void Euler2D::ApplyObstacleMask() {
     if (m_obstacleMask.empty()) return;
-    for (size_t idx = 0; idx < m_u.size(); ++idx) {
-        if (!m_obstacleMask[idx]) continue;
-        Cons2D& c = m_u[idx];
+    const int total = static_cast<int>(m_u.size());
+    #pragma omp parallel for
+    for (int idx = 0; idx < total; ++idx) {
+        if (!m_obstacleMask[static_cast<size_t>(idx)]) continue;
+        Cons2D& c = m_u[static_cast<size_t>(idx)];
         const double kinetic = 0.5 * (c.momX * c.momX + c.momY * c.momY) / c.rho;
         c.energy -= kinetic;
         c.momX = 0.0;

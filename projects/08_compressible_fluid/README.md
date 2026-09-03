@@ -325,6 +325,22 @@ lobe above it, showing *what the vortices are actually doing to the fluid*
 (mixing/entrainment), which vorticity alone (a measure of local rotation)
 doesn't directly show.
 
+## Performance
+
+`Euler2D`'s row/column sweeps are OpenMP-parallelized (each line is fully
+independent of every other line within one sweep) with per-thread reused
+scratch buffers (no heap allocation once warmed up, no allocator
+contention between threads). Measured on the cylinder-shedding deck (16
+logical cores): **~2.4× wall-clock speedup** (~3m17s → ~1m22s) over the
+single-threaded, allocation-heavy original, validated to reproduce every
+existing result bit-for-bit (no data races). See
+[`docs/SIMULATION.md`](docs/SIMULATION.md#8-performance-complexity-the-bottleneck-that-measurement-actually-found-and-what-fixed-it)
+for the full complexity analysis — including a real surprise (heap
+allocation, despite ~169 million calls in one run, turned out to cost only
+~6-7%, not the dominant fraction a naive estimate suggested) and a
+known-but-currently-inactive scaling risk in the explicit viscous-diffusion
+sub-stepping (`O(N²)` at fine-enough resolution/low-enough viscosity).
+
 ## File map
 
 | File | Role |
