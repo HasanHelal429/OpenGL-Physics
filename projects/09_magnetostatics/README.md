@@ -50,7 +50,11 @@ Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
       helmholtz, xy/xz/yz slice) + `--biot-selftest`
 - [x] Phase 4 -- relativistic Boris test-particle pusher (`[background]` B/E,
       `[[charge]]`), trajectory trails + per-charge diagnostics, `--boris-selftest`
-- [ ] Phase 5 -- docs + Studies + website media
+- [x] Phase 5 -- `docs/SIMULATION.md`, `Studies/magnetostatics/`
+      (`multigrid_scaling`, `helmholtz_uniformity_vs_spacing`),
+      `tools/make_movie.py`
+
+All phases complete.
 
 ## Decks
 
