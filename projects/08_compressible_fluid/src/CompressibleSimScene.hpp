@@ -4,11 +4,13 @@
 
 #include "framework/Shader.hpp"
 #include "framework/Simulation.hpp"
+#include "framework/Text.hpp"
 
 #include <glad/glad.h>
 #include <glm/glm.hpp>
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,11 +48,13 @@ public:
     // default to no-ops for a pure batch sim, which is what this class was
     // until now). Draws a live heatmap of one scalar field at a time
     // (density/speed/vorticity/tracer, cycled with 'M'), with any obstacle
-    // cells overlaid as a flat color. Euler2D's state lives on the CPU (see
-    // its m_u comment), not in a GPU buffer the way e.g. 05_tdse_gpu's
-    // solver does, so Render() re-packs the chosen field from
-    // Euler2D::PrimAt into a small SSBO every frame rather than keeping a
-    // persistent GPU-resident copy in sync with the solver.
+    // cells overlaid as a flat color, plus a small on-screen label naming
+    // whichever field is currently displayed (so the mode is visible
+    // without having to already know the keybinding). Euler2D's state
+    // lives on the CPU (see its m_u comment), not in a GPU buffer the way
+    // e.g. 05_tdse_gpu's solver does, so Render() re-packs the chosen field
+    // from Euler2D::PrimAt into a small SSBO every frame rather than
+    // keeping a persistent GPU-resident copy in sync with the solver.
     void Render(int fbWidth, int fbHeight) override;
     void OnViewInput(const fw::ViewInput& in) override;
     void OnKey(int key, int action) override;
@@ -93,6 +97,12 @@ private:
     float m_viewGain = 1.0f, m_viewGamma = 1.0f, m_zoom = 1.0f;
     glm::vec2 m_panPix{0.0f, 0.0f};
     std::vector<float> m_fieldScratch, m_maskScratch;
+    // TextRenderer's real constructor needs a current GL context (it builds
+    // a shader/VAO immediately), so unlike m_font (default-constructible,
+    // see fw::Font) it can't be a plain member -- constructed lazily in
+    // EnsureRenderResources(), same reason/pattern as MDSim.hpp's m_text.
+    fw::Font m_font;
+    std::unique_ptr<fw::TextRenderer> m_text;
 };
 
 } // namespace cf

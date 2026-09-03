@@ -132,7 +132,11 @@ chosen field from `Euler2D::PrimAt` into a small GPU buffer every frame
 just re-bind) and draws it with a `magma`-colormapped fullscreen-quad
 shader, the same technique `05_tdse_gpu`'s live view uses. Obstacle cells
 are overlaid as a flat color so the cylinder itself is always visible
-regardless of which field is selected.
+regardless of which field is selected. A small text label in the top-left
+corner (via `fw::Font`/`fw::TextRenderer`, the same text-rendering pieces
+`04_molecular_dynamics`'s `MDSim` uses for its own on-screen readout) always
+names the field currently on screen, so the mode is visible without
+already knowing the `M` keybinding.
 
 Keys:
 

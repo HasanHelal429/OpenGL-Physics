@@ -406,6 +406,8 @@ void CompressibleSimScene::EnsureRenderResources() {
     glNamedBufferData(m_maskBuf, static_cast<GLsizeiptr>(numCells * sizeof(float)), nullptr, GL_DYNAMIC_DRAW);
     m_fieldScratch.assign(numCells, 0.0f);
     m_maskScratch.assign(numCells, 0.0f);
+    m_text = std::make_unique<fw::TextRenderer>();
+    m_font = fw::Font::FromFile("C:\\Windows\\Fonts\\consola.ttf", 16.0f);
     m_renderReady = true;
 }
 
@@ -488,6 +490,16 @@ void CompressibleSimScene::Render(int fbWidth, int fbHeight) {
     glBindVertexArray(m_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     glBindVertexArray(0);
+
+    // Name the field on screen -- otherwise there's no way to tell what's
+    // currently displayed (or that 'M' switches it) without already
+    // knowing the keybinding from the README.
+    static const char* kModeNames[4] = {"density", "speed", "vorticity", "tracer"};
+    char line[64];
+    std::snprintf(line, sizeof(line), "field: %s  ('M' to cycle)", kModeNames[m_renderMode]);
+    m_text->SetViewport(fbWidth, fbHeight);
+    m_text->Draw(m_font, line, glm::vec2(12.0f, 24.0f), glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
+
     glEnable(GL_DEPTH_TEST);
 }
 
