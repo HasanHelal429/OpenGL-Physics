@@ -80,7 +80,18 @@ that means and how the schema is structured.
     --deck projects/08_compressible_fluid/decks/riemann2d_config3.toml \
     --out projects/08_compressible_fluid/out/riemann2d_config3
 python projects/08_compressible_fluid/tools/plot_riemann2d.py projects/08_compressible_fluid/out/riemann2d_config3
+python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/riemann2d_config3 --field density
 ```
+
+This is the deck to watch if you want to see a shock actually *form*: the
+sharp initial quadrant boundaries curve and steepen into two genuine shock
+fronts, meeting a mixing/vortical region at the center (see `--field
+density` below for why density, not the default vorticity, is the field to
+render for this one). It's also the one `--scene` deck small and fast
+enough to watch live: `--interactive --scene --deck
+projects/08_compressible_fluid/decks/riemann2d_config3.toml` (density is
+already the default field in the interactive view, no `--field` flag
+needed there).
 
 `decks/poiseuille_channel.toml` — plane Poiseuille flow; see "Viscosity" below:
 
@@ -121,10 +132,13 @@ attack; see "Wind tunnel: airfoil at angle of attack" below:
 python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/airfoil_wind_tunnel
 ```
 
-`tools/make_movie.py` works for any `--scene` run, rendering the vorticity
-field frame-by-frame (drawing every deck obstacle -- a circle as a solid
-disk, an airfoil as its rotated NACA00xx outline) — the vortex street is
-far more legible as a movie than any single static frame.
+`tools/make_movie.py` works for any `--scene` run, rendering vorticity by
+default (`--field density` instead for a shock-dominated run, e.g. the
+Riemann deck above, where vorticity is dominated by any mixing region and
+a shock only shows as a faint thin line) frame-by-frame, drawing every deck
+obstacle -- a circle as a solid disk, an airfoil as its rotated NACA00xx
+outline — the flow is far more legible as a movie than any single static
+frame.
 
 ## Interactive mode
 
@@ -528,4 +542,4 @@ for the dispatch design (one compute pass per fractional step over the
 | `tools/plot_poiseuille.py` | Final velocity profile vs. the analytic parabolic solution, plus the spin-up-to-steady-state curve. |
 | `tools/plot_taylor_green.py` | Measured kinetic-energy decay rate vs. the analytic `4*nu*k²`; exposes `measure_decay_rate()` for `Studies/compressible_fluid`. |
 | `tools/plot_strouhal.py` | FFTs the downstream velocity probe, measures the shedding Strouhal number vs. Roshko's correlation. |
-| `tools/make_movie.py` | Vorticity-field movie for any 2D run (obstacle drawn as a disk when present; adds a tracer panel when a run wrote one). |
+| `tools/make_movie.py` | Vorticity- or density-field (`--field`) movie for any 2D run (obstacle drawn as a disk or rotated NACA00xx outline when present; adds a tracer panel when a run wrote one). |
