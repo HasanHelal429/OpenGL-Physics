@@ -1,6 +1,10 @@
 #pragma once
 
+#include "framework/ComputeShader.hpp"
 #include "framework/Simulation.hpp"
+
+#include <glad/glad.h>
+#include <glm/glm.hpp>
 
 #include <cstddef>
 #include <string>
@@ -40,11 +44,20 @@ struct Source {
 // eps0 = mu0 = 1. Stability (square cells): courant = c dt / dx <= 1/sqrt(2).
 class Fdtd2D : public fw::Simulation {
 public:
+    ~Fdtd2D() override;
+
     void Configure(const fw::Deck& deck) override;
     void Reset() override;
     void Step(int substeps) override;
     void Snapshot(fw::OutputWriter& writer) override;
     fw::SimInfo Info() const override;
+
+    // Force the compute backend on (needs a current GL context); default is
+    // read from the deck's solver.backend, else CPU.
+    void ForceBackend(bool gpu) { m_useGpu = gpu; }
+    bool UsesGpu() const { return m_useGpu; }
+    // Pull the GPU field state back into the CPU arrays (Ez()/TotalEnergy()).
+    void SyncFromGpu();
 
     // Accessors for --selftest.
     int Nx() const { return m_nx; }
@@ -70,6 +83,10 @@ private:
     void ApplyMur();
     void InjectSources();
 
+    void InitGpu();
+    void StepGpu(int substeps);
+    void UploadToGpu();
+
     int m_nx = 200, m_ny = 200;
     double m_dx = 1.0, m_dy = 1.0;
     double m_courant = 0.5;
@@ -92,6 +109,16 @@ private:
 
     double m_time = 0.0;
     long m_step = 0;
+
+    // --- GPU compute backend -------------------------------------------
+    bool m_useGpu = false;
+    bool m_gpuInit = false;
+    bool m_cpuStale = false;        // GPU has advanced past the CPU arrays
+    fw::ComputeShader m_kH, m_kE, m_kCopyPrev, m_kInject, m_kMur;
+    GLuint m_bEz = 0, m_bHx = 0, m_bHy = 0, m_bCa = 0, m_bCb = 0,
+           m_bEzPrev = 0, m_bSrc = 0;
+    std::vector<float> m_scratch;   // f32 staging for up/download
+    std::vector<glm::vec2> m_srcStage;
 };
 
 } // namespace fdtd

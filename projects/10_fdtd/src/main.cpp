@@ -21,6 +21,8 @@ struct Args {
     int substeps = 0;
     bool interactive = false;
     bool selftest = false;
+    bool gpuSelftest = false;
+    bool gpu = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -34,6 +36,8 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
+        else if (s == "--gpu-selftest") a.gpuSelftest = true;
+        else if (s == "--gpu") a.gpu = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -139,18 +143,60 @@ bool SelfTest() {
     return ok;
 }
 
+// GPU compute backend vs the CPU reference: step both with the same deck and
+// compare Ez. float32 GPU against float64 CPU, so a small drift accumulates.
+bool GpuSelfTest() {
+    fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+    bool ok = true;
+
+    for (const char* boundary : {"pec", "mur"}) {
+        const int n = 220;
+        std::string deckStr = MakeDeck(n, 0.6, boundary, "gaussian", 0.06, 1);
+        deckStr += "[[source]]\nkind=\"gaussian\"\nx=70.0\ny=140.0\nf0=0.09\n";
+
+        fdtd::Fdtd2D cpu, gpu;
+        fw::Deck d1 = fw::Deck::FromString(deckStr);
+        fw::Deck d2 = fw::Deck::FromString(deckStr);
+        cpu.Configure(d1);
+        gpu.Configure(d2);
+        gpu.ForceBackend(true);
+
+        const int steps = 1200;
+        cpu.Step(steps);
+        gpu.Step(steps);
+        gpu.SyncFromGpu();
+
+        const auto& a = cpu.Ez();
+        const auto& b = gpu.Ez();
+        double maxAbs = 0.0, maxDiff = 0.0;
+        for (std::size_t k = 0; k < a.size(); ++k) {
+            maxAbs = std::max(maxAbs, std::abs(a[k]));
+            maxDiff = std::max(maxDiff, std::abs(a[k] - b[k]));
+        }
+        const double rel = maxDiff / maxAbs;
+        std::printf("  %-4s  %d steps:  max|Ez_cpu|=%.4e  max|cpu-gpu|=%.2e  "
+                    "rel %.2e\n", boundary, steps, maxAbs, maxDiff, rel);
+        if (rel > 2e-4) ok = false;
+    }
+
+    std::printf("gpu-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
 
     if (a.selftest) return SelfTest() ? 0 : 1;
+    if (a.gpuSelftest) return GpuSelfTest() ? 0 : 1;
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
-                     "  10_fdtd --deck <f.toml> --out <dir> [--steps N]\n"
-                     "  10_fdtd --selftest\n");
+                     "  10_fdtd --deck <f.toml> --out <dir> [--steps N] [--gpu]\n"
+                     "  10_fdtd --selftest       (CFL / energy / wave speed)\n"
+                     "  10_fdtd --gpu-selftest   (GPU compute vs CPU reference)\n");
         return 2;
     }
 
@@ -168,6 +214,7 @@ int main(int argc, char** argv) {
     fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
     fdtd::Fdtd2D sim;
     sim.Configure(deck);
+    if (a.gpu) sim.ForceBackend(true);
 
     // The deck gives total FDTD steps; RunHeadless wants a frame count and a
     // per-frame substep count (frame f writes state, then advances substeps).
