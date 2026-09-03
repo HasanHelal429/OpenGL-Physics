@@ -54,7 +54,9 @@ public:
     // lives on the CPU (see its m_u comment), not in a GPU buffer the way
     // e.g. 05_tdse_gpu's solver does, so Render() re-packs the chosen field
     // from Euler2D::PrimAt into a small SSBO every frame rather than
-    // keeping a persistent GPU-resident copy in sync with the solver.
+    // keeping a persistent GPU-resident copy in sync with the solver. If
+    // the deck has an airfoil obstacle, Up/Down also adjust its angle of
+    // attack live (see OnKey), with the current angle shown in the label.
     void Render(int fbWidth, int fbHeight) override;
     void OnViewInput(const fw::ViewInput& in) override;
     void OnKey(int key, int action) override;
@@ -67,11 +69,36 @@ private:
         int i = 0, j = 0;
     };
 
+    // One obstacle's geometry, kept around (not just baked into the mask
+    // lambda and discarded) so an airfoil's angle of attack can be adjusted
+    // live in interactive mode -- see OnKey's Up/Down handling and
+    // RebuildObstacleMask(). A circle's radius and an airfoil's
+    // chord/thickness/angle are mutually exclusive, but a tagged union
+    // would be overkill for a struct this small with only ever 1-2
+    // instances alive.
+    struct ObstacleSpec {
+        bool isAirfoil = false;
+        double cx = 0.0, cy = 0.0;
+        double radius = 0.0;                                    // circle
+        double chord = 0.0, thicknessFrac = 0.0, angleRad = 0.0; // airfoil (NACA00xx, symmetric)
+    };
+
     // Lazily creates the shader/VAO/SSBOs Render() needs, sized to the
     // solver's (fixed, post-Configure) grid -- done on first Render() call
     // rather than in Configure() so a headless deck run (which never calls
     // Render()) never allocates any of this.
     void EnsureRenderResources();
+    // (Re)builds Euler2D's obstacle mask from the current m_obstacles --
+    // called once from Configure() and again every time OnKey adjusts an
+    // airfoil's angleRad. Cheap: SetObstacleMask evaluates the returned
+    // predicate once per cell (see Euler2D::SetObstacleMask), and this
+    // project's decks have at most a handful of obstacles.
+    void RebuildObstacleMask();
+    // Symmetric NACA00xx thickness distribution, evaluated in the airfoil's
+    // own body frame and rotated by `o.angleRad` -- see the .cpp definition
+    // for the formula and derivation. A static member (not a free function)
+    // only because ObstacleSpec is private; it doesn't touch `this`.
+    static bool IsInsideAirfoil(double x, double y, const ObstacleSpec& o);
 
     Euler2D m_solver;
     // Captures the initial-condition type + any perturbation, fully baked
@@ -81,6 +108,14 @@ private:
     // e.g. MDSim.hpp's comment on Reset() not re-parsing the deck).
     std::function<Prim2D(double x, double y)> m_icFn;
     std::vector<Probe> m_probes;
+    // The deck's obstacle list, kept live (not just captured into the mask
+    // lambda) so interactive mode can rewrite an airfoil's angleRad and
+    // rebuild the mask without re-parsing the deck. Reset() deliberately
+    // does NOT restore this to the deck's original angle -- see OnKey's
+    // comment for why angle of attack behaves like a live control knob,
+    // not part of the "initial condition" Reset() restores.
+    std::vector<ObstacleSpec> m_obstacles;
+    bool m_hasAirfoil = false;
     bool m_writeTracer = false;
     double m_cfl = 0.4;
     int m_substepsPerFrame = 20;

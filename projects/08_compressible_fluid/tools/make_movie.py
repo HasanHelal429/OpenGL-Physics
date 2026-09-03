@@ -3,13 +3,15 @@ Turn a headless 08_compressible_fluid run into a movie. Always renders the
 vorticity field (dv/dx - du/dy, central differences on the u/v frames),
 the field that makes shedding/wake structure visible at a glance in a way
 raw velocity or density don't; if the run also wrote a passive scalar
-tracer field (Prim2D::tracer -- currently only decks/cylinder_re100.toml's
-inflow dye stripes do), a second panel renders that too, showing how the
+tracer field (Prim2D::tracer -- e.g. decks/cylinder_re100.toml and
+decks/airfoil_wind_tunnel.toml's inflow dye stripes), a second panel
+renders that too, showing how the
 shed vortices actually mix and roll up fluid from different streamlines --
 vorticity shows where the rotation is, the tracer shows what it's doing to
 the fluid. Works for any --scene 2D run; every obstacle in the deck's
-[[obstacles]] list is drawn as a solid disk so it doesn't show up as a raw
-zero-velocity artifact.
+[[obstacles]] list is drawn (a circle as a solid disk, an airfoil as its
+NACA00xx outline rotated by its angle of attack) so it doesn't show up as a
+raw zero-velocity artifact.
 
     python make_movie.py <results_dir> [--fps 30] [--stride 1] [--vmax V] [--out movie.mp4]
 
@@ -32,7 +34,7 @@ try:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import Circle
+    from matplotlib.patches import Circle, Polygon
 except ImportError:
     sys.exit("make_movie: needs numpy + matplotlib")
 
@@ -40,6 +42,29 @@ try:
     import tomllib
 except ImportError:
     tomllib = None
+
+
+def naca00xx_outline(center, chord, thickness, angle_deg, n=40):
+    """World-space (x,y) outline of a symmetric NACA00xx section -- same
+    formula and rotation convention as CompressibleSimScene.cpp's
+    IsInsideAirfoil (`center` is the leading edge, angle_deg positive
+    nose-up), just tracing the boundary instead of testing points against
+    it."""
+    xs = np.linspace(0.0, chord, n)
+    xoc = xs / chord
+    yt = 5.0 * thickness * chord * (
+        0.2969 * np.sqrt(xoc) - 0.1260 * xoc - 0.3516 * xoc**2 + 0.2843 * xoc**3 - 0.1015 * xoc**4
+    )
+    upper = np.stack([xs, yt], axis=1)
+    lower = np.stack([xs[::-1], -yt[::-1]], axis=1)
+    body = np.concatenate([upper, lower], axis=0)
+    theta = np.radians(angle_deg)
+    ca, sa = np.cos(theta), np.sin(theta)
+    # Body -> world is the inverse of the C++ mask's world -> body rotation
+    # (there, world-frame (dx,dy) is rotated by -angle_deg into body frame).
+    world_x = body[:, 0] * ca - body[:, 1] * sa + center[0]
+    world_y = body[:, 0] * sa + body[:, 1] * ca + center[1]
+    return np.stack([world_x, world_y], axis=1)
 
 
 def main():
@@ -72,10 +97,17 @@ def main():
         with open(deck_path, "rb") as f:
             deck = tomllib.load(f)
         for obs in deck.get("obstacles", []):
-            if obs.get("shape", "circle") != "circle":
-                continue
+            shape = obs.get("shape", "circle")
             center = obs.get("center", [0.0, 0.0])
-            obstacles.append({"x": center[0], "y": center[1], "r": obs.get("radius", 0.0)})
+            if shape == "circle":
+                obstacles.append({"shape": "circle", "x": center[0], "y": center[1],
+                                   "r": obs.get("radius", 0.0)})
+            elif shape == "airfoil":
+                obstacles.append({"shape": "airfoil", "center": center, "chord": obs.get("chord", 1.0),
+                                   "thickness": obs.get("thickness", 0.12),
+                                   "angle_deg": obs.get("angle_deg", 0.0)})
+            else:
+                print(f"make_movie: unsupported obstacle shape '{shape}', not drawing it", file=sys.stderr)
 
     def vorticity(u, v):
         dvdx = np.gradient(v, dx, axis=1)
@@ -114,7 +146,11 @@ def main():
 
     for a in axes:
         for obs in obstacles:
-            a.add_patch(Circle((obs["x"], obs["y"]), obs["r"], facecolor="0.3", edgecolor="k", zorder=5))
+            if obs["shape"] == "circle":
+                a.add_patch(Circle((obs["x"], obs["y"]), obs["r"], facecolor="0.3", edgecolor="k", zorder=5))
+            else:
+                pts = naca00xx_outline(obs["center"], obs["chord"], obs["thickness"], obs["angle_deg"])
+                a.add_patch(Polygon(pts, closed=True, facecolor="0.3", edgecolor="k", zorder=5))
     txt = ax_vort.text(0.01, 0.98, "", transform=ax_vort.transAxes, color="k", va="top",
                         fontsize=9, family="monospace",
                         bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2))

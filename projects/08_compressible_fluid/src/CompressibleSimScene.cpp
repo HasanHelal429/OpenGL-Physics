@@ -4,8 +4,9 @@
 #include "framework/Deck.hpp"
 #include "framework/OutputWriter.hpp"
 
+#include <GLFW/glfw3.h>
+
 #include <algorithm>
-#include <array>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -230,6 +231,46 @@ CompressibleSimScene::~CompressibleSimScene() {
     if (m_vao) glDeleteVertexArrays(1, &m_vao);
 }
 
+// Symmetric NACA00xx thickness distribution (Abbott & von Doenhoff's
+// standard open-trailing-edge coefficients), evaluated in the airfoil's own
+// body frame (leading edge at the origin, chord along +x) and rotated by
+// `angleRad` -- the angle of attack, positive nose-up -- to place it in
+// world coordinates. This slots into Euler2D::SetObstacleMask exactly the
+// way a circle's `dx*dx+dy*dy<=r*r` test does (see Euler2D.hpp's comment):
+// just another pointwise inside/outside predicate, so the immersed-boundary
+// cell-masking machinery needs no changes at all to support a new shape.
+bool CompressibleSimScene::IsInsideAirfoil(double x, double y, const ObstacleSpec& o) {
+    const double dx = x - o.cx, dy = y - o.cy;
+    const double ca = std::cos(o.angleRad), sa = std::sin(o.angleRad);
+    // Rotate world-frame (dx,dy) by -angleRad into the body frame.
+    const double xBody = dx * ca + dy * sa;
+    const double yBody = -dx * sa + dy * ca;
+    if (xBody < 0.0 || xBody > o.chord) return false;
+    const double xoc = xBody / o.chord;
+    const double halfThickness =
+        5.0 * o.thicknessFrac * o.chord *
+        (0.2969 * std::sqrt(xoc) - 0.1260 * xoc - 0.3516 * xoc * xoc + 0.2843 * xoc * xoc * xoc -
+         0.1015 * xoc * xoc * xoc * xoc);
+    return std::abs(yBody) <= halfThickness;
+}
+
+void CompressibleSimScene::RebuildObstacleMask() {
+    if (m_obstacles.empty()) return;
+    const std::vector<ObstacleSpec> obstacles = m_obstacles; // captured by value: cheap, and stays
+                                                               // valid after this function returns
+    m_solver.SetObstacleMask([obstacles](double x, double y) {
+        for (const ObstacleSpec& o : obstacles) {
+            if (o.isAirfoil) {
+                if (IsInsideAirfoil(x, y, o)) return true;
+            } else {
+                const double dx = x - o.cx, dy = y - o.cy;
+                if (dx * dx + dy * dy <= o.radius * o.radius) return true;
+            }
+        }
+        return false;
+    });
+}
+
 void CompressibleSimScene::Configure(const fw::Deck& deck) {
     m_title = deck.GetString("title", m_title);
 
@@ -280,26 +321,32 @@ void CompressibleSimScene::Configure(const fw::Deck& deck) {
         break;
     }
 
-    std::vector<std::array<double, 3>> obstacleCircles; // {cx, cy, radius}
+    m_obstacles.clear();
+    m_hasAirfoil = false;
     for (const fw::Deck& obs : deck.GetTables("obstacles")) {
         const std::string shape = obs.GetString("shape", "circle");
-        if (shape != "circle") {
+        const std::vector<double> center = obs.GetDoubleArray("center");
+        ObstacleSpec spec;
+        spec.cx = center.size() > 0 ? center[0] : 0.0;
+        spec.cy = center.size() > 1 ? center[1] : 0.0;
+        if (shape == "circle") {
+            spec.radius = obs.GetDouble("radius", 0.0);
+        } else if (shape == "airfoil") {
+            // Symmetric NACA00xx profile (see RebuildObstacleMask's
+            // thickness formula) -- `center` is the leading edge, so the
+            // body occupies x in [cx, cx+chord] before rotation.
+            spec.isAirfoil = true;
+            spec.chord = obs.GetDouble("chord", 1.0);
+            spec.thicknessFrac = obs.GetDouble("thickness", 0.12);
+            spec.angleRad = obs.GetDouble("angle_deg", 0.0) * kPi / 180.0;
+            m_hasAirfoil = true;
+        } else {
             std::fprintf(stderr, "warning: unsupported obstacle shape '%s', ignoring\n", shape.c_str());
             continue;
         }
-        const std::vector<double> center = obs.GetDoubleArray("center");
-        const double radius = obs.GetDouble("radius", 0.0);
-        obstacleCircles.push_back({center.size() > 0 ? center[0] : 0.0, center.size() > 1 ? center[1] : 0.0, radius});
+        m_obstacles.push_back(spec);
     }
-    if (!obstacleCircles.empty()) {
-        m_solver.SetObstacleMask([obstacleCircles](double x, double y) {
-            for (const std::array<double, 3>& c : obstacleCircles) {
-                const double dx = x - c[0], dy = y - c[1];
-                if (dx * dx + dy * dy <= c[2] * c[2]) return true;
-            }
-            return false;
-        });
-    }
+    RebuildObstacleMask();
 
     m_icFn = BuildInitialCondition(deck);
     Reset();
@@ -495,10 +542,21 @@ void CompressibleSimScene::Render(int fbWidth, int fbHeight) {
     // currently displayed (or that 'M' switches it) without already
     // knowing the keybinding from the README.
     static const char* kModeNames[4] = {"density", "speed", "vorticity", "tracer"};
-    char line[64];
+    char line[96];
     std::snprintf(line, sizeof(line), "field: %s  ('M' to cycle)", kModeNames[m_renderMode]);
     m_text->SetViewport(fbWidth, fbHeight);
     m_text->Draw(m_font, line, glm::vec2(12.0f, 24.0f), glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
+    if (m_hasAirfoil) {
+        // Same rationale as the field label: the angle is a live control
+        // (Up/Down, see OnKey), so its current value needs to be visible
+        // without the user having tracked every keypress themselves.
+        double angleDeg = 0.0;
+        for (const ObstacleSpec& o : m_obstacles) {
+            if (o.isAirfoil) { angleDeg = o.angleRad * 180.0 / kPi; break; }
+        }
+        std::snprintf(line, sizeof(line), "angle of attack: %.1f deg  (Up/Down)", angleDeg);
+        m_text->Draw(m_font, line, glm::vec2(12.0f, 44.0f), glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
+    }
 
     glEnable(GL_DEPTH_TEST);
 }
@@ -528,6 +586,24 @@ void CompressibleSimScene::OnKey(int key, int action) {
         m_viewGain = 1.0f;
         m_viewGamma = 1.0f;
         break;
+    // Angle of attack is treated as a live control knob, not part of the
+    // "initial condition" -- unlike m_icFn, Reset() deliberately leaves
+    // m_obstacles (and therefore the current angle) untouched, so sweeping
+    // the angle and then resetting the flow (e.g. after a spurious
+    // transient) doesn't also snap the airfoil back to the deck's angle.
+    // No-op if the deck has no airfoil obstacle (nothing to rotate).
+    case GLFW_KEY_UP:
+    case GLFW_KEY_DOWN: {
+        if (!m_hasAirfoil) break;
+        const double stepRad = (key == GLFW_KEY_UP ? 1.0 : -1.0) * kPi / 180.0;
+        for (ObstacleSpec& o : m_obstacles) {
+            if (!o.isAirfoil) continue;
+            const double newDeg = std::clamp((o.angleRad + stepRad) * 180.0 / kPi, -45.0, 45.0);
+            o.angleRad = newDeg * kPi / 180.0;
+        }
+        RebuildObstacleMask();
+        break;
+    }
     default:
         break;
     }

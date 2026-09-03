@@ -111,9 +111,20 @@ python projects/08_compressible_fluid/tools/plot_strouhal.py projects/08_compres
 python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/cylinder_re100
 ```
 
+`decks/airfoil_wind_tunnel.toml` — a NACA0012 airfoil at a fixed angle of
+attack; see "Wind tunnel: airfoil at angle of attack" below:
+
+```sh
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --scene \
+    --deck projects/08_compressible_fluid/decks/airfoil_wind_tunnel.toml \
+    --out projects/08_compressible_fluid/out/airfoil_wind_tunnel
+python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/airfoil_wind_tunnel
+```
+
 `tools/make_movie.py` works for any `--scene` run, rendering the vorticity
-field frame-by-frame (drawing every deck obstacle as a solid disk) — the
-vortex street is far more legible as a movie than any single static frame.
+field frame-by-frame (drawing every deck obstacle -- a circle as a solid
+disk, an airfoil as its rotated NACA00xx outline) — the vortex street is
+far more legible as a movie than any single static frame.
 
 ## Interactive mode
 
@@ -146,7 +157,10 @@ Keys:
 | `[` / `]` | Decrease / increase colormap gain |
 | `-` / `=` | Decrease / increase the gamma curve (lower lifts faint detail) |
 | `0` | Reset zoom, pan, gain, and gamma |
+| `Up` / `Down` | If the deck has an airfoil obstacle: increase / decrease its angle of attack live |
 | drag / scroll | Pan / zoom the view |
+
+`Up`/`Down` rewrite `Euler2D`'s obstacle mask on the fly (`CompressibleSimScene::RebuildObstacleMask`) without touching the flow field or resetting anything, so you can sweep the angle mid-run and watch the wake respond — a cell that becomes solid gets its velocity zeroed from the next step on (`Euler2D::ApplyObstacleMask`, unchanged), and a cell that becomes fluid again just continues from rest. `R` (reset) restores the flow to its initial condition but deliberately leaves the angle wherever you left it — angle of attack is a live control knob, not part of the deck's "initial condition."
 
 Bare `--interactive` (no `--scene`) opens the 1D shock tube instead
 (`CompressibleSim`), which still has full play/pause/step/record controls
@@ -199,9 +213,14 @@ with no new C++ needed:
   (continuous alternating dye bands at an inlet, `decks/cylinder_re100.toml`).
   A new pattern is a new named case in `CompressibleSimScene.cpp`, same as
   `WallBC` itself already being a fixed enum of named cases.
-- **`[[obstacles]]`** — an array of `{shape="circle", center=[x,y], radius}`
-  tables (any number, combined by logical OR into one solid-cell mask).
-  Only `circle` is implemented; other shapes are a new named case away.
+- **`[[obstacles]]`** — an array of tables (any number, combined by logical
+  OR into one solid-cell mask), each either `{shape="circle", center=[x,y],
+  radius}` or `{shape="airfoil", center=[x,y], chord, thickness, angle_deg}`
+  (`center` is the leading edge; `thickness` is the NACA00xx thickness
+  fraction, e.g. `0.12` for NACA0012; `angle_deg` is the angle of attack,
+  positive nose-up, also adjustable live in `--interactive` -- see
+  "Interactive mode"). Another shape is a new named case away, same
+  philosophy as `WallBC` and the inflow profile above.
 - **`[initial_condition]`** — a `type` (`uniform`, `riemann_quadrants`, or
   `taylor_green_vortex`, each reading its own type-specific keys — see the
   four decks above for a worked example of each) plus an optional
@@ -398,6 +417,39 @@ first validated pass at a coarser resolution and shorter run predicts, and
 the measurement is otherwise clean (a single, sharp FFT peak, no secondary
 structure). A finer grid and/or a longer run to reach saturation is the
 natural follow-up to close this gap, not attempted here.
+
+## Wind tunnel: airfoil at angle of attack
+
+`decks/airfoil_wind_tunnel.toml` is the cylinder deck's obstacle swapped
+for a symmetric NACA0012 airfoil (`shape="airfoil"`, see "The generic scene
+schema" above) — same channel geometry style, same `mach=0.2`/`rho0`/`U_inf`
+convention, `Re=rho0*U_inf*chord/mu=100` scaled to the airfoil's own chord
+instead of a cylinder diameter. `IsInsideAirfoil` (`CompressibleSimScene.cpp`)
+evaluates the standard symmetric NACA00xx thickness distribution
+(`y_t(x) = 5*t*c*(0.2969*sqrt(x/c) - 0.1260*(x/c) - 0.3516*(x/c)^2 +
+0.2843*(x/c)^3 - 0.1015*(x/c)^4)`, Abbott & von Doenhoff's open-trailing-
+edge coefficients) in the airfoil's own body frame, rotated by the angle of
+attack — otherwise it's exactly the same cell-masking immersed-boundary
+technique the cylinder deck uses, with no changes needed to the Riemann
+solver, viscosity, or obstacle machinery at all: a NACA section is just
+another pointwise inside/outside test, like a circle's `dx²+dy²<=r²`.
+
+Unlike the cylinder, this deck needs no artificial symmetry-breaking
+perturbation — a nonzero angle of attack already makes the geometry
+top/bottom-asymmetric before the solver takes a single step, unlike a
+perfectly centered cylinder in a symmetric channel (see the gotcha above).
+At the deck's default 8° angle of attack, the vorticity field shows the
+expected lifting-airfoil signature: a negative-vorticity sheet along the
+suction (upper) side and a positive-vorticity sheet along the pressure
+(lower) side, visible in a `make_movie.py` render.
+
+The angle of attack is also the one obstacle parameter exposed live in
+`--interactive` (`Up`/`Down`, see "Interactive mode" above) — sweeping it
+mid-run and watching the wake respond is the whole point of a wind tunnel,
+and rewriting `Euler2D`'s cell mask on the fly needed no new machinery
+either: `CompressibleSimScene::RebuildObstacleMask()` is the same
+mask-construction logic `Configure()` already ran once at startup, just
+callable again whenever the angle changes.
 
 ## Tracing the flow: a passive scalar dye
 
