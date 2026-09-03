@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Cpml.hpp"
+
 #include "framework/ComputeShader.hpp"
 #include "framework/Simulation.hpp"
 
@@ -103,6 +105,13 @@ private:
     std::vector<double> m_ca, m_cb;    // E update coefficients (per cell)
     double m_muInv = 1.0;             // 1/mu, uniform in Phase 1
     double m_energy = 0.0;
+
+    // CPML: profiles per axis + the recursive-convolution auxiliary fields.
+    // Trivial (b=1, a=0, kappa=1) away from the PML layer, so the same update
+    // runs everywhere. Enabled by boundary.type = "cpml".
+    int m_pmlCells = 10;
+    CpmlAxis m_cpmlX, m_cpmlY;
+    std::vector<double> m_psiEzx, m_psiEzy, m_psiHxy, m_psiHyx;
 
     std::vector<Source> m_sources;
     std::vector<std::pair<int, int>> m_probes;

@@ -1,0 +1,30 @@
+title = "CW line source -- 2D Green's function check"
+
+# A continuous (ramped) sinusoidal Ez line source at the centre of a CPML box.
+# Once it reaches steady state the phasor field should match the 2D scalar
+# Green's function  G(r) = -(i/4) H0^(2)(k r),  k = 2 pi f0 / c  -- amplitude
+# falling as ~1/sqrt(r) for k r >> 1, with the right radial phase.
+[grid]
+nx = 320
+ny = 320
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 12
+
+[time]
+steps = 1120
+substeps_per_frame = 4
+
+[[source]]
+kind = "sine"
+x = 160.0
+y = 160.0
+f0 = 0.05          # wavelength = 20 cells
+amplitude = 1.0
+ramp_cycles = 3
+
+[probe]
+points = [160.0, 160.0, 200.0, 160.0, 260.0, 160.0]

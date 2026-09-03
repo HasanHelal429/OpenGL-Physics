@@ -29,9 +29,12 @@ EXE=./build/release/projects/10_fdtd/10_fdtd.exe
 
 $EXE --selftest        # CFL limit, PEC-box energy conservation, wave speed
 $EXE --gpu-selftest    # GPU compute backend vs the CPU reference
+$EXE --cpml-selftest   # CPML boundary reflection (short vs long domain)
 
 $EXE --deck projects/10_fdtd/decks/pulse_mur.toml --out out/pulse [--gpu]
 python projects/10_fdtd/tools/plot_probe.py out/pulse
+$EXE --deck projects/10_fdtd/decks/dipole.toml --out out/dipole
+python projects/10_fdtd/tools/plot_dipole.py out/dipole   # vs the 2D Green's function
 ```
 
 ## Status
@@ -44,7 +47,11 @@ python projects/10_fdtd/tools/plot_probe.py out/pulse
       inject / Mur). `--gpu-selftest` cross-check: Ez matches the CPU
       reference to rel 2e-5 over 1200 steps. `--gpu` opt-in; ~5.5x faster
       than CPU at 1024^2 headless (more in the readback-free interactive loop)
-- [ ] Phase 2 -- CPML + probes + dipole (2D Green's function)
+- [x] Phase 2 -- CPML (convolutional PML, Roden-Gedney; trivial coefficients
+      away from the layer so one update runs everywhere) + the 2D
+      Green's-function check. `--cpml-selftest`: -81 dB reflection with 12
+      cells. `plot_dipole.py`: CW point source vs `(i/4)H0^(1)(kr)` --
+      2% amplitude, 0.9997 complex (amplitude+phase) correlation
 - [ ] Phase 3 -- materials + Fresnel + TEz
 - [ ] Phase 4 -- PEC scatterers + radiation patterns
 - [ ] Phase 5 -- interactive view
@@ -56,3 +63,4 @@ python projects/10_fdtd/tools/plot_probe.py out/pulse
 |---|---|
 | `pulse_mur.toml` | Gaussian point source, first-order Mur boundary |
 | `pulse_box.toml` | same in a closed PEC box (energy-conservation check) |
+| `dipole.toml` | CW line source in a CPML box (2D Green's-function check) |

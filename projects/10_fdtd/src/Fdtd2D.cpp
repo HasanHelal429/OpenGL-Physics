@@ -66,6 +66,24 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
     m_cb.assign(n, m_dt);   // dt / eps, eps = 1
     m_muInv = 1.0;
 
+    // CPML: profiles (trivial unless boundary.type = "cpml") + auxiliary fields.
+    m_pmlCells = deck.GetInt("boundary.pml_cells", 10);
+    const int pml = (m_boundary == "cpml") ? m_pmlCells : 0;
+    const double gradeM = deck.GetDouble("boundary.pml_grade", 3.0);
+    const double kappaMax = deck.GetDouble("boundary.pml_kappa", 11.0);
+    const double alphaMax = deck.GetDouble("boundary.pml_alpha", 0.15);
+    const double r0 = deck.GetDouble("boundary.pml_r0", 1e-8);
+    m_cpmlX.Build(m_nx, m_dx, pml, m_dt, gradeM, kappaMax, alphaMax, r0);
+    m_cpmlY.Build(m_ny, m_dy, pml, m_dt, gradeM, kappaMax, alphaMax, r0);
+    m_psiEzx.assign(n, 0.0);
+    m_psiEzy.assign(n, 0.0);
+    m_psiHxy.assign(n, 0.0);
+    m_psiHyx.assign(n, 0.0);
+    if (m_boundary == "cpml" && m_useGpu) {
+        std::fprintf(stderr, "[fdtd] CPML not yet on the GPU path -- using CPU\n");
+        m_useGpu = false;
+    }
+
     m_sources.clear();
     for (const auto& s : deck.GetTables("source")) {
         Source src;
@@ -114,23 +132,35 @@ void Fdtd2D::Reset() {
     std::fill(m_ezPrev.begin(), m_ezPrev.end(), 0.0);
     std::fill(m_hxPrev.begin(), m_hxPrev.end(), 0.0);
     std::fill(m_hyPrev.begin(), m_hyPrev.end(), 0.0);
+    std::fill(m_psiEzx.begin(), m_psiEzx.end(), 0.0);
+    std::fill(m_psiEzy.begin(), m_psiEzy.end(), 0.0);
+    std::fill(m_psiHxy.begin(), m_psiHxy.end(), 0.0);
+    std::fill(m_psiHyx.begin(), m_psiHyx.end(), 0.0);
     m_energy = 0.0;
     m_time = 0.0;
     m_step = 0;
     if (m_gpuInit) UploadToGpu();
 }
 
+// CPML-form updates: away from the PML the profile coefficients are trivial
+// (b = 1, a = 0, kappa = 1), so psi stays zero and these reduce exactly to the
+// plain Yee update -- no interior branch.
 void Fdtd2D::UpdateH() {
-    const double cx = m_dt * m_muInv / m_dx;
-    const double cy = m_dt * m_muInv / m_dy;
+    const double cH = m_dt * m_muInv;
     for (int j = 0; j < m_ny - 1; ++j) {
         for (int i = 0; i < m_nx; ++i) {
-            m_hx[idx(i, j)] -= cy * (m_ez[idx(i, j + 1)] - m_ez[idx(i, j)]);
+            const std::size_t p = idx(i, j);
+            const double dEzdy = (m_ez[idx(i, j + 1)] - m_ez[p]) / m_dy;
+            m_psiHxy[p] = m_cpmlY.bH[j] * m_psiHxy[p] + m_cpmlY.aH[j] * dEzdy;
+            m_hx[p] -= cH * (dEzdy / m_cpmlY.kH[j] + m_psiHxy[p]);
         }
     }
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx - 1; ++i) {
-            m_hy[idx(i, j)] += cx * (m_ez[idx(i + 1, j)] - m_ez[idx(i, j)]);
+            const std::size_t p = idx(i, j);
+            const double dEzdx = (m_ez[idx(i + 1, j)] - m_ez[p]) / m_dx;
+            m_psiHyx[p] = m_cpmlX.bH[i] * m_psiHyx[p] + m_cpmlX.aH[i] * dEzdx;
+            m_hy[p] += cH * (dEzdx / m_cpmlX.kH[i] + m_psiHyx[p]);
         }
     }
 }
@@ -139,8 +169,12 @@ void Fdtd2D::UpdateE() {
     for (int j = 1; j < m_ny - 1; ++j) {
         for (int i = 1; i < m_nx - 1; ++i) {
             const std::size_t p = idx(i, j);
-            const double curl = (m_hy[p] - m_hy[idx(i - 1, j)]) / m_dx -
-                                (m_hx[p] - m_hx[idx(i, j - 1)]) / m_dy;
+            const double dHydx = (m_hy[p] - m_hy[idx(i - 1, j)]) / m_dx;
+            const double dHxdy = (m_hx[p] - m_hx[idx(i, j - 1)]) / m_dy;
+            m_psiEzx[p] = m_cpmlX.bE[i] * m_psiEzx[p] + m_cpmlX.aE[i] * dHydx;
+            m_psiEzy[p] = m_cpmlY.bE[j] * m_psiEzy[p] + m_cpmlY.aE[j] * dHxdy;
+            const double curl = dHydx / m_cpmlX.kE[i] - dHxdy / m_cpmlY.kE[j] +
+                                m_psiEzx[p] - m_psiEzy[p];
             m_ez[p] = m_ca[p] * m_ez[p] + m_cb[p] * curl;
         }
     }
