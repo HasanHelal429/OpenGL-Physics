@@ -6,42 +6,58 @@ See `Magnetostatics_Plan.md` for the full design and phase plan.
 
 The out-of-plane current problem is the same 5-point Poisson stencil as
 `Physics Simulations/Electromagnetism/Poisson_Solver/poisson.py`, but solved
-by **iterative relaxation** (red-black Gauss-Seidel now, GPU geometric
-multigrid in Phase 2) rather than a sparse direct solve -- an iterative
-smoother is what ports to the GPU.
+by **iterative relaxation** (RB-GS/SOR, or geometric multigrid) rather than a
+sparse direct solve -- an iterative smoother is what ports to the GPU.
 
 ```
 laplacian(A_z) = -mu0 * J_z          B = curl(A_z zhat) = (dA_z/dy, -dA_z/dx)
 ```
 
-with `A_z = 0` on the domain edge.
+Dirichlet (`A_z = 0` on a large box, right for compact sources) or Neumann
+(natural far boundary, right for a solenoid's uniform field).
 
 ## Build & run
 
 ```sh
 cmake --build --preset release --target 09_magnetostatics
+EXE=./build/release/projects/09_magnetostatics/09_magnetostatics.exe
 
-# manufactured-solution convergence check (no GL context needed)
-./build/release/projects/09_magnetostatics/09_magnetostatics.exe --selftest
+$EXE --selftest        # manufactured-solution convergence (2nd order)
+$EXE --mg-scaling      # multigrid W-cycle count vs grid size (flat)
 
-# a physical deck -> A_z, Bx, By, Jz as one .npy frame each
-./build/release/projects/09_magnetostatics/09_magnetostatics.exe \
-    --deck projects/09_magnetostatics/decks/wire.toml --out out/wire
+$EXE --deck projects/09_magnetostatics/decks/wire.toml --out out/wire
 python projects/09_magnetostatics/tools/plot_wire.py out/wire
+
+$EXE --interactive --deck projects/09_magnetostatics/decks/playground.toml
+$EXE --deck .../playground.toml --render-check out/view.png   # one offscreen frame
 ```
+
+Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
+**Tab** select wire, **arrows** move the active wire (re-solves live),
+**[** **]** gain, **-** **=** gamma, mouse drag/scroll pan/zoom, **0** reset.
 
 ## Status
 
-- [x] Phase 1 — 2D field solver (RBGS/SOR) + `--selftest` + `wire` / `solenoid`
-      validation
-- [ ] Phase 2 — GPU multigrid + interactive view
-- [ ] Phase 3 — 3D Biot-Savart coils
-- [ ] Phase 4 — Boris pusher
-- [ ] Phase 5 — docs + Studies + website media
+- [x] Phase 1 -- 2D field solver (RB-GS/SOR) + `--selftest` + `wire` / `solenoid`
+- [x] Phase 2 -- geometric multigrid (grid-independent W-cycle) + interactive
+      view (heatmap, field-lines, live wire editing) + `--render-check`
+- [ ] Phase 3 -- 3D Biot-Savart coils
+- [ ] Phase 4 -- Boris pusher
+- [ ] Phase 5 -- docs + Studies + website media
 
 ## Decks
 
 | deck | shows | check |
 |---|---|---|
-| `wire.toml` | single out-of-plane line current | `\|B\| = mu0 I / 2 pi r` on an interior annulus |
-| `solenoid.toml` | opposite current sheets (solenoid cross-section) | uniform `B_x = mu0 K_s` between, ~0 outside |
+| `wire.toml` | single out-of-plane line current | `\|B\| = mu0 I / 2 pi r` on an interior annulus (~0.3%) |
+| `solenoid.toml` | opposite current sheets (Neumann BC) | uniform `B_x = mu0 K_s` between (~2%), ~0 outside |
+| `playground.toml` | three wires, lighter grid | for `--interactive` |
+
+## Solver notes
+
+- **Multigrid** (`solver.method = "multigrid"`, default for Dirichlet): RB-GS
+  smoother, transpose-compatible bilinear transfers (`R = P^T / 4`),
+  rediscretised coarse operator, homogeneous reflective-ghost edge on every
+  level, W-cycle. 8-10 W-cycles to 1e-9 relative residual from 64^2 to 1024^2.
+- **RB-GS / SOR** (`solver.method = "rbgs"`): optimal-omega SOR, the Phase 1
+  reference and the Neumann-boundary path.

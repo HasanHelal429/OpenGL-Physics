@@ -6,11 +6,16 @@
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
 #include "framework/HeadlessRunner.hpp"
+#include "framework/SimApp.hpp"
+
+#include <glad/glad.h>
+#include <stb_image_write.h>   // implementation lives in framework/src/SimApp.cpp
 
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -26,6 +31,7 @@ struct Args {
     bool interactive = false;
     bool selftest = false;
     bool mgScaling = false;
+    std::string renderCheck;   // path for a one-frame offscreen PNG dump
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -40,6 +46,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--mg-scaling") a.mgScaling = true;
+        else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
     return a;
@@ -196,6 +203,8 @@ int main(int argc, char** argv) {
         std::fprintf(stderr,
                      "usage:\n"
                      "  09_magnetostatics --deck <f.toml> --out <dir> [--frames N]\n"
+                     "  09_magnetostatics --interactive --deck <f.toml>\n"
+                     "  09_magnetostatics --deck <f.toml> --render-check <out.png>\n"
                      "  09_magnetostatics --selftest      (field-solver convergence)\n"
                      "  09_magnetostatics --mg-scaling    (multigrid V-cycle scaling)\n");
         return 2;
@@ -204,8 +213,48 @@ int main(int argc, char** argv) {
     fw::Deck deck = fw::Deck::FromFile(a.deck);
 
     if (a.interactive) {
-        std::fprintf(stderr, "interactive view lands in Phase 2\n");
-        return 2;
+        mag::MagnetostaticsSim sim;
+        fw::SimApp app(sim, deck, deck.GetString("title", "2D Magnetostatics"));
+        app.Run();
+        return 0;
+    }
+
+    // Offscreen one-frame render to PNG -- the only way to eyeball the
+    // interactive view in a headless environment (see 08_compressible_fluid's
+    // FBO-to-PNG note). Bigger than GLContext::CreateHidden's 64x64 default.
+    if (!a.renderCheck.empty()) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        const int W = 1100, H = 850;
+        GLuint fbo = 0, color = 0, depth = 0;
+        glGenFramebuffers(1, &fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        glGenTextures(1, &color);
+        glBindTexture(GL_TEXTURE_2D, color);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
+        glGenRenderbuffers(1, &depth);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, W, H);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depth);
+        if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            std::fprintf(stderr, "render-check: incomplete FBO\n");
+            return 1;
+        }
+        glViewport(0, 0, W, H);
+        mag::MagnetostaticsSim sim;
+        sim.Configure(deck);
+        sim.Render(W, H);
+        sim.Render(W, H);   // second frame: field-lines/vbo now populated
+        glFinish();
+        std::vector<unsigned char> px(static_cast<size_t>(W) * H * 4);
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+        std::vector<unsigned char> flip(px.size());
+        for (int y = 0; y < H; ++y)
+            std::memcpy(&flip[(size_t)y * W * 4], &px[(size_t)(H - 1 - y) * W * 4], (size_t)W * 4);
+        stbi_write_png(a.renderCheck.c_str(), W, H, 4, flip.data(), W * 4);
+        std::printf("render-check -> %s\n", a.renderCheck.c_str());
+        return 0;
     }
 
     if (a.out.empty()) {

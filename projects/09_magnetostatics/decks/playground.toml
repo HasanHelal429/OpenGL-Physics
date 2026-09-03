@@ -1,0 +1,38 @@
+title = "Magnetostatics playground"
+
+# A lighter grid for the interactive view (--interactive): three wires, one
+# pair anti-parallel and a third parallel, so moving the active wire (arrows,
+# Tab to switch) visibly reshapes the field-line topology as it re-solves.
+[grid]
+nx = 256
+ny = 256
+lx = 6.0
+ly = 6.0
+
+[physics]
+mu0 = 1.0
+
+[solver]
+method = "multigrid"
+tol = 1e-8
+
+[time]
+frames = 1
+
+[[wire]]
+x = -1.2
+y = 0.0
+current = 1.0
+radius = 0.08
+
+[[wire]]
+x = 1.2
+y = 0.0
+current = -1.0
+radius = 0.08
+
+[[wire]]
+x = 0.0
+y = 1.6
+current = 0.6
+radius = 0.08
