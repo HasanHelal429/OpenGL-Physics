@@ -504,6 +504,54 @@ checks, Poiseuille (0.08%), Taylor-Green (1.56%), and the cylinder's
 Strouhal number all reproduce bit-for-bit identical results with
 parallelism on, confirming no data races were introduced.
 
+### 8.4 A GPU port of `Euler2D`, scoped exactly like section 3's
+
+`kernels_euler2d.hpp` does for `Euler2D` what section 3's
+`kernels_euler1d.hpp` did for `Euler1D`: the same algorithm (HLLC,
+MinMod, RK2/Heun), transliterated to GLSL, validated only by a GPU-vs-CPU
+cross-check (`main.cpp`'s `SelfTestGpu2D`) — not wired into any deck-driven
+run. It is deliberately scoped down the same way: the core inviscid method
+only, default (`Outflow`) boundaries via the same clamped-index trick
+section 3 uses (unchanged by moving to 2D — it's a per-line, per-boundary
+argument, and a 2D sweep is still just many independent 1D lines), no
+viscosity, no obstacle mask, no tracer field.
+
+The one real 2D-specific design choice is how much of Strang splitting to
+push onto the GPU per dispatch. Section 4's CPU implementation parallelizes
+*within* a sweep (one thread per row/column, via OpenMP in section 8.3) but
+still issues one `AdvanceLineRK2` call per line. The GPU port instead
+dispatches **one compute pass per fractional step for the whole grid at
+once** — every kernel takes a `uAxis` uniform (0=X, 1=Y) selecting the
+neighbor stride and interface layout, so a single GLSL definition of
+`ComputeSlopes`/`Fluxes`/`EulerStep` covers both sweep directions instead of
+duplicating each kernel per axis. This is exactly the same independence
+argument section 8.3 uses to justify OpenMP, just carried one step further:
+if every row is independent of every other row, there's no reason to even
+loop over rows on the host side — the whole X sweep is one dispatch over
+`nx*ny` cells (plus one over `(nx+1)*ny` interfaces for the flux pass), and
+the whole Y sweep is the axis-1 equivalent over `nx*(ny+1)` interfaces.
+
+Each of the three Strang sub-steps (X half, Y full, X half) runs as one
+RK2/Heun fractional step — `B = A - dtFrac*div(F(A))`, `C = B -
+dtFrac*div(F(B))`, result `= 0.5*(A+C)` — the identical arithmetic
+`AdvanceLineRK2` performs per line, just applied to the whole grid buffer at
+once; the sub-steps themselves still run in the CPU's exact
+X-half/Y-full/X-half sequence, ping-ponging between two Cons buffers instead
+of updating one grid in place.
+
+Cross-checked against `Euler2D::Step` on the isentropic-vortex scenario
+(`SelfTestVortexAdvection`'s exact IC, domain, and step count): **max
+relative error rho=1.1e-05, u=5.8e-06, v=4.7e-06, p=9.5e-06** — comfortably
+inside the `1e-3` float32-vs-double tolerance floor section 3's 1D check
+already established, despite running roughly 3x more flux evaluations per
+step (3 Strang sub-steps × 2 RK2 stages, vs. 1D's 2) over the ~250 steps
+needed to reach `t=2`. Passed on the first attempt after the code compiled,
+which — combined with section 7's identical experience porting the deck
+schema — says more about how well `Euler2D`'s existing formulas were
+already pinned down by the accumulated CPU test suite than about anything
+special in the port itself: there was very little room left for the GPU
+and CPU implementations to independently agree on a wrong answer.
+
 ---
 
 ## 9. What further extension would need

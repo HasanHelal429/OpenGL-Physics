@@ -3,6 +3,7 @@
 #include "Euler1D.hpp"
 #include "Euler2D.hpp"
 #include "kernels_euler1d.hpp"
+#include "kernels_euler2d.hpp"
 
 #include "framework/ComputeShader.hpp"
 #include "framework/Deck.hpp"
@@ -339,6 +340,195 @@ bool SelfTestVortexAdvection() {
     return ok;
 }
 
+// Cross-checks kernels_euler2d.hpp's GPU Strang-split RK2 sweep sequence
+// against Euler2D's (already independently-validated, see
+// SelfTestVortexAdvection above) CPU implementation on the same isentropic-
+// vortex IC -- same physics, two completely separate code paths, same role
+// as SelfTestGpu's 1D cross-check. Deliberately scoped down exactly like
+// that 1D port: core inviscid method only, default (Outflow) boundaries,
+// no viscosity/obstacle/tracer -- this doesn't need any of those to check
+// that the GPU port's HLLC/MinMod/RK2/Strang-splitting arithmetic agrees
+// with the CPU reference. Needs a current GL context (caller's
+// responsibility).
+bool SelfTestGpu2D() {
+    const VortexParams vp;
+    const int nx = 100, ny = 100;
+    const double length = 10.0;
+
+    cf::Euler2D cpu;
+    cpu.Init(nx, ny, 0.0, length, 0.0, length, vp.gamma);
+    cpu.SetInitialCondition([&](double x, double y) { return VortexState(x, y, 0.0, vp); });
+    const double dt = 0.4 / (cpu.MaxWaveSpeedX() / cpu.Dx() + cpu.MaxWaveSpeedY() / cpu.Dy());
+    const double tEnd = 2.0;
+    const int steps = static_cast<int>(std::ceil(tEnd / dt));
+
+    const int numCells = nx * ny;
+    std::vector<glm::vec4> initialCons(static_cast<size_t>(numCells));
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const cf::Prim2D p = cpu.PrimAt(i, j);
+            const cf::Cons2D c = cf::ToCons2D(p, vp.gamma);
+            initialCons[static_cast<size_t>(j * nx + i)] = glm::vec4(
+                static_cast<float>(c.rho), static_cast<float>(c.momX), static_cast<float>(c.momY),
+                static_cast<float>(c.energy));
+        }
+    }
+
+    const int fluxCountX = (nx + 1) * ny;
+    const int fluxCountY = nx * (ny + 1);
+    const int fluxCount = std::max(fluxCountX, fluxCountY);
+
+    GLuint cons[2] = {0, 0}, stage1 = 0, stage2 = 0, prim = 0, slope = 0, flux = 0;
+    glCreateBuffers(1, &cons[0]);
+    glCreateBuffers(1, &cons[1]);
+    glCreateBuffers(1, &stage1);
+    glCreateBuffers(1, &stage2);
+    glCreateBuffers(1, &prim);
+    glCreateBuffers(1, &slope);
+    glCreateBuffers(1, &flux);
+    glNamedBufferData(cons[0], numCells * sizeof(glm::vec4), initialCons.data(), GL_DYNAMIC_DRAW);
+    glNamedBufferData(cons[1], numCells * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(stage1, numCells * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(stage2, numCells * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(prim, numCells * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(slope, numCells * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+    glNamedBufferData(flux, fluxCount * sizeof(glm::vec4), nullptr, GL_DYNAMIC_DRAW);
+
+    fw::ComputeShader consToPrim = fw::ComputeShader::FromSource(cf::kernels2d::ConsToPrim());
+    fw::ComputeShader computeSlopes = fw::ComputeShader::FromSource(cf::kernels2d::ComputeSlopes());
+    fw::ComputeShader fluxes = fw::ComputeShader::FromSource(cf::kernels2d::Fluxes());
+    fw::ComputeShader eulerStep = fw::ComputeShader::FromSource(cf::kernels2d::EulerStep());
+    fw::ComputeShader combine = fw::ComputeShader::FromSource(cf::kernels2d::Combine());
+
+    const GLuint groupsCells =
+        static_cast<GLuint>((numCells + cf::kernels2d::kWorkgroupSize - 1) / cf::kernels2d::kWorkgroupSize);
+    const GLuint groupsFluxX =
+        static_cast<GLuint>((fluxCountX + cf::kernels2d::kWorkgroupSize - 1) / cf::kernels2d::kWorkgroupSize);
+    const GLuint groupsFluxY =
+        static_cast<GLuint>((fluxCountY + cf::kernels2d::kWorkgroupSize - 1) / cf::kernels2d::kWorkgroupSize);
+    const float gammaF = static_cast<float>(vp.gamma);
+
+    auto rhsPass = [&](GLuint consBuf, int axis) {
+        consToPrim.Use();
+        consToPrim.SetInt("uNx", nx);
+        consToPrim.SetInt("uNy", ny);
+        consToPrim.SetInt("uAxis", axis);
+        consToPrim.SetFloat("uGamma", gammaF);
+        fw::ComputeShader::BindBuffer(0, consBuf);
+        fw::ComputeShader::BindBuffer(4, prim);
+        consToPrim.Dispatch(groupsCells);
+        fw::ComputeShader::Barrier();
+
+        computeSlopes.Use();
+        computeSlopes.SetInt("uNx", nx);
+        computeSlopes.SetInt("uNy", ny);
+        computeSlopes.SetInt("uAxis", axis);
+        computeSlopes.SetFloat("uGamma", gammaF);
+        fw::ComputeShader::BindBuffer(4, prim);
+        fw::ComputeShader::BindBuffer(6, slope);
+        computeSlopes.Dispatch(groupsCells);
+        fw::ComputeShader::Barrier();
+
+        fluxes.Use();
+        fluxes.SetInt("uNx", nx);
+        fluxes.SetInt("uNy", ny);
+        fluxes.SetInt("uAxis", axis);
+        fluxes.SetFloat("uGamma", gammaF);
+        fw::ComputeShader::BindBuffer(4, prim);
+        fw::ComputeShader::BindBuffer(6, slope);
+        fw::ComputeShader::BindBuffer(5, flux);
+        fluxes.Dispatch(axis == 0 ? groupsFluxX : groupsFluxY);
+        fw::ComputeShader::Barrier();
+    };
+    auto eulerPass = [&](GLuint consIn, GLuint consOut, float dtOverD, int axis) {
+        eulerStep.Use();
+        eulerStep.SetInt("uNx", nx);
+        eulerStep.SetInt("uNy", ny);
+        eulerStep.SetInt("uAxis", axis);
+        eulerStep.SetFloat("uGamma", gammaF);
+        eulerStep.SetFloat("uDtOverD", dtOverD);
+        fw::ComputeShader::BindBuffer(0, consIn);
+        fw::ComputeShader::BindBuffer(5, flux);
+        fw::ComputeShader::BindBuffer(1, consOut);
+        eulerStep.Dispatch(groupsCells);
+        fw::ComputeShader::Barrier();
+    };
+    auto combinePass = [&](GLuint consA, GLuint consB, GLuint consOut) {
+        combine.Use();
+        combine.SetInt("uNx", nx);
+        combine.SetInt("uNy", ny);
+        combine.SetInt("uAxis", 0);
+        combine.SetFloat("uGamma", gammaF);
+        fw::ComputeShader::BindBuffer(0, consA);
+        fw::ComputeShader::BindBuffer(1, consB);
+        fw::ComputeShader::BindBuffer(2, consOut);
+        combine.Dispatch(groupsCells);
+        fw::ComputeShader::Barrier();
+    };
+    // One RK2/Heun fractional step over the whole grid at once, exactly
+    // Euler2D::AdvanceLineRK2's algorithm (see kernels_euler1d.hpp's
+    // SelfTestGpu for the same derivation in 1D): B = A - dtFrac*div(F(A)),
+    // C = B - dtFrac*div(F(B)), result = 0.5*(A + C).
+    auto fractionalStep = [&](GLuint consIn, GLuint consOut, double dtFrac, double d, int axis) {
+        const float dtOverD = static_cast<float>(dtFrac / d);
+        rhsPass(consIn, axis);
+        eulerPass(consIn, stage1, dtOverD, axis);
+        rhsPass(stage1, axis);
+        eulerPass(stage1, stage2, dtOverD, axis);
+        combinePass(consIn, stage2, consOut);
+    };
+
+    int cur = 0;
+    for (int s = 0; s < steps; ++s) {
+        // Strang splitting: X half / Y full / X half, same sequence as
+        // Euler2D::Step, ping-ponging between the two Cons buffers instead
+        // of updating in place (cons[cur] is fully read before cons[1-cur]
+        // is written at each sub-step, so this is safe).
+        fractionalStep(cons[cur], cons[1 - cur], 0.5 * dt, cpu.Dx(), 0);
+        cur = 1 - cur;
+        fractionalStep(cons[cur], cons[1 - cur], dt, cpu.Dy(), 1);
+        cur = 1 - cur;
+        fractionalStep(cons[cur], cons[1 - cur], 0.5 * dt, cpu.Dx(), 0);
+        cur = 1 - cur;
+        cpu.Step(dt);
+    }
+    const double tActual = steps * dt;
+
+    std::vector<glm::vec4> gpuCons(static_cast<size_t>(numCells));
+    glGetNamedBufferSubData(cons[cur], 0, numCells * sizeof(glm::vec4), gpuCons.data());
+    GLuint bufs[] = {cons[0], cons[1], stage1, stage2, prim, slope, flux};
+    glDeleteBuffers(7, bufs);
+
+    double rhoErr = 0.0, uErr = 0.0, vErr = 0.0, pErr = 0.0;
+    double rhoNorm = 1e-12, uNorm = 1e-12, vNorm = 1e-12, pNorm = 1e-12;
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const glm::vec4& g = gpuCons[static_cast<size_t>(j * nx + i)];
+            const cf::Cons2D gc{g.x, g.y, g.z, g.w, 0.0};
+            const cf::Prim2D gp = cf::ToPrim2D(gc, vp.gamma);
+            const cf::Prim2D cpuP = cpu.PrimAt(i, j);
+            rhoErr = std::max(rhoErr, std::abs(gp.rho - cpuP.rho));
+            uErr = std::max(uErr, std::abs(gp.u - cpuP.u));
+            vErr = std::max(vErr, std::abs(gp.v - cpuP.v));
+            pErr = std::max(pErr, std::abs(gp.p - cpuP.p));
+            rhoNorm = std::max(rhoNorm, std::abs(cpuP.rho));
+            uNorm = std::max(uNorm, std::abs(cpuP.u));
+            vNorm = std::max(vNorm, std::abs(cpuP.v));
+            pNorm = std::max(pNorm, std::abs(cpuP.p));
+        }
+    }
+    const double relRho = rhoErr / rhoNorm, relU = uErr / uNorm, relV = vErr / vNorm, relP = pErr / pNorm;
+    std::printf("selftest (gpu vs cpu, 2d): max relative error  rho=%.3e  u=%.3e  v=%.3e  p=%.3e (t=%.4f)\n", relRho,
+                relU, relV, relP, tActual);
+    // Same float32-vs-double precision floor as SelfTestGpu, over more
+    // flux evaluations per step (3 Strang sub-steps * 2 RK2 stages, vs
+    // 1D's 2) -- kept at the same tolerance since each sub-step is still
+    // just one 1D RK2 update, not an accumulation of extra error sources.
+    const bool ok = relRho < 1e-3 && relU < 1e-3 && relV < 1e-3 && relP < 1e-3;
+    std::printf("selftest (gpu vs cpu, 2d): %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -346,8 +536,8 @@ int main(int argc, char** argv) {
 
     if (a.selftest) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
-        const bool ok =
-            SelfTestHllcConsistency() && SelfTestConservation() && SelfTestGpu() && SelfTestVortexAdvection();
+        const bool ok = SelfTestHllcConsistency() && SelfTestConservation() && SelfTestGpu() &&
+                        SelfTestVortexAdvection() && SelfTestGpu2D();
         return ok ? 0 : 1;
     }
 

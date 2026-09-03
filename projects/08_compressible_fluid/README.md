@@ -115,16 +115,18 @@ python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressib
 field frame-by-frame (drawing every deck obstacle as a solid disk) — the
 vortex street is far more legible as a movie than any single static frame.
 
-`--selftest` (no deck needed) runs four fast, deck-independent checks:
+`--selftest` (no deck needed) runs five fast, deck-independent checks:
 HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
 conservation-identity check (mass and energy exactly conserved, momentum
 matching the analytic boundary-pressure-forcing prediction, both before
 either wave reaches the domain edge — see `main.cpp`'s comment for why
-these are exact identities, not approximate physics), a GPU-vs-CPU
+these are exact identities, not approximate physics), a 1D GPU-vs-CPU
 cross-check (the same Sod IC run 50 RK2 steps on both `Euler1D` and the
 `kernels_euler1d.hpp` compute-shader port, comparing recovered primitives —
-matches to ~1e-7 relative, the expected float32 precision floor), and the
-2D isentropic-vortex advection check described below.
+matches to ~1e-7 relative, the expected float32 precision floor), the 2D
+isentropic-vortex advection check described below, and a 2D GPU-vs-CPU
+cross-check (`kernels_euler2d.hpp` vs. `Euler2D` on that same vortex
+scenario — see "Performance" below).
 
 ## The generic scene schema
 
@@ -405,16 +407,29 @@ allocation, despite ~169 million calls in one run, turned out to cost only
 known-but-currently-inactive scaling risk in the explicit viscous-diffusion
 sub-stepping (`O(N²)` at fine-enough resolution/low-enough viscosity).
 
+`Euler2D`'s core inviscid method (HLLC/MinMod/RK2, Strang-split X/Y sweeps)
+also has a GPU port, `kernels_euler2d.hpp`, scoped exactly like `Euler1D`'s:
+core method only, no viscosity/obstacle/tracer, validated only via
+`--selftest`'s GPU-vs-CPU cross-check on the isentropic-vortex scenario, not
+wired into any deck-driven run. Matches the CPU reference to ~1e-5 relative
+— inside the ~1e-3 float32-vs-double tolerance floor with headroom to
+spare, despite Strang splitting running 3x more flux evaluations per step
+than the 1D case. See
+[`docs/SIMULATION.md`](docs/SIMULATION.md#84-a-gpu-port-of-euler2d-scoped-exactly-like-section-3s)
+for the dispatch design (one compute pass per fractional step over the
+*whole* grid, rather than one per row/column).
+
 ## File map
 
 | File | Role |
 |---|---|
 | `src/Euler1D.{hpp,cpp}` | 1D physics: conserved/primitive conversion, HLLC flux, MinMod reconstruction, RK2 step. Pure C++, no GL dependency — the reference `kernels_euler1d.hpp` is cross-checked against. |
 | `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
-| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`) with an optional position-dependent inflow profile, the obstacle cell-masking pass, and the passive scalar tracer field. CPU only. |
+| `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`) with an optional position-dependent inflow profile, the obstacle cell-masking pass, and the passive scalar tracer field. CPU only (OpenMP-parallelized, see "Performance"). |
+| `src/kernels_euler2d.hpp` | GLSL compute-shader port of `Euler2D`'s core inviscid method (same formulas, transliterated; axis-parameterized kernels covering both X and Y sweeps) — exercised only by `--selftest`, see "Performance". |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
 | `src/CompressibleSimScene.{hpp,cpp}` | The single, generic `fw::Simulation` for every 2D scenario (see "The generic scene schema" above) — grid/physics/boundary/obstacles/initial-condition/probes/tracer, all parsed from deck tables. |
-| `src/main.cpp` | CLI entry point (`--scene` selects `CompressibleSimScene`; bare `--deck` is the 1D `CompressibleSim`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
+| `src/main.cpp` | CLI entry point (`--scene` selects `CompressibleSimScene`; bare `--deck` is the 1D `CompressibleSim`) + `--selftest` (HLLC consistency, conservation identities, 1D GPU-vs-CPU cross-check, vortex advection, 2D GPU-vs-CPU cross-check). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |
