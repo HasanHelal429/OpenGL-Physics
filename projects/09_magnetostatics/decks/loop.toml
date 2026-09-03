@@ -1,0 +1,26 @@
+title = "Current loop (3D Biot-Savart, xz slice)"
+
+# A single circular current loop of radius 1 about the z axis, evaluated on
+# the xz plane (grid axis 0 -> world x, grid axis 1 -> world z). On the axis
+# (x = 0) the field is B_z = mu0 I R^2 / [2 (R^2 + z^2)^{3/2}].
+[grid]
+nx = 400
+ny = 400
+lx = 6.0
+ly = 6.0
+plane = "xz"
+plane_offset = 0.0
+
+[physics]
+mu0 = 1.0
+
+[time]
+frames = 1
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, 0.0]
+axis = [0.0, 0.0, 1.0]
+current = 1.0
+segments = 400

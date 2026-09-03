@@ -24,9 +24,12 @@ EXE=./build/release/projects/09_magnetostatics/09_magnetostatics.exe
 
 $EXE --selftest        # manufactured-solution convergence (2nd order)
 $EXE --mg-scaling      # multigrid W-cycle count vs grid size (flat)
+$EXE --biot-selftest   # GPU Biot-Savart vs analytic loop / Helmholtz
 
 $EXE --deck projects/09_magnetostatics/decks/wire.toml --out out/wire
 python projects/09_magnetostatics/tools/plot_wire.py out/wire
+$EXE --deck projects/09_magnetostatics/decks/helmholtz.toml --out out/hh
+python projects/09_magnetostatics/tools/plot_helmholtz.py out/hh
 
 $EXE --interactive --deck projects/09_magnetostatics/decks/playground.toml
 $EXE --deck .../playground.toml --render-check out/view.png   # one offscreen frame
@@ -41,7 +44,8 @@ Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
 - [x] Phase 1 -- 2D field solver (RB-GS/SOR) + `--selftest` + `wire` / `solenoid`
 - [x] Phase 2 -- geometric multigrid (grid-independent W-cycle) + interactive
       view (heatmap, field-lines, live wire editing) + `--render-check`
-- [ ] Phase 3 -- 3D Biot-Savart coils
+- [x] Phase 3 -- 3D Biot-Savart on the GPU (`[[coil]]` loop / solenoid /
+      helmholtz, xy/xz/yz slice) + `--biot-selftest`
 - [ ] Phase 4 -- Boris pusher
 - [ ] Phase 5 -- docs + Studies + website media
 
@@ -52,6 +56,8 @@ Interactive keys: **M** cycle field (|B| / Bx / By / A_z), **L** field-lines,
 | `wire.toml` | single out-of-plane line current | `\|B\| = mu0 I / 2 pi r` on an interior annulus (~0.3%) |
 | `solenoid.toml` | opposite current sheets (Neumann BC) | uniform `B_x = mu0 K_s` between (~2%), ~0 outside |
 | `playground.toml` | three wires, lighter grid | for `--interactive` |
+| `loop.toml` | one 3D current loop, xz slice | on-axis `B_z = mu0 I R^2/2(R^2+z^2)^{3/2}` (<0.03%) |
+| `helmholtz.toml` | Helmholtz pair, xz slice | centre field vs `(4/5)^{3/2} mu0 I/R` (3e-5), `d^2B/dz^2 ~ 0` |
 
 ## Solver notes
 
