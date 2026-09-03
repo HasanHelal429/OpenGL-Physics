@@ -171,6 +171,37 @@ private:
     // comment for what `coord` means on each side.
     Prim2D InflowStateAt(double coord) const { return m_inflowProfile ? m_inflowProfile(coord) : m_inflowState; }
 
+    using HllcFluxFn = Cons2D (*)(const Prim2D&, const Prim2D&, double);
+
+    // Reused per-line scratch buffers, threaded through LineRhs/AdvanceLineRK2/
+    // LineDiffuse so a full sweep (every row in SweepX, every column in
+    // SweepY) makes zero heap allocations after the first call. Before this,
+    // each of these was a fresh std::vector allocated and freed on every
+    // single row/column of every single Step() call -- roughly 11
+    // allocations per line; for a typical grid and a multi-hundred-time-unit
+    // run, on the order of 10^8 allocations total (measured: ~169 million
+    // for the cylinder-shedding deck's validated run). See
+    // docs/SIMULATION.md's efficiency section for the full derivation.
+    // One Workspace per OpenMP thread once the sweeps are parallelized (not
+    // yet -- currently always index 0 in m_workspacesX/m_workspacesY).
+    struct Workspace {
+        std::vector<Cons2D> interior; // extracted row/column, before ghost padding
+        std::vector<Cons2D> padded, stage1, result, k1, k2, delta;
+        std::vector<Prim2D> prim, faceL, faceR;
+        void EnsureSize(int n); // n = interior line length (nx for X-direction, ny for Y)
+    };
+    // gamma/mu/conductivity/tracerDiffusivity come from the object's own
+    // members (m_gamma etc.) rather than parameters, now that these are
+    // member functions instead of free functions -- one fewer thing to keep
+    // in sync at each call site.
+    void LineRhs(const std::vector<Cons2D>& u, double dx, HllcFluxFn hllc, Workspace& ws,
+                 std::vector<Cons2D>& dudtOut) const;
+    void AdvanceLineRK2(const std::vector<Cons2D>& interior, double dt, double dx, HllcFluxFn hllc, WallBC bcLeft,
+                         WallBC bcRight, const Cons2D& inflowCons, BoundaryAxis axis, Workspace& ws,
+                         std::vector<Cons2D>& resultOut) const;
+    void LineDiffuse(const std::vector<Cons2D>& padded, double dx, Workspace& ws,
+                      std::vector<Cons2D>& deltaOut) const;
+
     int m_nx = 0, m_ny = 0;
     double m_xMin = 0.0, m_yMin = 0.0, m_dx = 1.0, m_dy = 1.0, m_gamma = 1.4;
     WallBC m_bcLeft = WallBC::Outflow, m_bcRight = WallBC::Outflow;
@@ -180,6 +211,11 @@ private:
     double m_mu = 0.0, m_conductivity = 0.0, m_tracerDiffusivity = 0.0, m_bodyForceX = 0.0;
     std::vector<Cons2D> m_u; // row-major, size nx*ny, index = j*nx + i
     std::vector<uint8_t> m_obstacleMask; // empty if no obstacle set; else size nx*ny, row-major like m_u
+    // mutable: SweepX/SweepY/DiffuseX/DiffuseY are logically const (they
+    // never modify the object's own physical state, only the caller-owned
+    // `grid` argument) but need to write into scratch space -- exactly the
+    // textbook case for `mutable`.
+    mutable std::vector<Workspace> m_workspacesX, m_workspacesY;
 };
 
 } // namespace cf
