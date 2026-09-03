@@ -1,8 +1,10 @@
 #pragma once
 
+#include "BiotSavart.hpp"
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
 #include "Multigrid.hpp"
+#include "SlicePlane.hpp"
 #include "Sources.hpp"
 
 #include "framework/Shader.hpp"
@@ -54,7 +56,10 @@ public:
     const std::vector<double>& By() const { return m_By; }
 
 private:
-    void SolveField(bool warmStart = false);
+    void UpdateField(bool warmStart = false);   // Poisson solve OR Biot-Savart
+    void SolvePoissonPath(bool warmStart);
+    void BiotSavartPath();
+    void RebuildAvoidPoints();
     void EnsureRenderResources();
     void RepackField();                       // chosen scalar -> m_fieldScratch
     void RebuildFieldLines();                 // integrate B streamlines -> m_lineVerts
@@ -66,12 +71,20 @@ private:
     SolveOptions m_solveOpt;
     MultigridOptions m_mgOpt;
 
-    Sources m_sources;
+    // --- current sources -------------------------------------------------
+    Sources m_sources;                        // 2D out-of-plane wires / strips
+    std::vector<CoilSpec> m_coils;            // 3D coils (Biot-Savart path)
+    std::vector<WireSegment> m_segments;
+    BiotSavartField m_biot;
+    SlicePlane m_plane;
+    bool m_useBiot = false;
+
     std::vector<double> m_Jz;
     std::vector<double> m_Az;
-    std::vector<double> m_Bx, m_By;
+    std::vector<double> m_Bx, m_By, m_Bz;     // Bx, By = in-plane; Bz = perpendicular
     std::vector<unsigned char> m_fixedMask;
     std::vector<double> m_fixedValues;
+    std::vector<glm::dvec2> m_avoidPts;       // in-plane source locations (field-line stops)
 
     SolveResult m_lastSolve;
     double m_lastSolveMs = 0.0;
@@ -87,7 +100,7 @@ private:
     std::vector<float> m_lineVerts;           // xy pairs, GL_LINES
     int m_lineVertCount = 0;
 
-    int m_mode = 0;                           // 0 |B|, 1 Bx, 2 By, 3 A_z
+    int m_mode = 0;                           // 0 |B|, 1 Bx, 2 By, 3 Bz, 4 A_z
     bool m_showLines = true;
     int m_activeWire = 0;
     float m_zoom = 1.0f;

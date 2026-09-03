@@ -1,7 +1,9 @@
+#include "BiotSavart.hpp"
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
 #include "MagnetostaticsSim.hpp"
 #include "Multigrid.hpp"
+#include "SlicePlane.hpp"
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -31,6 +33,7 @@ struct Args {
     bool interactive = false;
     bool selftest = false;
     bool mgScaling = false;
+    bool biotSelftest = false;
     std::string renderCheck;   // path for a one-frame offscreen PNG dump
 };
 
@@ -46,6 +49,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--mg-scaling") a.mgScaling = true;
+        else if (s == "--biot-selftest") a.biotSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -187,6 +191,85 @@ bool MgScaling() {
     return ok;
 }
 
+// GPU Biot-Savart vs (a) the analytic on-axis loop field and (b) the CPU
+// reference sum, plus the Helmholtz uniformity condition. Needs a GL context.
+bool BiotSelfTest() {
+    constexpr double mu0 = 1.0;
+    bool ok = true;
+
+    // (1) single loop, radius R, on its axis: Bz = mu0 I R^2 / [2 (R^2+z^2)^{3/2}]
+    {
+        const double R = 1.0, I = 1.0;
+        mag::CoilSpec c;
+        c.shape = "loop"; c.radius = R; c.current = I;
+        c.axis = {0, 0, 1}; c.segmentsPerTurn = 512;
+        const auto segs = mag::BuildSegments({c});
+
+        mag::Grid g;
+        g.nx = g.ny = 128; g.lx = g.ly = 6.0;     // xz slice: axis0=x, axis1=z
+        mag::SlicePlane plane; plane.kind = mag::SlicePlane::XZ; plane.offset = 0.0;
+        mag::BiotSavartField field;
+        field.Init(g);
+        std::vector<double> bx, by, bz;
+        field.Evaluate(g, plane, mu0, segs, bx, by, bz);
+
+        const int i0 = g.nx / 2;                    // x ~ 0 column (the axis)
+        double maxrel = 0.0, cpuMaxrel = 0.0;
+        for (int j = 0; j < g.ny; ++j) {
+            const double z = g.y(j);
+            if (std::abs(z) < 0.4 || std::abs(z) > 2.5) continue;  // skip the wire, the far box
+            const double analytic = mu0 * I * R * R /
+                                    (2.0 * std::pow(R * R + z * z, 1.5));
+            // in-plane component 1 (grid y = world z) holds Bz on this slice
+            const double gpu = by[g.idx(i0, j)];
+            maxrel = std::max(maxrel, std::abs(gpu - analytic) / std::abs(analytic));
+            const glm::dvec3 cpu = mag::BiotSavartAt(segs, {0.0, 0.0, z}, mu0);
+            cpuMaxrel = std::max(cpuMaxrel,
+                                 std::abs(cpu.z - analytic) / std::abs(analytic));
+        }
+        std::printf("  loop on-axis:  GPU vs analytic  max rel err %.4f   "
+                    "(CPU vs analytic %.4f)\n", maxrel, cpuMaxrel);
+        if (maxrel > 0.02 || cpuMaxrel > 0.02) ok = false;
+    }
+
+    // (2) Helmholtz pair (spacing = R): d^2 B / dz^2 ~ 0 at the centre.
+    {
+        const double R = 1.0, I = 1.0;
+        mag::CoilSpec c;
+        c.shape = "helmholtz"; c.radius = R; c.current = I;
+        c.axis = {0, 0, 1}; c.segmentsPerTurn = 512;
+        const auto segs = mag::BuildSegments({c});
+
+        auto Bz = [&](double z) {
+            return mag::BiotSavartAt(segs, {0, 0, z}, mu0).z;
+        };
+        const double b0 = Bz(0.0);
+        // Analytic Helmholtz centre field: (4/5)^{3/2} mu0 I / R.
+        const double b0Exact = std::pow(0.8, 1.5) * mu0 * I / R;
+        std::printf("  helmholtz:     B(0) = %.5f  (analytic %.5f, rel %.1e)\n",
+                    b0, b0Exact, std::abs(b0 - b0Exact) / b0Exact);
+        if (std::abs(b0 - b0Exact) / b0Exact > 2e-3) ok = false;
+
+        // d^2 B/dz^2 = 0 is exact for Helmholtz; a small finite-difference h
+        // keeps the 4th-order term (~ d4B/dz4 h^2 / 12) from masking it.
+        const double h = 0.012;
+        const double curv = std::abs(Bz(h) - 2 * b0 + Bz(-h)) / (h * h) *
+                            R * R / std::abs(b0);
+        std::printf("  helmholtz:     |d2B/dz2| R^2 / B0 = %.2e\n", curv);
+        if (curv > 1e-3) ok = false;
+
+        // uniformity over the central |z| < 0.15 R region (B ~ B0 [1 - c (z/R)^4])
+        double worst = 0.0;
+        for (double z = -0.15 * R; z <= 0.15 * R; z += 0.03 * R)
+            worst = std::max(worst, std::abs(Bz(z) - b0) / std::abs(b0));
+        std::printf("  helmholtz:     max |dB|/B0 over |z| < 0.15R = %.2e\n", worst);
+        if (worst > 1.5e-3) ok = false;
+    }
+
+    std::printf("biot-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -198,6 +281,10 @@ int main(int argc, char** argv) {
     if (a.mgScaling) {
         return MgScaling() ? 0 : 1;
     }
+    if (a.biotSelftest) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        return BiotSelfTest() ? 0 : 1;
+    }
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
@@ -205,8 +292,9 @@ int main(int argc, char** argv) {
                      "  09_magnetostatics --deck <f.toml> --out <dir> [--frames N]\n"
                      "  09_magnetostatics --interactive --deck <f.toml>\n"
                      "  09_magnetostatics --deck <f.toml> --render-check <out.png>\n"
-                     "  09_magnetostatics --selftest      (field-solver convergence)\n"
-                     "  09_magnetostatics --mg-scaling    (multigrid V-cycle scaling)\n");
+                     "  09_magnetostatics --selftest       (field-solver convergence)\n"
+                     "  09_magnetostatics --mg-scaling     (multigrid V-cycle scaling)\n"
+                     "  09_magnetostatics --biot-selftest  (GPU Biot-Savart vs analytic)\n");
         return 2;
     }
 

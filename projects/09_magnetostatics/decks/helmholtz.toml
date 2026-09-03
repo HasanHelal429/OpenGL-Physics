@@ -1,0 +1,26 @@
+title = "Helmholtz pair (3D Biot-Savart, xz slice)"
+
+# Two coaxial loops of radius R separated by R -- the Helmholtz condition, for
+# which d^2 B / dz^2 = 0 at the centre and the on-axis field is uniform to a
+# few parts in 1e3 over a region ~0.3 R. Evaluated on the xz plane.
+[grid]
+nx = 400
+ny = 400
+lx = 6.0
+ly = 6.0
+plane = "xz"
+
+[physics]
+mu0 = 1.0
+
+[time]
+frames = 1
+
+[[coil]]
+shape = "helmholtz"
+radius = 1.0
+spacing = 1.0
+center = [0.0, 0.0, 0.0]
+axis = [0.0, 0.0, 1.0]
+current = 1.0
+segments = 400

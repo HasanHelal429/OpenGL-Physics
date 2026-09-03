@@ -136,6 +136,11 @@ void MagnetostaticsSim::Configure(const fw::Deck& deck) {
     if (m_solveOpt.edgeBC == BC::Neumann) m_method = "rbgs";
 
     m_sources = ParseSources(m_grid, deck);
+    m_coils = ParseCoils(deck);
+    m_useBiot = !m_coils.empty();
+    m_plane.kind = SlicePlane::ParseKind(deck.GetString("grid.plane", "xy"));
+    m_plane.offset = deck.GetDouble("grid.plane_offset", 0.0);
+
     m_Jz = RasterizeCurrent(m_grid, m_sources);
     if (m_solveOpt.edgeBC == BC::Neumann) {
         m_fixedMask.assign(m_grid.count(), 0);
@@ -143,17 +148,44 @@ void MagnetostaticsSim::Configure(const fw::Deck& deck) {
     } else {
         MakeEdgeDirichlet(m_grid, m_fixedMask, m_fixedValues);
     }
-    SolveField();
+    if (m_useBiot) m_biot.Init(m_grid);
+    UpdateField();
 }
 
-void MagnetostaticsSim::SolveField(bool warmStart) {
+void MagnetostaticsSim::UpdateField(bool warmStart) {
+    const auto t0 = std::chrono::steady_clock::now();
+    if (m_useBiot) BiotSavartPath();
+    else           SolvePoissonPath(warmStart);
+    m_lastSolveMs = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+    RebuildAvoidPoints();
+    m_fieldDirty = true;
+
+    if (!warmStart) {
+        if (m_useBiot)
+            std::printf("[magnetostatics] biot-savart: %zu segments, slice %s "
+                        "(%.1f ms)\n",
+                        m_segments.size(),
+                        m_plane.kind == SlicePlane::XY ? "xy" :
+                        m_plane.kind == SlicePlane::XZ ? "xz" : "yz",
+                        m_lastSolveMs);
+        else
+            std::printf("[magnetostatics] %s: %d %s, residual %.3e%s  (%.1f ms)\n",
+                        m_method.c_str(), m_lastSolve.iterations,
+                        m_method == "multigrid" ? "W-cycles" : "iterations",
+                        m_lastSolve.residual,
+                        m_lastSolve.converged ? "" : "  (NOT converged)",
+                        m_lastSolveMs);
+    }
+}
+
+void MagnetostaticsSim::SolvePoissonPath(bool warmStart) {
     std::vector<double> rhs(m_grid.count(), 0.0);
     for (int k = 0; k < m_grid.count(); ++k) rhs[k] = -m_mu0 * m_Jz[k];
 
     if (!warmStart || static_cast<int>(m_Az.size()) != m_grid.count())
         m_Az.assign(m_grid.count(), 0.0);
 
-    const auto t0 = std::chrono::steady_clock::now();
     if (m_method == "multigrid") {
         const MultigridResult r =
             SolvePoissonMultigrid(m_grid, rhs, m_fixedValues, m_Az, m_mgOpt);
@@ -162,33 +194,52 @@ void MagnetostaticsSim::SolveField(bool warmStart) {
         m_lastSolve = SolvePoisson(m_grid, rhs, m_fixedMask, m_fixedValues,
                                    m_Az, m_solveOpt);
     }
-    m_lastSolveMs = std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - t0).count();
     CurlZ(m_grid, m_Az, m_Bx, m_By);
-    m_fieldDirty = true;
-
-    if (!warmStart)
-        std::printf("[magnetostatics] %s: %d %s, residual %.3e%s  (%.1f ms)\n",
-                    m_method.c_str(), m_lastSolve.iterations,
-                    m_method == "multigrid" ? "W-cycles" : "iterations",
-                    m_lastSolve.residual,
-                    m_lastSolve.converged ? "" : "  (NOT converged)",
-                    m_lastSolveMs);
+    m_Bz.assign(m_grid.count(), 0.0);
 }
 
-void MagnetostaticsSim::Reset() { SolveField(); }
+void MagnetostaticsSim::BiotSavartPath() {
+    m_segments = BuildSegments(m_coils);
+    m_biot.Evaluate(m_grid, m_plane, m_mu0, m_segments, m_Bx, m_By, m_Bz);
+    m_Az.assign(m_grid.count(), 0.0);   // no vector potential on this path
+}
+
+void MagnetostaticsSim::RebuildAvoidPoints() {
+    m_avoidPts.clear();
+    for (const WireSpec& w : m_sources.wires)
+        m_avoidPts.emplace_back(w.x, w.y);
+    // Where a coil segment pierces (or nearly grazes) the slice plane, project
+    // that point into the plane -- field lines spiral into it like a wire core.
+    const double tol = 0.03 * std::min(m_grid.lx, m_grid.ly);
+    auto perp = [&](const glm::dvec3& p) {
+        switch (m_plane.kind) {
+        case SlicePlane::XZ: return p.y;
+        case SlicePlane::YZ: return p.x;
+        default:             return p.z;
+        }
+    };
+    for (const WireSegment& s : m_segments)
+        if (std::abs(perp(s.mid) - m_plane.offset) < tol)
+            m_avoidPts.push_back(m_plane.InPlane(s.mid));
+}
+
+void MagnetostaticsSim::Reset() { UpdateField(); }
 
 void MagnetostaticsSim::Step(int /*substeps*/) {}
 
 void MagnetostaticsSim::Snapshot(fw::OutputWriter& writer) {
+    // Bx, By are the two in-plane components of the slice; Bz is the
+    // out-of-plane one (identically zero on the Poisson / xy path).
     writer.WriteField("A_z", m_Az.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
     writer.WriteField("Bx", m_Bx.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
     writer.WriteField("By", m_By.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
+    writer.WriteField("Bz", m_Bz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
     writer.WriteField("Jz", m_Jz.data(), fw::NpyDtype::F8, m_grid.ny, m_grid.nx);
 
     double bmax = 0.0;
     for (int k = 0; k < m_grid.count(); ++k)
-        bmax = std::max(bmax, m_Bx[k] * m_Bx[k] + m_By[k] * m_By[k]);
+        bmax = std::max(bmax, m_Bx[k] * m_Bx[k] + m_By[k] * m_By[k] +
+                              m_Bz[k] * m_Bz[k]);
     writer.WriteScalar("B_max", std::sqrt(bmax));
     writer.WriteScalar("solve_iterations", m_lastSolve.iterations);
     writer.WriteScalar("solve_residual", m_lastSolve.residual);
@@ -203,7 +254,7 @@ fw::SimInfo MagnetostaticsSim::Info() const {
     info.ly = m_grid.ly;
     info.dt = 0.0;
     info.substepsPerFrame = 1;
-    info.frameFields = {"A_z", "Bx", "By", "Jz"};
+    info.frameFields = {"A_z", "Bx", "By", "Bz", "Jz"};
     info.diagnostics = {"B_max", "solve_iterations", "solve_residual"};
     return info;
 }
@@ -240,9 +291,10 @@ void MagnetostaticsSim::RepackField() {
         switch (m_mode) {
         case 1:  m_fieldScratch[k] = static_cast<float>(m_Bx[k]); break;
         case 2:  m_fieldScratch[k] = static_cast<float>(m_By[k]); break;
-        case 3:  m_fieldScratch[k] = static_cast<float>(m_Az[k]); break;
-        default: m_fieldScratch[k] =
-            static_cast<float>(std::sqrt(m_Bx[k] * m_Bx[k] + m_By[k] * m_By[k]));
+        case 3:  m_fieldScratch[k] = static_cast<float>(m_Bz[k]); break;
+        case 4:  m_fieldScratch[k] = static_cast<float>(m_Az[k]); break;
+        default: m_fieldScratch[k] = static_cast<float>(
+            std::sqrt(m_Bx[k] * m_Bx[k] + m_By[k] * m_By[k] + m_Bz[k] * m_Bz[k]));
         }
     }
     glNamedBufferSubData(m_fieldBuf, 0,
@@ -269,14 +321,14 @@ void MagnetostaticsSim::RebuildFieldLines() {
         by = lerp2(m_By);
     };
 
-    // A streamline that wanders within this distance of any wire is spiralling
-    // into the (integrable) singular core -- stop it there rather than let it
-    // wind up into a dense blob.
+    // A streamline that wanders within this distance of a current source is
+    // spiralling into the (integrable) singular core -- stop it there rather
+    // than let it wind up into a dense blob.
+    const double avoidR = std::max(0.04 * std::min(m_grid.lx, m_grid.ly),
+                                   3.0 * std::min(dx, dy));
     auto nearWire = [&](double x, double y) {
-        for (const WireSpec& w : m_sources.wires) {
-            const double d = std::hypot(x - w.x, y - w.y);
-            if (d < std::max(3.0 * w.radius, 2.0 * std::min(dx, dy))) return true;
-        }
+        for (const glm::dvec2& a : m_avoidPts)
+            if (std::hypot(x - a.x, y - a.y) < avoidR) return true;
         return false;
     };
 
@@ -395,13 +447,15 @@ void MagnetostaticsSim::Render(int fbWidth, int fbHeight) {
         glDisable(GL_BLEND);
     }
 
-    static const char* kModeNames[4] = {"|B|", "Bx", "By", "A_z"};
-    char line[160];
+    static const char* kModeNames[5] = {"|B|", "Bx", "By", "Bz", "A_z"};
+    const std::size_t nSrc =
+        m_useBiot ? m_coils.size() : m_sources.wires.size();
+    char line[192];
     std::snprintf(line, sizeof(line),
-                  "field: %s (M)   lines: %s (L)   wire %d/%zu: arrows move, [ ] current   (%.1f ms/solve)",
+                  "field: %s (M)   lines: %s (L)   %s %d/%zu: arrows move   (%.1f ms/update)",
                   kModeNames[m_mode], m_showLines ? "on" : "off",
-                  m_sources.wires.empty() ? 0 : m_activeWire + 1,
-                  m_sources.wires.size(), m_lastSolveMs);
+                  m_useBiot ? "coil" : "wire",
+                  nSrc ? m_activeWire + 1 : 0, nSrc, m_lastSolveMs);
     m_text->SetViewport(fbWidth, fbHeight);
     m_text->Draw(m_font, line, glm::vec2(12.0f, 24.0f),
                  glm::vec4(1.0f, 1.0f, 1.0f, 0.9f));
@@ -423,18 +477,17 @@ void MagnetostaticsSim::OnViewInput(const fw::ViewInput& in) {
 void MagnetostaticsSim::OnKey(int key, int action) {
     (void)action;
     const double moveStep = 0.03 * std::min(m_grid.lx, m_grid.ly);
-    auto haveWire = [&]() { return !m_sources.wires.empty(); };
+    const int nSrc = m_useBiot ? static_cast<int>(m_coils.size())
+                               : static_cast<int>(m_sources.wires.size());
     switch (key) {
-    case 'M': m_mode = (m_mode + 1) % 4; m_fieldDirty = true; break;
+    case 'M': m_mode = (m_mode + 1) % 5; m_fieldDirty = true; break;
     case 'L': m_showLines = !m_showLines; m_fieldDirty = true; break;
     case '[': m_gain = std::max(0.15f, m_gain * 0.85f); break;
     case ']': m_gain = std::min(12.0f, m_gain * 1.18f); break;
     case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break;
     case '=': m_gamma = std::min(2.5f, m_gamma + 0.05f); break;
     case GLFW_KEY_TAB:
-        if (haveWire())
-            m_activeWire = (m_activeWire + 1) %
-                           static_cast<int>(m_sources.wires.size());
+        if (nSrc) m_activeWire = (m_activeWire + 1) % nSrc;
         break;
     case '0':
         m_zoom = 1.0f; m_panPix = {0.0f, 0.0f};
@@ -442,16 +495,26 @@ void MagnetostaticsSim::OnKey(int key, int action) {
         break;
     case GLFW_KEY_LEFT:  case GLFW_KEY_RIGHT:
     case GLFW_KEY_UP:    case GLFW_KEY_DOWN: {
-        if (!haveWire()) break;
-        WireSpec& w = m_sources.wires[m_activeWire];
-        if (key == GLFW_KEY_LEFT)  w.x -= moveStep;
-        if (key == GLFW_KEY_RIGHT) w.x += moveStep;
-        if (key == GLFW_KEY_DOWN)  w.y -= moveStep;
-        if (key == GLFW_KEY_UP)    w.y += moveStep;
-        w.x = std::clamp(w.x, -0.45 * m_grid.lx, 0.45 * m_grid.lx);
-        w.y = std::clamp(w.y, -0.45 * m_grid.ly, 0.45 * m_grid.ly);
-        m_Jz = RasterizeCurrent(m_grid, m_sources);
-        SolveField(/*warmStart=*/true);
+        if (!nSrc) break;
+        const double sx = (key == GLFW_KEY_LEFT ? -moveStep :
+                           key == GLFW_KEY_RIGHT ? moveStep : 0.0);
+        const double sy = (key == GLFW_KEY_DOWN ? -moveStep :
+                           key == GLFW_KEY_UP ? moveStep : 0.0);
+        if (m_useBiot) {
+            // move the coil centre in the slice plane
+            CoilSpec& c = m_coils[m_activeWire];
+            switch (m_plane.kind) {
+            case SlicePlane::XZ: c.center.x += sx; c.center.z += sy; break;
+            case SlicePlane::YZ: c.center.y += sx; c.center.z += sy; break;
+            default:             c.center.x += sx; c.center.y += sy; break;
+            }
+        } else {
+            WireSpec& w = m_sources.wires[m_activeWire];
+            w.x = std::clamp(w.x + sx, -0.45 * m_grid.lx, 0.45 * m_grid.lx);
+            w.y = std::clamp(w.y + sy, -0.45 * m_grid.ly, 0.45 * m_grid.ly);
+            m_Jz = RasterizeCurrent(m_grid, m_sources);
+        }
+        UpdateField(/*warmStart=*/true);
         break;
     }
     default: break;
