@@ -107,6 +107,7 @@ private:
     double m_c = 1.0;
     int m_substepsPerFrame = 4;
     long m_totalSteps = 2000;
+    bool m_outputH = false;   // also write Hx, Hy frames (near-to-far-field)
     std::string m_title = "2D FDTD (TMz)";
     std::string m_boundary = "mur";   // "mur" | "pec"
 

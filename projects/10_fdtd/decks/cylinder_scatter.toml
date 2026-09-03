@@ -1,0 +1,40 @@
+title = "Plane wave scattering off a PEC cylinder -- vs the Mie series"
+
+# A TFSF plane wave (normal incidence, going in -x) onto a perfectly
+# conducting cylinder. tools/plot_mie.py runs this deck with and without the
+# cylinder, isolates the scattered phasor field, does a near-to-far-field
+# transform on a contour around the cylinder, and compares the bistatic
+# pattern to the 2D PEC Mie (cylindrical-harmonic) series.
+[grid]
+nx = 300
+ny = 300
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[tfsf]
+margin = 10
+
+[time]
+steps = 3200
+substeps_per_frame = 4
+
+[output]
+h_fields = true
+
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = 0.05           # wavelength 20 cells
+amplitude = 1.0
+angle_deg = 180.0   # propagating in -x
+ramp_cycles = 4
+
+[[pec]]
+shape = "cylinder"
+x = 150.0
+y = 150.0
+radius = 10.0       # k a = 2 pi f0 a ~ 3.14

@@ -27,6 +27,7 @@ struct Args {
     bool gpuSelftest = false;
     bool cpmlSelftest = false;
     bool fresnelSelftest = false;
+    bool pecSelftest = false;
     bool gpu = false;
 };
 
@@ -44,6 +45,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--gpu-selftest") a.gpuSelftest = true;
         else if (s == "--cpml-selftest") a.cpmlSelftest = true;
         else if (s == "--fresnel-selftest") a.fresnelSelftest = true;
+        else if (s == "--pec-selftest") a.pecSelftest = true;
         else if (s == "--gpu") a.gpu = true;
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -358,6 +360,68 @@ ramp_cycles = 4
     return ok;
 }
 
+// PEC scatterer sanity: a TFSF plane wave onto a PEC cylinder must (a) leave
+// a scattered field in the SF region and (b) cast a forward shadow -- the
+// total field just behind the cylinder is well below the incident level.
+bool PecSelfTest() {
+    bool ok = true;
+    const int nx = 260, ny = 260, pml = 12, margin = 10;
+    const double f0 = 0.05;
+    char buf[900];
+    std::snprintf(buf, sizeof(buf), R"(
+[grid]
+nx = %d
+ny = %d
+dx = 1.0
+courant = 0.5
+[boundary]
+type = "cpml"
+pml_cells = %d
+[tfsf]
+margin = %d
+[time]
+steps = 1
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = %.4f
+amplitude = 1.0
+angle_deg = 180.0
+ramp_cycles = 4
+[[pec]]
+shape = "cylinder"
+x = 130.0
+y = 130.0
+radius = 14.0
+)", nx, ny, pml, margin, f0);
+
+    fdtd::Fdtd2D sim;
+    fw::Deck d = fw::Deck::FromString(buf);
+    sim.Configure(d);
+    const int period = static_cast<int>(std::round(1.0 / f0 / sim.Dt()));
+    sim.Step(30 * period);
+    const int measure = 8 * period;
+    const double w = 2.0 * kPi * f0;
+    // probes: shadow (behind, -x of the cylinder), lit face (+x), SF strip
+    std::complex<double> shadow{0, 0}, lit{0, 0}, sf{0, 0};
+    const std::size_t pShadow = static_cast<std::size_t>(130) * nx + (130 - 30);
+    const std::size_t pLit = static_cast<std::size_t>(130) * nx + (130 + 30);
+    const std::size_t pSf = static_cast<std::size_t>(ny - pml - 4) * nx + 130;
+    for (int k = 0; k < measure; ++k) {
+        sim.Step(1);
+        const auto ph = std::exp(std::complex<double>(0.0, w * sim.Time()));
+        shadow += sim.Ez()[pShadow] * ph;
+        lit += sim.Ez()[pLit] * ph;
+        sf += sim.Ez()[pSf] * ph;
+    }
+    const double A = 2.0 / measure;
+    const double sh = std::abs(shadow * A), li = std::abs(lit * A), sfv = std::abs(sf * A);
+    std::printf("  |Ez|: shadow %.3f   lit face %.3f   SF strip %.4f\n", sh, li, sfv);
+    if (!(sh < 0.6 && li > 0.8 && sfv > 0.05)) ok = false;   // shadow, standing wave, scatter
+    std::printf("pec-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -367,6 +431,7 @@ int main(int argc, char** argv) {
     if (a.gpuSelftest) return GpuSelfTest() ? 0 : 1;
     if (a.cpmlSelftest) return CpmlSelfTest() ? 0 : 1;
     if (a.fresnelSelftest) return FresnelSelfTest() ? 0 : 1;
+    if (a.pecSelftest) return PecSelfTest() ? 0 : 1;
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
