@@ -41,9 +41,9 @@ def measure_decay_rate(results_dir):
         deck = tomllib.load(f)
 
     mu = deck["physics"]["mu"]
-    rho0 = deck["physics"]["rho0"]
-    length = deck["grid"]["length"]
-    wavenumber_multiplier = deck["taylor_green"].get("wavenumber_multiplier", 1)
+    rho0 = deck["initial_condition"]["rho0"]
+    length = deck["grid"]["x_max"] - deck["grid"]["x_min"]
+    wavenumber_multiplier = deck["initial_condition"].get("wavenumber_multiplier", 1)
     nu = mu / rho0
     k = 2.0 * np.pi * wavenumber_multiplier / length
     # Velocity's Laplacian picks up a factor of 2*k^2 (d^2/dx^2 + d^2/dy^2,

@@ -9,7 +9,8 @@ title = "Compressible Euler -- 2D Riemann problem (Kurganov & Tadmor 2002, Confi
 # No exact solution exists, but this specific configuration's density
 # pattern at t~0.3 is widely published (e.g. Kurganov & Tadmor 2002; Liska
 # & Wendroff 2003's scheme-comparison paper) -- see tools/plot_riemann2d.py
-# for the qualitative comparison this validates against.
+# for the qualitative comparison this validates against. Boundary sides
+# omitted -- outflow (zero-gradient) is the default for every side.
 [grid]
 nx = 400
 ny = 400
@@ -21,7 +22,8 @@ y_max = 1.0
 [physics]
 gamma = 1.4
 
-[riemann2d]
+[initial_condition]
+type = "riemann_quadrants"
 x0 = 0.5
 y0 = 0.5
 ne = [1.5, 0.0, 0.0, 1.5]

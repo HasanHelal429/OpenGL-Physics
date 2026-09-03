@@ -4,7 +4,7 @@ Validation plot for a headless 08_compressible_fluid Poiseuille-channel run
 profile u(y), averaged over the (trivial, periodic) x direction, against
 the analytic steady plane-Poiseuille profile
     u(y) = (f / (2*mu)) * y * (H - y)
-(f = channel.body_force_x, mu = physics.mu, H = grid.height) -- the
+(f = physics.body_force_x, mu = physics.mu, H = grid.y_max - grid.y_min) -- the
 classic exact solution this scheme's viscous (Newtonian shear stress +
 Fourier conduction) terms should reproduce once the flow has relaxed from
 rest to steady state.
@@ -38,9 +38,9 @@ def main():
         deck = tomllib.load(f)
 
     ny = manifest["grid"]["ny"]
-    height = deck["grid"]["height"]
+    height = deck["grid"]["y_max"] - deck["grid"]["y_min"]
     mu = deck["physics"]["mu"]
-    force = deck["channel"]["body_force_x"]
+    force = deck["physics"]["body_force_x"]
     dy = height / ny
     y = (np.arange(ny) + 0.5) * dy
 

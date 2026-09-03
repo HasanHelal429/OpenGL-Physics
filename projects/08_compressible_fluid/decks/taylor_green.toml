@@ -9,17 +9,31 @@ title = "Compressible Navier-Stokes -- 2D Taylor-Green vortex decay"
 # tools/plot_taylor_green.py for how close the measured decay rate actually
 # comes to the analytic incompressible prediction.
 [grid]
-n = 64
-length = 1.0
+nx = 64
+ny = 64
+x_min = 0.0
+x_max = 1.0
+y_min = 0.0
+y_max = 1.0
 
 [physics]
 gamma = 1.4
-rho0 = 1.0
-p0 = 1.0
 mu = 0.01
 conductivity = 0.0
 
-[taylor_green]
+[boundary.left]
+type = "periodic"
+[boundary.right]
+type = "periodic"
+[boundary.bottom]
+type = "periodic"
+[boundary.top]
+type = "periodic"
+
+[initial_condition]
+type = "taylor_green_vortex"
+rho0 = 1.0
+p0 = 1.0
 u0 = 0.1
 wavenumber_multiplier = 1
 

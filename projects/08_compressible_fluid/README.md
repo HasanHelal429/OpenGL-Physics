@@ -69,51 +69,51 @@ cmake --build --preset release --target 08_compressible_fluid
 python projects/08_compressible_fluid/tools/plot_shocktube.py projects/08_compressible_fluid/out/sod_shocktube
 ```
 
-`decks/riemann2d_config3.toml` — the 2D four-quadrant Riemann problem
-(`--2d` selects the 2D sim):
+Every 2D scenario below runs through the same `--scene` flag and the same
+`CompressibleSimScene` class — see "The generic scene schema" for what
+that means and how the schema is structured.
+
+`decks/riemann2d_config3.toml` — the 2D four-quadrant Riemann problem:
 
 ```sh
-./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --2d \
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --scene \
     --deck projects/08_compressible_fluid/decks/riemann2d_config3.toml \
     --out projects/08_compressible_fluid/out/riemann2d_config3
 python projects/08_compressible_fluid/tools/plot_riemann2d.py projects/08_compressible_fluid/out/riemann2d_config3
 ```
 
-`decks/poiseuille_channel.toml` — plane Poiseuille flow (`--channel`
-selects the viscous channel sim); see "Viscosity" below:
+`decks/poiseuille_channel.toml` — plane Poiseuille flow; see "Viscosity" below:
 
 ```sh
-./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --channel \
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --scene \
     --deck projects/08_compressible_fluid/decks/poiseuille_channel.toml \
     --out projects/08_compressible_fluid/out/poiseuille_channel
 python projects/08_compressible_fluid/tools/plot_poiseuille.py projects/08_compressible_fluid/out/poiseuille_channel
 ```
 
-`decks/taylor_green.toml` — 2D Taylor-Green vortex decay (`--taylor-green`
-selects the doubly-periodic sim); see "Viscosity" below:
+`decks/taylor_green.toml` — 2D Taylor-Green vortex decay; see "Viscosity" below:
 
 ```sh
-./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --taylor-green \
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --scene \
     --deck projects/08_compressible_fluid/decks/taylor_green.toml \
     --out projects/08_compressible_fluid/out/taylor_green
 python projects/08_compressible_fluid/tools/plot_taylor_green.py projects/08_compressible_fluid/out/taylor_green
 ```
 
-`decks/cylinder_re100.toml` — cylinder vortex shedding (`--cylinder`
-selects the obstacle-flow sim); see "Flow past an obstacle" below:
+`decks/cylinder_re100.toml` — cylinder vortex shedding; see "Flow past an
+obstacle" below:
 
 ```sh
-./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --cylinder \
+./build/release/projects/08_compressible_fluid/08_compressible_fluid.exe --scene \
     --deck projects/08_compressible_fluid/decks/cylinder_re100.toml \
     --out projects/08_compressible_fluid/out/cylinder_re100
 python projects/08_compressible_fluid/tools/plot_strouhal.py projects/08_compressible_fluid/out/cylinder_re100
 python projects/08_compressible_fluid/tools/make_movie.py projects/08_compressible_fluid/out/cylinder_re100
 ```
 
-`tools/make_movie.py` works for any 2D run (`--2d`/`--channel`/
-`--taylor-green`/`--cylinder`), rendering the vorticity field frame-by-frame
-(drawing the obstacle as a solid disk when the deck has one) — the vortex
-street is far more legible as a movie than any single static frame.
+`tools/make_movie.py` works for any `--scene` run, rendering the vorticity
+field frame-by-frame (drawing every deck obstacle as a solid disk) — the
+vortex street is far more legible as a movie than any single static frame.
 
 `--selftest` (no deck needed) runs four fast, deck-independent checks:
 HLLC-flux self-consistency (`F_HLLC(s,s) == F(s)` exactly), a
@@ -125,6 +125,66 @@ cross-check (the same Sod IC run 50 RK2 steps on both `Euler1D` and the
 `kernels_euler1d.hpp` compute-shader port, comparing recovered primitives —
 matches to ~1e-7 relative, the expected float32 precision floor), and the
 2D isentropic-vortex advection check described below.
+
+## The generic scene schema
+
+Every 2D scenario above is the **same C++ class**, `CompressibleSimScene`,
+reading a common deck schema — not four separate hardcoded classes each
+with its own scenario-specific setup logic (that *was* the design through
+this project's earlier phases: `CompressibleSim2D`/`CompressibleSimChannel`/
+`CompressibleSimTaylorGreen`/`CompressibleSimCylinder`, one per `--flag`).
+Any *combination* of the pieces below is expressible as pure deck data,
+with no new C++ needed:
+
+- **`[grid]`** — raw `nx`, `ny`, `x_min`, `x_max`, `y_min`, `y_max`. Always
+  physical values, not scenario-specific convenience parameters (e.g. no
+  `diameter`/`blockage`/`reynolds` fields) — matching this project's
+  existing convention (every other deck, e.g. `decks/sod_shocktube.toml`,
+  already specifies raw numeric values with a derivation comment, not a
+  higher-level physical parameterization the C++ then reverse-engineers).
+  A deck that wants Reynolds-number-style parameters computes them itself
+  into the raw fields, with a comment showing the arithmetic (see
+  `decks/cylinder_re100.toml`'s `mu = ...` comment for an example).
+- **`[physics]`** — `gamma`, `mu`, `conductivity`, `tracer_diffusivity`,
+  `body_force_x` (all default to 0 except `gamma=1.4`).
+- **`[boundary.left/right/bottom/top]`** — each side's `type`
+  (`outflow`/`periodic`/`no_slip`/`free_slip`/`inflow`), defaulting to
+  `outflow` if the table is omitted entirely. An `inflow` side also reads
+  `rho`/`u`/`v`/`p`/`tracer`, and can carry a nested
+  `[boundary.<side>.profile]` table selecting a named, position-dependent
+  variation of that base state — currently just `type = "tracer_stripes"`
+  (`stripe_width`), the one pattern this project has actually needed
+  (continuous alternating dye bands at an inlet, `decks/cylinder_re100.toml`).
+  A new pattern is a new named case in `CompressibleSimScene.cpp`, same as
+  `WallBC` itself already being a fixed enum of named cases.
+- **`[[obstacles]]`** — an array of `{shape="circle", center=[x,y], radius}`
+  tables (any number, combined by logical OR into one solid-cell mask).
+  Only `circle` is implemented; other shapes are a new named case away.
+- **`[initial_condition]`** — a `type` (`uniform`, `riemann_quadrants`, or
+  `taylor_green_vortex`, each reading its own type-specific keys — see the
+  four decks above for a worked example of each) plus an optional
+  **`[initial_condition.perturbation]`** modifier applied on top
+  (currently just `type = "antisymmetric_gaussian"`: a one-time,
+  Gaussian-localized, sign-flipped-across-`center.y` velocity bump on
+  `component` — the belt-and-suspenders symmetry-breaker
+  `decks/cylinder_re100.toml` needs, see "Flow past an obstacle" below).
+- **`[[probes]]`** — named points (`name`, `x`, `y`); each writes four
+  diagnostics `<name>_rho`/`_u`/`_v`/`_p` every frame.
+- **`[output] write_tracer`** — whether to write the `tracer` frame field
+  (default `false`).
+
+Diagnostics `mass_total`, `energy_total`, `kinetic_energy`, and `u_max` are
+always written regardless of scenario — cheap to compute in the same pass
+that writes the frame fields, so every deck's `diagnostics.csv` is a
+superset covering whichever of these any particular analysis script
+actually reads (`plot_poiseuille.py` reads `u_max`, `plot_taylor_green.py`
+reads `kinetic_energy`, neither cares that the other's column is also
+present).
+
+The 1D shock tube (`CompressibleSim`, `Euler1D`, `--deck` with no `--scene`
+flag) is deliberately **not** folded into this schema — boundary "sides"
+(plural), 2D obstacles, and probes are 2D-specific concepts with no natural
+1D analog, and forcing them into one shared schema would only obscure both.
 
 ## 2D: dimensional splitting
 
@@ -238,12 +298,15 @@ domain edge that's a truncation, not a physical wall).
 (that project's own incompressible validation of the same physics):
 `D=1, Re=100, U_inf=1`, blockage `D/H=0.125`, 5D upstream / 20D downstream,
 inflow-left / outflow-right / free-slip-top-bottom. `mach=0.2` (soundspeed
-`=U_inf/mach=5`) keeps this weakly compressible without the acoustic
-stiffness a much lower Mach number would need a preconditioner to handle
-well. `cells_per_d=8` is a first-pass resolution compromise — coarser even
-than the Python reference's own flagged-as-suboptimal 12 — chosen for a
-single validated run's compute budget (~3 minutes on this project's usual
-hardware for 130 time units).
+`=U_inf/mach=5`, baked into the deck's raw `p` value with a derivation
+comment — see "The generic scene schema" above) keeps this weakly
+compressible without the acoustic stiffness a much lower Mach number would
+need a preconditioner to handle well. `nx=200, ny=64` (`cells_per_d=8`
+equivalent) is a first-pass resolution compromise — coarser even than the
+Python reference's own flagged-as-suboptimal 12 — chosen for a single
+validated run's compute budget (~1.5 minutes on this project's usual
+hardware for 130 time units, after the OpenMP parallelization in
+"Performance" below).
 
 **A real gotcha, worth naming**: this domain, obstacle mask, and boundary
 conditions are symmetric about the channel centerline to floating-point
@@ -254,13 +317,14 @@ sits there for the entire run, because nothing in a perfectly symmetric
 simulation breaks the symmetry vortex shedding requires breaking. Real
 cylinders always shed because real flows always carry some asymmetric
 disturbance (free-stream turbulence, structural vibration); the "cleaner"
-perfectly symmetric numerical case is the artificial one. The fix:
-`cylinder.y_offset_d` (default `0.02`) offsets the cylinder slightly off
-the centerline — a *permanent* geometric asymmetry, not just a transient
-perturbation, so the instability has something to keep growing from — plus
-a smaller, belt-and-suspenders one-time antisymmetric velocity bump in the
-initial condition (`cylinder.perturb_amplitude`) to seed it faster than
-waiting on the offset's much smaller steady-state asymmetry alone.
+perfectly symmetric numerical case is the artificial one. The fix: the
+`[[obstacles]]` circle's `center` is placed slightly off the exact
+centerline (`y=4.02` vs. the geometric `4.0`) — a *permanent* geometric
+asymmetry, not just a transient perturbation, so the instability has
+something to keep growing from — plus a smaller, belt-and-suspenders
+one-time antisymmetric velocity bump via
+`[initial_condition.perturbation]` to seed it faster than waiting on the
+offset's much smaller steady-state asymmetry alone.
 
 **Validation.** `tools/plot_strouhal.py` FFTs the downstream velocity
 probe (4D behind the cylinder, on the centerline) and finds the shedding
@@ -307,13 +371,13 @@ reconstructed by the same MinMod limiter as everything else, so its
 interfaces stay as sharp as the scheme allows without any special-casing.
 
 `decks/cylinder_re100.toml` feeds it in as **alternating 1D-wide stripes**
-at the inflow (`cylinder.tracer_stripe_width_d`, default `1.0`; set `<=0`
-to disable), fed *continuously* rather than as a one-time initial-condition
-pulse — a pulse would wash downstream and out of the domain long before a
-130-time-unit run is over, exactly the same problem the shedding-symmetry
-perturbation faced (see above). Continuous injection needed a new
-capability, `Euler2D::SetInflowProfile(function<Prim2D(coord)>)`: a
-position-dependent inflow state, evaluated per-row/per-column instead of
+at the inflow (`[boundary.left.profile] type="tracer_stripes"`, see "The
+generic scene schema" above), fed *continuously* rather than as a one-time
+initial-condition pulse — a pulse would wash downstream and out of the
+domain long before a 130-time-unit run is over, exactly the same problem
+the shedding-symmetry perturbation faced (see above). Continuous injection
+needed a new capability, `Euler2D::SetInflowProfile(function<Prim2D(coord)>)`:
+a position-dependent inflow state, evaluated per-row/per-column instead of
 once for the whole boundary.
 
 `tools/make_movie.py` renders the tracer as a second panel under vorticity
@@ -349,11 +413,8 @@ sub-stepping (`O(N²)` at fine-enough resolution/low-enough viscosity).
 | `src/kernels_euler1d.hpp` | GLSL compute-shader port of `Euler1D` (same formulas, transliterated) — string-builder style matching `07_grhd`'s kernels files. |
 | `src/Euler2D.{hpp,cpp}` | 2D physics: Strang-split X/Y sweeps reusing `Euler1D`'s line update, the transverse-momentum HLLC extension, the viscous diffusion sub-step, per-side `WallBC` boundary conditions (`Outflow`/`Periodic`/`NoSlipReflective`/`FreeSlipReflective`/`Inflow`) with an optional position-dependent inflow profile, the obstacle cell-masking pass, and the passive scalar tracer field. CPU only. |
 | `src/CompressibleSim.{hpp,cpp}` | `fw::Simulation` wrapper for the 1D shock tube. CPU (`Euler1D`) path only — the GPU kernels are exercised by `--selftest`, not yet a second deck-driven `Simulation`. |
-| `src/CompressibleSim2D.{hpp,cpp}` | `fw::Simulation` wrapper for the 2D four-quadrant Riemann problem. |
-| `src/CompressibleSimChannel.{hpp,cpp}` | `fw::Simulation` wrapper for the viscous Poiseuille channel flow. |
-| `src/CompressibleSimTaylorGreen.{hpp,cpp}` | `fw::Simulation` wrapper for the doubly-periodic Taylor-Green vortex decay. |
-| `src/CompressibleSimCylinder.{hpp,cpp}` | `fw::Simulation` wrapper for cylinder vortex shedding (inflow/outflow/free-slip BCs + an obstacle mask). |
-| `src/main.cpp` | CLI entry point (`--2d`/`--channel`/`--taylor-green`/`--cylinder` select the matching `CompressibleSim*`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
+| `src/CompressibleSimScene.{hpp,cpp}` | The single, generic `fw::Simulation` for every 2D scenario (see "The generic scene schema" above) — grid/physics/boundary/obstacles/initial-condition/probes/tracer, all parsed from deck tables. |
+| `src/main.cpp` | CLI entry point (`--scene` selects `CompressibleSimScene`; bare `--deck` is the 1D `CompressibleSim`) + `--selftest` (HLLC consistency, conservation identities, GPU-vs-CPU cross-check, vortex advection). |
 | `tools/exact_riemann_newtonian.py` | Toro's exact 1D Riemann solver (same one `07_grhd` uses to validate its Newtonian limit). |
 | `tools/plot_shocktube.py` | Final-frame ρ/u/P vs. exact solution, plus the conservation-identity plot (1D). |
 | `tools/plot_riemann2d.py` | Final-frame density/pressure heatmaps (2D). |
