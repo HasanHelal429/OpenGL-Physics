@@ -166,8 +166,15 @@ Full writeup; render the deck movies and validation figures for
 
 ## Progress
 
-- [ ] Phase 1 — 2D field solver + validation
-- [ ] Phase 2 — multigrid + interactive
-- [ ] Phase 3 — 3D Biot-Savart
-- [ ] Phase 4 — Boris pusher
-- [ ] Phase 5 — docs + media
+- [x] Phase 1 — 2D field solver + validation (RB-GS/SOR; `--selftest` MMS
+      ratio 4.000; wire 0.3% vs `μ₀I/2πr`; solenoid 1.9% vs `μ₀K_s`, Neumann BC)
+- [x] Phase 2 — geometric multigrid (W-cycle flat at 8-10 across 64²→1024²,
+      `--mg-scaling`) + interactive `fw::SimApp` view + `--render-check`
+- [x] Phase 3 — GPU Biot-Savart (`--biot-selftest`: loop on-axis 3e-4,
+      Helmholtz centre 3e-5, `d²B/dz²`≈0); slice planes; loop/solenoid/helmholtz
+- [x] Phase 4 — relativistic Boris pusher (`--boris-selftest`: cyclotron r
+      3e-7, `dγ/γ` 6e-16, E×B 1e-5); cyclotron / E×B / magnetic-bottle decks
+- [x] Phase 5 — `docs/SIMULATION.md`; `Studies/magnetostatics/`
+      (`multigrid_scaling`, `helmholtz_uniformity_vs_spacing`); `make_movie.py`
+
+All phases complete.
