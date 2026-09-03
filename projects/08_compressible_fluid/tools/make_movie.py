@@ -1,19 +1,20 @@
 """
-Turn a headless 08_compressible_fluid run into a movie. Always renders the
-vorticity field (dv/dx - du/dy, central differences on the u/v frames),
+Turn a headless 08_compressible_fluid run into a movie. By default renders
+the vorticity field (dv/dx - du/dy, central differences on the u/v frames),
 the field that makes shedding/wake structure visible at a glance in a way
-raw velocity or density don't; if the run also wrote a passive scalar
-tracer field (Prim2D::tracer -- e.g. decks/cylinder_re100.toml and
+raw velocity or density don't; --field density renders density instead,
+which is the more legible choice for a shock-dominated run (e.g.
+decks/riemann2d_config3.toml) where the interesting structure is sharp
+density jumps, not rotation. If the run also wrote a passive scalar tracer
+field (Prim2D::tracer -- e.g. decks/cylinder_re100.toml and
 decks/airfoil_wind_tunnel.toml's inflow dye stripes), a second panel
-renders that too, showing how the
-shed vortices actually mix and roll up fluid from different streamlines --
-vorticity shows where the rotation is, the tracer shows what it's doing to
-the fluid. Works for any --scene 2D run; every obstacle in the deck's
-[[obstacles]] list is drawn (a circle as a solid disk, an airfoil as its
-NACA00xx outline rotated by its angle of attack) so it doesn't show up as a
-raw zero-velocity artifact.
+renders that too (independent of --field), showing how the flow actually
+mixes and rolls up fluid from different streamlines. Works for any --scene
+2D run; every obstacle in the deck's [[obstacles]] list is drawn (a circle
+as a solid disk, an airfoil as its NACA00xx outline rotated by its angle of
+attack) so it doesn't show up as a raw zero-velocity artifact.
 
-    python make_movie.py <results_dir> [--fps 30] [--stride 1] [--vmax V] [--out movie.mp4]
+    python make_movie.py <results_dir> [--field vorticity|density] [--fps 30] [--stride 1] [--vmax V] [--out movie.mp4]
 
 Reads manifest.json + frames/u_*.npy + frames/v_*.npy (+ frames/tracer_*.npy
 if present, + deck.toml's [[obstacles]] tables, if present). Uses imageio
@@ -70,11 +71,19 @@ def naca00xx_outline(center, chord, thickness, angle_deg, n=40):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("results_dir")
+    ap.add_argument("--field", choices=["vorticity", "density"], default="vorticity",
+                     help="primary panel field. vorticity (default) is best for "
+                          "shedding/wake structure; density is more legible for a "
+                          "shock-dominated run (e.g. decks/riemann2d_config3.toml), "
+                          "where vorticity is dominated by any vortical mixing region "
+                          "and the shocks themselves show up only as faint thin lines")
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--vmax", type=float, default=None,
-                     help="vorticity color-scale saturation (symmetric, +-vmax); "
-                          "default: the 99th percentile magnitude over all frames")
+                     help="color-scale saturation: symmetric +-vmax for vorticity, "
+                          "or the upper end of [rho_min, vmax] for density; default: "
+                          "the 99th percentile magnitude (vorticity) or the observed "
+                          "max (density) over a sample of frames")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -82,10 +91,13 @@ def main():
     manifest = json.load(open(os.path.join(d, "manifest.json")))
     u_frames = sorted(glob.glob(os.path.join(d, "frames", "u_*.npy")))[:: args.stride]
     v_frames = sorted(glob.glob(os.path.join(d, "frames", "v_*.npy")))[:: args.stride]
+    rho_frames = sorted(glob.glob(os.path.join(d, "frames", "rho_*.npy")))[:: args.stride]
     tracer_frames = sorted(glob.glob(os.path.join(d, "frames", "tracer_*.npy")))[:: args.stride]
     has_tracer = len(tracer_frames) == len(u_frames) and len(tracer_frames) > 0
     if not u_frames:
         sys.exit("no u_*.npy frames found -- this tool is for --scene 2D runs, not the 1D shock tube")
+    if args.field == "density" and len(rho_frames) != len(u_frames):
+        sys.exit("--field density needs frames/rho_*.npy, matching u_*.npy in count")
 
     nx, ny = manifest["grid"]["nx"], manifest["grid"]["ny"]
     lx, ly = manifest["grid"]["lx"], manifest["grid"]["ly"]
@@ -114,25 +126,30 @@ def main():
         dudy = np.gradient(u, dx, axis=0)
         return dvdx - dudy
 
-    if args.vmax is not None:
-        vmax = args.vmax
+    sample_idx = np.linspace(0, len(u_frames) - 1, min(20, len(u_frames))).astype(int)
+    if args.field == "vorticity":
+        if args.vmax is not None:
+            vmax = args.vmax
+        else:
+            mags = [np.percentile(np.abs(vorticity(np.load(u_frames[i]), np.load(v_frames[i]))), 99.0)
+                    for i in sample_idx]
+            vmax = max(float(np.max(mags)), 1e-6)
+        main_cmap, main_vmin, main_vmax, main_label = "RdBu_r", -vmax, vmax, "vorticity"
     else:
-        sample_idx = np.linspace(0, len(u_frames) - 1, min(20, len(u_frames))).astype(int)
-        mags = []
-        for i in sample_idx:
-            u, v = np.load(u_frames[i]), np.load(v_frames[i])
-            mags.append(np.percentile(np.abs(vorticity(u, v)), 99.0))
-        vmax = max(float(np.max(mags)), 1e-6)
+        rho_max = args.vmax if args.vmax is not None else max(
+            float(np.max([np.load(rho_frames[i]).max() for i in sample_idx])), 1e-6)
+        rho_min = min(float(np.min([np.load(rho_frames[i]).min() for i in sample_idx])), rho_max - 1e-6)
+        main_cmap, main_vmin, main_vmax, main_label = "viridis", rho_min, rho_max, "density"
 
     n_panels = 2 if has_tracer else 1
     fig, axes = plt.subplots(n_panels, 1, figsize=(12, n_panels * 12 * ly / lx + 0.6), dpi=130,
                               squeeze=False)
     axes = axes[:, 0]
-    ax_vort = axes[0]
-    im_vort = ax_vort.imshow(np.zeros((ny, nx)), origin="lower", cmap="RdBu_r", extent=[0, lx, 0, ly],
-                              vmin=-vmax, vmax=vmax)
-    ax_vort.set_ylabel("y"); ax_vort.set_title("vorticity")
-    fig.colorbar(im_vort, ax=ax_vort, label="vorticity", fraction=0.025, pad=0.01)
+    ax_main = axes[0]
+    im_main = ax_main.imshow(np.zeros((ny, nx)), origin="lower", cmap=main_cmap, extent=[0, lx, 0, ly],
+                              vmin=main_vmin, vmax=main_vmax)
+    ax_main.set_ylabel("y"); ax_main.set_title(main_label)
+    fig.colorbar(im_main, ax=ax_main, label=main_label, fraction=0.025, pad=0.01)
 
     im_tracer = None
     if has_tracer:
@@ -142,7 +159,7 @@ def main():
         ax_tracer.set_xlabel("x"); ax_tracer.set_ylabel("y"); ax_tracer.set_title("tracer")
         fig.colorbar(im_tracer, ax=ax_tracer, label="tracer", fraction=0.025, pad=0.01)
     else:
-        ax_vort.set_xlabel("x")
+        ax_main.set_xlabel("x")
 
     for a in axes:
         for obs in obstacles:
@@ -151,7 +168,7 @@ def main():
             else:
                 pts = naca00xx_outline(obs["center"], obs["chord"], obs["thickness"], obs["angle_deg"])
                 a.add_patch(Polygon(pts, closed=True, facecolor="0.3", edgecolor="k", zorder=5))
-    txt = ax_vort.text(0.01, 0.98, "", transform=ax_vort.transAxes, color="k", va="top",
+    txt = ax_main.text(0.01, 0.98, "", transform=ax_main.transAxes, color="k", va="top",
                         fontsize=9, family="monospace",
                         bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=2))
     fig.tight_layout()
@@ -161,9 +178,11 @@ def main():
     substeps = manifest.get("substeps_per_frame", 1)
 
     def update(i):
-        u, v = np.load(u_frames[i]), np.load(v_frames[i])
-        im_vort.set_data(vorticity(u, v))
-        artists = [im_vort, txt]
+        if args.field == "vorticity":
+            im_main.set_data(vorticity(np.load(u_frames[i]), np.load(v_frames[i])))
+        else:
+            im_main.set_data(np.load(rho_frames[i]))
+        artists = [im_main, txt]
         if has_tracer:
             im_tracer.set_data(np.load(tracer_frames[i]))
             artists.append(im_tracer)
