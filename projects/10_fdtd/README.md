@@ -76,7 +76,12 @@ python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle swee
 - [x] Phase 5 -- `--interactive` fw::SimApp view (CPU backend -- fast enough
       at 256^2): live Ez / E-energy / |S| heatmap (M cycles), dielectric tint +
       PEC solid overlay, pan/zoom/gain/gamma, `--render-check <png>`
-- [ ] Phase 6 -- docs + Studies + website media
+- [x] Phase 6 -- `docs/SIMULATION.md`, `Studies/fdtd/numerical_dispersion_vs_resolution`
+      (measured phase velocity matches the analytic Yee dispersion to ~1e-5,
+      grid anisotropy reproduced), `tools/make_movie.py`
+
+TE^z / Brewster (3b) is the one remaining piece -- s-pol is a complete
+single-polarisation validation, so it is optional.
 
 ## Decks
 

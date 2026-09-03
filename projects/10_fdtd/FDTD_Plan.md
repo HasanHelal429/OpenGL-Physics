@@ -158,9 +158,24 @@ since OpenGL windows can't be inspected directly here).
 
 ## Progress
 
-- [ ] Phase 1 — TMz + Mur
-- [ ] Phase 2 — CPML + dipole validation
-- [ ] Phase 3 — materials + Fresnel
-- [ ] Phase 4 — PEC scatterers + patterns
-- [ ] Phase 5 — interactive
-- [ ] Phase 6 — docs + media
+- [x] Phase 1 — TMz Yee core + Mur (`--selftest`: CFL exact at S=1, exact
+      discrete energy to 2e-14, pulse speed 0.995c)
+- [x] Phase 1b — GPU compute backend (`--gpu-selftest` rel 2e-5, ~5.5x)
+- [x] Phase 2 — CPML (`--cpml-selftest` -81 dB) + the 2D Green's-function
+      check (`plot_dipole.py`, 0.9997 complex correlation)
+- [x] Phase 3a — materials + TFSF (1D-aux incident grid, -276/-50 dB) +
+      s-pol Fresnel `R(theta)` < 2% to 70° (`--fresnel-selftest`,
+      `plot_fresnel.py`)
+- [ ] Phase 3b — TEz / Brewster (optional; s-pol is a complete pol. check)
+- [x] Phase 4 — PEC mask + a 2D near-to-far transform; PEC-cylinder
+      scattering vs the Mie series **0.995** (`plot_mie.py`); half-wave
+      dipole pattern (`plot_antenna.py`)
+- [x] Phase 5 — `--interactive` fw::SimApp view (CPU backend) +
+      `--render-check`
+- [x] Phase 6 — `docs/SIMULATION.md`; `Studies/fdtd/numerical_dispersion_
+      vs_resolution` (matches the analytic Yee dispersion to ~1e-5);
+      `make_movie.py`
+
+Merged to master through the `feat-fdtd` phase commits. Note: `courant`
+is the full Courant number S = c dt sqrt(sum 1/dx^2), stable S <= 1 (this
+doc's "S <= 1/sqrt(2)" used the c dt/dx convention).
