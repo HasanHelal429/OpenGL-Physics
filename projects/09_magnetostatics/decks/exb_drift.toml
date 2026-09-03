@@ -1,0 +1,36 @@
+title = "E x B drift"
+
+# Crossed uniform fields: the gyro-centre drifts at v_d = E x B / B^2,
+# independent of charge, mass and speed. Here E = Ey yhat, B = B0 zhat, so
+# v_d = (Ey/B0) xhat. Two charges of opposite sign gyrate in opposite senses
+# but drift together.
+[grid]
+nx = 96
+ny = 96
+lx = 8.0
+ly = 3.0
+
+[physics]
+mu0 = 1.0
+c = 1.0
+
+[background]
+B = [0.0, 0.0, 1.0]
+E = [0.0, 0.05, 0.0]
+
+[time]
+dt = 0.0016
+substeps_per_frame = 40
+frames = 320
+
+[[charge]]
+q_over_m = 1.0
+x0 = [-3.0, 0.0, 0.0]
+v0 = [0.0, 0.12, 0.0]
+color = [1.0, 0.8, 0.25]
+
+[[charge]]
+q_over_m = -1.0
+x0 = [-3.0, 0.6, 0.0]
+v0 = [0.0, 0.12, 0.0]
+color = [0.4, 0.7, 1.0]

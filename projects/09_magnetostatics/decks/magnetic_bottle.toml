@@ -1,0 +1,47 @@
+title = "Magnetic bottle (mirror trap)"
+
+# Two coaxial loops carrying current in the SAME sense, separated by more than
+# the Helmholtz distance: the field is stronger near each coil ("throat") and
+# weaker between them, so a charge with a large enough pitch angle at the
+# centre is reflected back and forth -- a magnetic mirror. With the gyroradius
+# kept well below the bottle length the adiabatic invariant mu = v_perp^2 / B
+# is conserved through each bounce. xz slice (grid axis 1 = the bottle axis z).
+[grid]
+nx = 360
+ny = 360
+lx = 7.0
+ly = 7.0
+plane = "xz"
+
+[physics]
+mu0 = 1.0
+c = 1.0
+
+[time]
+dt = 0.0025
+substeps_per_frame = 30
+frames = 600
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, -1.6]
+axis = [0.0, 0.0, 1.0]
+current = 20.0
+segments = 240
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, 1.6]
+axis = [0.0, 0.0, 1.0]
+current = 20.0
+segments = 240
+
+# released near the centre with a large pitch angle (v_perp > v_par):
+# gyroradius ~ 0.17 << the 1.6 bottle half-length, so mu stays put.
+[[charge]]
+q_over_m = 1.0
+x0 = [0.12, 0.0, 0.0]
+v0 = [0.0, 0.42, 0.42]
+color = [1.0, 0.8, 0.25]

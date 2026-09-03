@@ -1,0 +1,28 @@
+title = "Cyclotron orbit in a uniform B"
+
+# A single charge in a uniform background field B = B0 zhat: a circle of
+# radius r_L = gamma v_perp / (|q/m| B0), period T_c = 2 pi gamma / (|q/m| B0),
+# constant speed. xy slice (the orbit plane).
+[grid]
+nx = 96
+ny = 96
+lx = 3.0
+ly = 3.0
+
+[physics]
+mu0 = 1.0
+c = 1.0
+
+[background]
+B = [0.0, 0.0, 1.0]
+
+[time]
+dt = 0.0016
+substeps_per_frame = 40
+frames = 260
+
+[[charge]]
+q_over_m = 1.0
+x0 = [0.0, 0.0, 0.0]
+v0 = [0.0, 0.35, 0.0]
+color = [1.0, 0.8, 0.25]

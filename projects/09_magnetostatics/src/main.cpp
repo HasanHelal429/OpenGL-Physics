@@ -1,9 +1,12 @@
 #include "BiotSavart.hpp"
+#include "BorisPusher.hpp"
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
 #include "MagnetostaticsSim.hpp"
 #include "Multigrid.hpp"
 #include "SlicePlane.hpp"
+
+#include <glm/glm.hpp>
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -34,6 +37,7 @@ struct Args {
     bool selftest = false;
     bool mgScaling = false;
     bool biotSelftest = false;
+    bool borisSelftest = false;
     std::string renderCheck;   // path for a one-frame offscreen PNG dump
 };
 
@@ -50,6 +54,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--mg-scaling") a.mgScaling = true;
         else if (s == "--biot-selftest") a.biotSelftest = true;
+        else if (s == "--boris-selftest") a.borisSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -270,6 +275,103 @@ bool BiotSelfTest() {
     return ok;
 }
 
+// Relativistic Boris pusher against the analytic single-particle motions:
+// cyclotron radius / period / energy in a uniform B, and the E x B drift.
+bool BorisSelfTest() {
+    bool ok = true;
+    const double c = 1.0;
+
+    // (1) cyclotron: B = B0 zhat, charge released with v_perp -> a circle of
+    //     radius r_L = gamma v_perp / (|q/m| B0), period T_c = 2 pi gamma / (|q/m| B0).
+    {
+        const double qm = 1.0, B0 = 1.0, vperp = 0.3;
+        const double gamma = 1.0 / std::sqrt(1.0 - vperp * vperp / (c * c));
+        const double rL = gamma * vperp / (qm * B0);
+        const double Tc = 2.0 * kPi * gamma / (qm * B0);
+
+        mag::TestCharge p;
+        p.qm = qm;
+        p.x = {0.0, 0.0, 0.0};
+        p.u = {0.0, gamma * vperp, 0.0};
+        const glm::dvec3 E(0.0), B(0.0, 0.0, B0);
+
+        const int perStep = 4000;
+        const double dt = Tc / perStep;
+        const int steps = 5 * perStep;
+
+        glm::dvec3 sum(0.0);
+        double g0 = p.gamma(c), gMax = g0, gMin = g0;
+        std::vector<glm::dvec3> path;
+        path.reserve(steps);
+        for (int s = 0; s < steps; ++s) {
+            mag::BorisPush(p, E, B, dt, c);
+            sum += p.x;
+            path.push_back(p.x);
+            const double g = p.gamma(c);
+            gMax = std::max(gMax, g);
+            gMin = std::min(gMin, g);
+        }
+        const glm::dvec3 centroid = sum / double(steps);
+        double rMean = 0.0, rMin = 1e30, rMax = 0.0;
+        for (const auto& q : path) {
+            const double r = glm::length(q - centroid);
+            rMean += r;
+            rMin = std::min(rMin, r);
+            rMax = std::max(rMax, r);
+        }
+        rMean /= path.size();
+
+        // period: first return near the start after one loop
+        double Tmeas = 0.0;
+        for (int s = perStep / 2; s < steps; ++s)
+            if (glm::length(path[s] - glm::dvec3(0.0)) < 2.0 * rL / perStep * 3) {
+                Tmeas = (s + 1) * dt;
+                break;
+            }
+
+        const double rErr = std::abs(rMean - rL) / rL;
+        const double roundness = (rMax - rMin) / rMean;
+        const double gDrift = (gMax - gMin) / g0;
+        const double tErr = Tmeas > 0 ? std::abs(Tmeas - Tc) / Tc : 1.0;
+        std::printf("  cyclotron:  r %.5f vs %.5f (%.1e)  roundness %.1e  "
+                    "T %.4f vs %.4f (%.1e)  d(gamma)/gamma %.1e\n",
+                    rMean, rL, rErr, roundness, Tmeas, Tc, tErr, gDrift);
+        if (rErr > 2e-3 || roundness > 5e-3 || tErr > 2e-3 || gDrift > 1e-8)
+            ok = false;
+    }
+
+    // (2) E x B drift: guiding centre moves at v_d = E x B / B^2.
+    {
+        const double qm = 1.0, B0 = 1.0, Ey = 0.05;
+        const glm::dvec3 E(0.0, Ey, 0.0), B(0.0, 0.0, B0);
+        const glm::dvec3 vdExact = glm::cross(E, B) / (B0 * B0);   // (+Ey/B0, 0, 0)
+
+        mag::TestCharge p;
+        p.qm = qm;
+        const double Tc = 2.0 * kPi / (qm * B0);
+        const int perStep = 4000;
+        const double dt = Tc / perStep;
+        const int loops = 40;
+
+        // average position over the first and last cyclotron loop -> drift speed
+        glm::dvec3 firstGC(0.0), lastGC(0.0);
+        for (int s = 0; s < loops * perStep; ++s) {
+            mag::BorisPush(p, E, B, dt, c);
+            if (s < perStep) firstGC += p.x / double(perStep);
+            if (s >= (loops - 1) * perStep) lastGC += p.x / double(perStep);
+        }
+        const glm::dvec3 vdMeas =
+            (lastGC - firstGC) / (double(loops - 1) * Tc);
+        const double err = glm::length(vdMeas - vdExact) / glm::length(vdExact);
+        std::printf("  ExB drift:  v_d (%.4f, %.4f) vs (%.4f, %.4f)  rel err %.1e\n",
+                    vdMeas.x, vdMeas.y, vdExact.x, vdExact.y, err);
+        if (err > 1e-2) ok = false;
+    }
+
+    std::printf("boris-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -285,6 +387,9 @@ int main(int argc, char** argv) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
         return BiotSelfTest() ? 0 : 1;
     }
+    if (a.borisSelftest) {
+        return BorisSelfTest() ? 0 : 1;
+    }
 
     if (a.deck.empty()) {
         std::fprintf(stderr,
@@ -294,7 +399,8 @@ int main(int argc, char** argv) {
                      "  09_magnetostatics --deck <f.toml> --render-check <out.png>\n"
                      "  09_magnetostatics --selftest       (field-solver convergence)\n"
                      "  09_magnetostatics --mg-scaling     (multigrid V-cycle scaling)\n"
-                     "  09_magnetostatics --biot-selftest  (GPU Biot-Savart vs analytic)\n");
+                     "  09_magnetostatics --biot-selftest  (GPU Biot-Savart vs analytic)\n"
+                     "  09_magnetostatics --boris-selftest (relativistic pusher vs analytic)\n");
         return 2;
     }
 
@@ -331,6 +437,10 @@ int main(int argc, char** argv) {
         glViewport(0, 0, W, H);
         mag::MagnetostaticsSim sim;
         sim.Configure(deck);
+        // For a particle deck, advance a while so there is a trail to see.
+        const int warm = deck.GetInt("time.substeps_per_frame", 1) *
+                         std::min(deck.GetInt("time.frames", 1), 400);
+        if (warm > 1) sim.Step(warm);
         sim.Render(W, H);
         sim.Render(W, H);   // second frame: field-lines/vbo now populated
         glFinish();
@@ -356,7 +466,7 @@ int main(int argc, char** argv) {
 
     fw::HeadlessOptions opts;
     opts.outDir = a.out;
-    opts.frames = a.frames > 0 ? a.frames : 1;
+    opts.frames = a.frames;      // 0 -> deck [time].frames (1 for the static decks)
     opts.substeps = a.substeps;
     return fw::RunHeadless(sim, deck, opts);
 }

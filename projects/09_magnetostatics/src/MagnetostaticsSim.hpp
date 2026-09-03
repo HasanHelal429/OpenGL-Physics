@@ -1,6 +1,7 @@
 #pragma once
 
 #include "BiotSavart.hpp"
+#include "BorisPusher.hpp"
 #include "FieldSolver.hpp"
 #include "Grid.hpp"
 #include "Multigrid.hpp"
@@ -55,6 +56,11 @@ public:
     const std::vector<double>& Bx() const { return m_Bx; }
     const std::vector<double>& By() const { return m_By; }
 
+    // Read-only access for the Boris selftest and unit checks.
+    void SampleField(const glm::dvec3& r, glm::dvec3& E, glm::dvec3& B) const;
+    const std::vector<TestCharge>& Charges() const { return m_charges; }
+    double LightSpeed() const { return m_c; }
+
 private:
     void UpdateField(bool warmStart = false);   // Poisson solve OR Biot-Savart
     void SolvePoissonPath(bool warmStart);
@@ -63,6 +69,7 @@ private:
     void EnsureRenderResources();
     void RepackField();                       // chosen scalar -> m_fieldScratch
     void RebuildFieldLines();                 // integrate B streamlines -> m_lineVerts
+    void SampleB2D(double x, double y, double& bx, double& by) const;
 
     Grid m_grid;
     double m_mu0 = 1.0;
@@ -89,6 +96,17 @@ private:
     SolveResult m_lastSolve;
     double m_lastSolveMs = 0.0;
 
+    // --- test-particle pusher (Phase 4) --------------------------------
+    std::vector<TestCharge> m_charges;
+    glm::dvec3 m_bgB{0.0};                    // uniform background B
+    glm::dvec3 m_bgE{0.0};                    // uniform background E
+    double m_c = 1.0;
+    double m_dt = 0.0;
+    int m_substepsPerFrame = 1;
+    long m_step = 0;
+    double m_time = 0.0;
+    std::vector<TestCharge> m_chargesInit;    // for Reset()
+
     // --- interactive view (never touched / allocated by the headless path) --
     bool m_renderReady = false;
     fw::Shader m_view;
@@ -96,6 +114,7 @@ private:
     GLuint m_vao = 0;
     GLuint m_fieldBuf = 0;
     GLuint m_lineVao = 0, m_lineVbo = 0;
+    GLuint m_trailVao = 0, m_trailVbo = 0;
     std::vector<float> m_fieldScratch;
     std::vector<float> m_lineVerts;           // xy pairs, GL_LINES
     int m_lineVertCount = 0;
