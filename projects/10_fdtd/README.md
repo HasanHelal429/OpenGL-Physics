@@ -31,6 +31,11 @@ $EXE --selftest         # CFL limit, PEC-box energy conservation, wave speed
 $EXE --gpu-selftest     # GPU compute backend vs the CPU reference
 $EXE --cpml-selftest    # CPML boundary reflection (short vs long domain)
 $EXE --fresnel-selftest # s-pol Fresnel R(theta) via TFSF phasor subtraction
+$EXE --pec-selftest     # PEC cylinder: forward shadow + scattered field
+
+$EXE --deck projects/10_fdtd/decks/cylinder_scatter.toml --out out/cyl
+python projects/10_fdtd/tools/plot_mie.py --exe <binary>      # vs the Mie series
+python projects/10_fdtd/tools/plot_antenna.py out/antenna     # half-wave dipole
 
 $EXE --deck projects/10_fdtd/decks/pulse_mur.toml --out out/pulse [--gpu]
 python projects/10_fdtd/tools/plot_probe.py out/pulse
@@ -62,7 +67,12 @@ python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle swee
       `tools/plot_fresnel.py`: s-pol reflectance R(theta) matches Fresnel to
       < 2% from 0 to 70 deg
 - [ ] Phase 3b -- TEz mode (p-polarisation, Brewster angle)
-- [ ] Phase 4 -- PEC scatterers + radiation patterns
+- [x] Phase 4 -- PEC mask + a 2D near-to-far-field transform. `plot_mie.py`:
+      PEC-cylinder bistatic scattering vs the 2D cylindrical-harmonic (Mie)
+      series -- 0.995 pattern correlation at ka ~ 3.1. `plot_antenna.py`: a
+      centre-fed half-wave PEC dipole -- correct broadside pattern with deep
+      axis nulls (~0.89 vs the idealised thin-wire formula; the rest is the
+      2D fat-strip vs 3D-filament difference)
 - [ ] Phase 5 -- interactive view
 - [ ] Phase 6 -- docs + Studies + website media
 
@@ -74,3 +84,5 @@ python projects/10_fdtd/tools/plot_fresnel.py --exe <binary>   # full angle swee
 | `pulse_box.toml` | same in a closed PEC box (energy-conservation check) |
 | `dipole.toml` | CW line source in a CPML box (2D Green's-function check) |
 | `slab_fresnel.toml` | TFSF plane wave onto a dielectric half-space |
+| `cylinder_scatter.toml` | TFSF plane wave onto a PEC cylinder (Mie check) |
+| `dipole_antenna.toml` | centre-fed half-wave PEC dipole |

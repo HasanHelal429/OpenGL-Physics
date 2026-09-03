@@ -1,0 +1,45 @@
+title = "Driven half-wave PEC dipole -- radiation pattern"
+
+# Two thin PEC arms along y with a one-cell feed gap at the centre, driven by
+# a soft Ez source in the gap; total arm-to-arm length ~ lambda/2. The
+# far-field pattern from a near-to-far transform (tools/plot_antenna.py) is
+# broadside (peak along +/- x, nulls along the dipole axis).
+[grid]
+nx = 320
+ny = 320
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 16
+
+[time]
+steps = 4000
+substeps_per_frame = 5
+
+[output]
+h_fields = true
+
+[[source]]
+kind = "sine"
+x = 160.0
+y = 160.0
+f0 = 0.025          # wavelength 40 cells
+amplitude = 1.0
+ramp_cycles = 5
+
+# arms: 1-cell-wide PEC boxes, y in [150, 159] and [161, 170]  (gap at y=160)
+[[pec]]
+shape = "box"
+x = 160.0
+y = 154.5
+half_x = 0.6
+half_y = 5.0
+
+[[pec]]
+shape = "box"
+x = 160.0
+y = 165.5
+half_x = 0.6
+half_y = 5.0

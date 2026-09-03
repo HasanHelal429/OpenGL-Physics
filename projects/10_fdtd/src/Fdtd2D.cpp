@@ -51,6 +51,7 @@ void Fdtd2D::Configure(const fw::Deck& deck) {
 
     m_totalSteps = deck.GetInt("time.steps", 2000);
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 4);
+    m_outputH = deck.GetBool("output.h_fields", false);
 
     const std::size_t n = static_cast<std::size_t>(m_nx) * m_ny;
     m_ez.assign(n, 0.0);
@@ -497,6 +498,10 @@ void Fdtd2D::SyncFromGpu() {
 void Fdtd2D::Snapshot(fw::OutputWriter& writer) {
     if (m_useGpu) SyncFromGpu();
     writer.WriteField("Ez", m_ez.data(), fw::NpyDtype::F8, m_ny, m_nx);
+    if (m_outputH) {
+        writer.WriteField("Hx", m_hx.data(), fw::NpyDtype::F8, m_ny, m_nx);
+        writer.WriteField("Hy", m_hy.data(), fw::NpyDtype::F8, m_ny, m_nx);
+    }
     writer.WriteScalar("energy", TotalEnergy());
     double ezmax = 0.0;
     for (double v : m_ez) ezmax = std::max(ezmax, std::abs(v));
@@ -517,7 +522,8 @@ fw::SimInfo Fdtd2D::Info() const {
     info.ly = (m_ny - 1) * m_dy;
     info.dt = m_dt;
     info.substepsPerFrame = m_substepsPerFrame;
-    info.frameFields = {"Ez"};
+    info.frameFields = m_outputH ? std::vector<std::string>{"Ez", "Hx", "Hy"}
+                                 : std::vector<std::string>{"Ez"};
     info.diagnostics = {"energy", "Ez_max"};
     for (std::size_t k = 0; k < m_probes.size(); ++k) {
         char name[24];
