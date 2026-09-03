@@ -1,0 +1,89 @@
+title = "Compressible Navier-Stokes -- wind tunnel, NACA0012 airfoil"
+
+# Flow past a symmetric NACA0012 airfoil at a fixed angle of attack, same
+# channel-with-inflow/outflow geometry and rho0/U_inf/mach convention as
+# ../cylinder_re100.toml (see that deck's own comments for why
+# mach=0.2/p0=17.857142857142858 and CFL=0.3 -- unchanged reasoning, just a
+# different obstacle shape). chord=2, Re=rho0*U_inf*chord/mu=100 keeps this
+# in the same well-behaved laminar regime the cylinder deck validated,
+# scaled to the airfoil's own chord rather than a cylinder diameter.
+#
+# Unlike the cylinder deck, this geometry doesn't need an artificial
+# symmetry-breaking perturbation: a nonzero angle of attack already makes
+# the flow top/bottom-asymmetric before the solver ever takes a step (see
+# docs/SIMULATION.md section 6.2 for why the perfectly-symmetric cylinder
+# case needed one and this one doesn't).
+#
+# mu = rho0*U_inf*chord/Re = 1*1*2/100 = 0.02
+# p0 = rho0*(U_inf/mach)^2/gamma = 1*25/1.4 = 17.857142857142858
+[grid]
+nx = 240
+ny = 64
+x_min = 0.0
+x_max = 30.0
+y_min = 0.0
+y_max = 8.0
+
+[physics]
+gamma = 1.4
+mu = 0.02
+conductivity = 0.0
+
+[boundary.left]
+type = "inflow"
+rho = 1.0
+u = 1.0
+v = 0.0
+p = 17.857142857142858
+
+# Dye stripes at the inlet, same convention as cylinder_re100.toml -- lets
+# tools/make_movie.py (and the interactive tracer view) show how the wake
+# rolls up and entrains fluid around the airfoil.
+[boundary.left.profile]
+type = "tracer_stripes"
+stripe_width = 1.0
+
+[boundary.right]
+type = "outflow"
+[boundary.bottom]
+type = "free_slip"
+[boundary.top]
+type = "free_slip"
+
+[[obstacles]]
+shape = "airfoil"
+# center = the LEADING EDGE (not the centroid) -- see
+# CompressibleSimScene.cpp's obstacle parsing. 3 chords downstream of the
+# inlet, vertically centered in the 8-unit-tall channel.
+center = [6.0, 4.0]
+chord = 2.0
+thickness = 0.12   # NACA00xx -- 0.12 = NACA0012, a standard symmetric section
+angle_deg = 8.0    # angle of attack; also adjustable live in --interactive (Up/Down)
+
+[initial_condition]
+type = "uniform"
+rho = 1.0
+u = 1.0
+v = 0.0
+p = 17.857142857142858
+
+# Downstream wake probe, same role as cylinder_re100.toml's -- v here picks
+# up any periodic shedding off the (suction-side) separated shear layer.
+[[probes]]
+name = "probe"
+x = 18.0
+y = 4.0
+
+[output]
+write_tracer = true
+
+# dt fixed at CFL=0.3 (see cylinder_re100.toml's comment on why a lifting
+# body's peak velocity isn't provably bounded by its initial condition the
+# way the Riemann-problem/Poiseuille/Taylor-Green decks' are).
+# frames*substeps_per_frame*dt ~ 300*120*0.0034 =~ 122 time units, enough
+# for the impulsive-start transient to clear and (if the angle is steep
+# enough to separate) a real measurement window for any shedding.
+[time]
+cfl = 0.3
+substeps_per_frame = 120
+frames = 300

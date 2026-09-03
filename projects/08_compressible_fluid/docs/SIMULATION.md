@@ -362,6 +362,48 @@ sizable but physically coherent reduction from the nominal 100. None of
 these individually or together are surprising; a finer grid and a longer
 run are the natural next step to close the gap, not attempted here.
 
+### 6.4 A second obstacle shape: the wind-tunnel airfoil
+
+`decks/airfoil_wind_tunnel.toml` adds `shape="airfoil"` to `[[obstacles]]`
+alongside `circle` — a symmetric NACA00xx section (`CompressibleSimScene::
+IsInsideAirfoil`) evaluated with the standard closed-form thickness
+distribution, `y_t(x) = 5*t*c*(0.2969*sqrt(x/c) - 0.1260*(x/c) -
+0.3516*(x/c)^2 + 0.2843*(x/c)^3 - 0.1015*(x/c)^4)` (Abbott & von Doenhoff's
+open-trailing-edge coefficients), in the airfoil's own body frame (leading
+edge at the origin, chord along +x), then rotated by the angle of attack
+to place it in world coordinates. The point worth naming: this needed
+*zero* changes anywhere in section 6.1's immersed-boundary machinery --
+`Euler2D::SetObstacleMask` only ever asked for a pointwise
+`bool isSolid(x,y)` predicate, and a rotated NACA section is just a
+different predicate to plug in, exactly like a circle's `dx²+dy²<=r²` was.
+Same cell-masking cost, same viscous-diffusion smoothing of the resulting
+no-slip condition, same jagged-Cartesian-staircase tradeoff section 6.1
+already named.
+
+The one genuinely new piece is making the angle of attack a **live**
+parameter rather than a fixed deck value: `CompressibleSimScene` keeps its
+parsed `[[obstacles]]` list around after `Configure()` (not just baked into
+the mask closure and discarded) specifically so `--interactive`'s
+`Up`/`Down` keys can mutate an airfoil's angle and call
+`RebuildObstacleMask()` again mid-run — the same mask-construction logic
+`Configure()` runs once at startup, just re-invoked. This is safe without
+any special-casing: a cell that newly becomes solid gets its velocity
+zeroed from the next step onward by the existing `ApplyObstacleMask`; a
+cell that newly becomes fluid again just continues evolving from rest with
+whatever density/energy it already had, which is exactly the physical
+state a real fluid element at rest has. No reset of the flow field, and no
+recomputation of `dt`, is needed when the angle changes.
+
+Not validated against a reference lift/drag curve (out of scope for this
+addition — the point was demonstrating a second obstacle shape and a live
+geometry control, not an aerodynamic coefficients study); the qualitative
+check that *was* done: at the deck's default 8° angle of attack, the
+vorticity field shows the expected lifting-airfoil signature (a
+negative-vorticity sheet along the suction/upper surface, positive along
+the pressure/lower surface — the near-field bound-circulation pattern any
+positive-lift airfoil should produce), and the tracer field visibly
+deflects around the rotated body rather than passing through it.
+
 ---
 
 ## 7. From four hardcoded scenarios to one data-driven scene schema
