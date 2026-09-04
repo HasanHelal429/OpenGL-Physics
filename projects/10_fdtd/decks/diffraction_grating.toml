@@ -1,0 +1,74 @@
+title = "Diffraction grating (5 slits, TFSF plane wave)"
+
+# Same mechanism as double_slit.toml, generalised from 2 slits to 5 (40-cell
+# period, 10-cell-wide openings) -- a diffraction grating instead of a
+# double slit. The transmitted side fans out into a handful of distinct
+# diffraction orders instead of one continuous fringe pattern, the expected
+# qualitative difference between N=2 (interference) and N>2 (a grating).
+
+[grid]
+nx = 400
+ny = 360
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[tfsf]
+margin = 10
+
+[time]
+steps = 2600
+substeps_per_frame = 6
+
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = 0.05
+amplitude = 1.0
+angle_deg = 0.0
+ramp_cycles = 4
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 47.50
+half_x = 1.5
+half_y = 47.50
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 120.00
+half_x = 1.5
+half_y = 15.00
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 160.00
+half_x = 1.5
+half_y = 15.00
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 200.00
+half_x = 1.5
+half_y = 15.00
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 240.00
+half_x = 1.5
+half_y = 15.00
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 312.50
+half_x = 1.5
+half_y = 47.50

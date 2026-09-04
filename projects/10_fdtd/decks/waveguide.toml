@@ -1,0 +1,46 @@
+title = "Parallel-plate waveguide -- a single guided mode vs. free radiation"
+
+# A CW point source (f0=0.05, wavelength 20 cells) sits just inside a
+# narrow (24-cell, ~1.2-wavelength) channel between two long PEC plates.
+# The channel is narrow enough that only the fundamental guided mode
+# propagates cleanly down it -- a wide channel (tried first at 120 cells)
+# instead supports many modes at once and the interior becomes a messy
+# multi-mode interference pattern, not a clean guided wave. Outside the
+# plates, at the source end, the same source's field still spreads out
+# in ordinary circular free-space wavefronts -- the contrast is the point.
+
+[grid]
+nx = 400
+ny = 200
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[time]
+steps = 3000
+substeps_per_frame = 6
+
+[[source]]
+kind = "sine"
+x = 40.0
+y = 100.0
+f0 = 0.05
+amplitude = 1.0
+ramp_cycles = 4
+
+[[pec]]
+shape = "box"
+x = 220.0
+y = 88.0
+half_x = 200.0
+half_y = 1.5
+
+[[pec]]
+shape = "box"
+x = 220.0
+y = 112.0
+half_x = 200.0
+half_y = 1.5
