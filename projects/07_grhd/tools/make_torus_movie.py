@@ -47,6 +47,8 @@ def main():
                           "linear makes brightness track density directly -- better for judging how much "
                           "mass is actually present, at the cost of a compact high-density feature washing "
                           "out anything an order of magnitude fainter.")
+    ap.add_argument("--no-annotate", action="store_true",
+                    help="suppress the title/frame/time text overlay (for clean web media)")
     args = ap.parse_args()
 
     d = args.results_dir
@@ -129,7 +131,8 @@ def main():
         frame_idx = lo + i
         t = t_col[frame_idx] if frame_idx < len(t_col) else float("nan")
         nan_flag = " -- NaN PRESENT" if np.any(np.isnan(rho)) else ""
-        txt.set_text(f"{manifest.get('title', '')}\nframe {frame_idx}  t={t:.3f}{nan_flag}")
+        if not args.no_annotate:
+            txt.set_text(f"{manifest.get('title', '')}\nframe {frame_idx}  t={t:.3f}{nan_flag}")
         return pcm_r, pcm_l, txt
 
     out = args.out or os.path.join(d, "torus_movie.mp4")

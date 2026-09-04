@@ -42,6 +42,8 @@ def main():
                      help="density brightness curve on the log scale; <1 lifts the dim, "
                           "far-from-the-hole outer disk out of near-invisibility")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-annotate", action="store_true",
+                    help="suppress the title/frame/time text overlay (for clean web media)")
     args = ap.parse_args()
 
     d = args.results_dir
@@ -106,7 +108,8 @@ def main():
         rho = np.load(rho_frames[i]).ravel()
         im.set_data(colorize(rho))
         t = i * substeps * dt
-        txt.set_text(f"{manifest.get('title', '')}\nt = {t:.1f}   frame {i}/{n_frames}")
+        if not args.no_annotate:
+            txt.set_text(f"{manifest.get('title', '')}\nt = {t:.1f}   frame {i}/{n_frames}")
         return im, txt
 
     out = args.out or os.path.join(d, "movie.mp4")

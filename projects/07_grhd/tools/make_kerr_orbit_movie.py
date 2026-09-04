@@ -46,6 +46,8 @@ def main():
     ap.add_argument("--gamma", type=float, default=0.6, help="density brightness curve on the log scale")
     ap.add_argument("--spokes", type=int, default=6, help="number of rotating brightness spokes (visualization aid)")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-annotate", action="store_true",
+                    help="suppress the title/frame/time text overlay (for clean web media)")
     args = ap.parse_args()
 
     d = args.results_dir
@@ -120,7 +122,8 @@ def main():
         rho = np.load(rho_frames[i]).ravel()
         t = i * substeps * dt
         im.set_data(colorize(rho, t))
-        txt.set_text(f"{manifest.get('title', '')}\nt = {t:.1f}   frame {i}/{n_frames}\n"
+        if not args.no_annotate:
+            txt.set_text(f"{manifest.get('title', '')}\nt = {t:.1f}   frame {i}/{n_frames}\n"
                       f"(spokes: rotation aid from Omega(r), not simulated phi-position)")
         return im, txt
 

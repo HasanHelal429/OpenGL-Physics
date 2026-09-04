@@ -71,6 +71,8 @@ def main():
                          "is no physically-derived horizon size to fall back on in general; "
                          "this is a schematic display radius, not a GR calculation")
     ap.add_argument("--out", default=None)
+    ap.add_argument("--no-annotate", action="store_true",
+                    help="suppress the title/frame/time text overlay (for clean web media)")
     args = ap.parse_args()
 
     d = args.results_dir
@@ -190,7 +192,8 @@ def main():
             scat.set_offsets(pm[:, :2])
         scat.set_facecolor(colorize(rp[:, 0]))
         t = i * args.stride * substeps * dt
-        txt.set_text(f"{manifest.get('title','')}\nt = {t:.2f}   frame {i*args.stride}/{manifest.get('frames','?')}")
+        if not args.no_annotate:
+            txt.set_text(f"{manifest.get('title','')}\nt = {t:.2f}   frame {i*args.stride}/{manifest.get('frames','?')}")
         return scat, txt
 
     from matplotlib import animation
