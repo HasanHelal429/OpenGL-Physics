@@ -1,0 +1,34 @@
+title = "Ultra-relativistic circular motion -- synchrotron beaming"
+
+# A charge on a circular orbit at beta = R omega = 0.98 (gamma ~ 5). The
+# radiation collimates into a forward searchlight of half-angle ~ 1/gamma
+# that sweeps around with the particle, and the radiated power scales as
+# gamma^4. Reduce omega toward the cyclotron limit to watch the lobe open
+# back up into the dipole doughnut.
+[domain]
+nx = 480
+ny = 480
+lx = 40.0
+ly = 40.0
+c = 1.0
+eps0 = 1.0
+
+[time]
+dt = 0.02
+steps = 600
+substeps_per_frame = 4
+
+[[charge]]
+q = 1.0
+path = "circular"
+center = [0.0, 0.0, 0.0]
+radius = 3.0
+omega = 0.3267    # beta = R*omega = 0.980, gamma = 5.0
+
+[render_check]
+warm_steps = 220
+
+[render]
+field = "E_mag"
+r_weight = false      # the beam pulse is sharp; log scale reads better than 1/r flattening
+log_scale = true

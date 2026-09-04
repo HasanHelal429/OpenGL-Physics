@@ -96,8 +96,9 @@ private:
     GLuint m_vao = 0, m_fieldBuf = 0;
     std::vector<float> m_fieldScratch;
     int m_viewMode = 0;          // 0 |E|, 1 Ex, 2 Ez, 3 S_radial
-    bool m_logScale = true;
-    float m_zoom = 1.0f, m_gain = 1.0f, m_gamma = 0.5f;
+    bool m_logScale = false;
+    bool m_radWeight = false;    // multiply display by r to flatten the near field
+    float m_zoom = 1.0f, m_gain = 1.0f, m_gamma = 0.8f;
     glm::vec2 m_panPix{0.0f, 0.0f};
     int m_activeCharge = 0;
     std::unique_ptr<fw::TextRenderer> m_text;
