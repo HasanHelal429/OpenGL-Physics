@@ -4,18 +4,20 @@ Analytic two-body inspiral reference (non-relativistic, circular, c = eps0 = 1).
 A bound pair of charges +q, -q with equal mass m on a circular orbit of
 separation d has
 
-    omega^2 = k * 2 q^2 / (m d^3),          k = 1 / 4 pi
+    omega^2 = 2 k q^2 / (m d^3),            k = 1 / 4 pi
     E(d)    = -k q^2 / (2 d)                 (virial: KE = -E, PE = 2E)
 
 and radiates (Larmor dipole, p = q d)
 
-    P(d) = (q omega^2 d)^2 / (6 pi)  = k^2 q^6 * (2/m)^2 / (6 pi d^4).
+    P(d) = (q omega^2 d)^2 / (6 pi)  = (2/3) k^2 q^6 / (pi m^2 d^4).
+
+With dE/dd = k q^2 / (2 d^2), energy balance dE/dt = -P gives
+
+    dd/dt = -P / (dE/dd) = -(4/3) k q^4 / (pi m^2 d^2)   [* 0.5 with --half]
 
 11_retarded_fields' pairwise retarded solver, run without the Abraham-
-Lorentz self-force, carries half of this for the symmetric pair, so pass
---half to match the simulation. dE/dd = k q^2 / (2 d^2) gives
-
-    dd/dt = -P / (dE/dd) = -(2/3) k q^6 (2/m)^2 / (pi d^2)   [* 0.5 if --half]
+Lorentz self-force, carries half of P for the symmetric pair, so --half
+matches the simulation.
 
 Usage:
     python inspiral_ref.py --d0 5 --q 1.5 --m 1 --tmax 400 [--half] [--out FILE]
@@ -27,7 +29,7 @@ import numpy as np
 
 def integrate(d0, q, m, tmax, nsteps, half):
     k = 1.0 / (4.0 * np.pi)
-    fac = (2.0 / 3.0) * k * q**6 * (2.0 / m) ** 2 / np.pi
+    fac = (4.0 / 3.0) * k * q**4 / (np.pi * m**2)
     if half:
         fac *= 0.5
     t = np.linspace(0.0, tmax, nsteps)
