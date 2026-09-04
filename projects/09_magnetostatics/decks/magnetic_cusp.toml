@@ -1,0 +1,51 @@
+title = "Magnetic cusp (opposite-current coil pair)"
+
+# The same two-coil geometry as the validated decks/magnetic_bottle.toml
+# (radius 1, centres at z=+-1.6), just OPPOSITE current instead of the
+# same sense. Same-current coils give a mirror (field weaker at the
+# centre, stronger at each "throat" -- confines a large-pitch-angle
+# charge). Opposite-current coils give a cusp instead: a genuine magnetic
+# null on-axis at the midplane with a saddle-point topology around it, no
+# confinement at all along the axis. The identical test particle that
+# bounces forever in the bottle instead reaches the null region and
+# escapes radially outward through the cusp -- confirmed by render-check
+# (see docs/SIMULATION.md), a direct visual contrast with the bottle
+# using the same solver and the same charge.
+[grid]
+nx = 360
+ny = 360
+lx = 7.0
+ly = 7.0
+plane = "xz"
+
+[physics]
+mu0 = 1.0
+c = 1.0
+
+[time]
+dt = 0.0025
+substeps_per_frame = 30
+frames = 300
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, -1.6]
+axis = [0.0, 0.0, 1.0]
+current = 20.0
+segments = 240
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, 1.6]
+axis = [0.0, 0.0, 1.0]
+current = -20.0
+segments = 240
+
+# same initial condition as decks/magnetic_bottle.toml's trapped particle
+[[charge]]
+q_over_m = 1.0
+x0 = [0.12, 0.0, 0.0]
+v0 = [0.0, 0.42, 0.42]
+color = [1.0, 0.8, 0.25]
