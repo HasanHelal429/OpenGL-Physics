@@ -1,0 +1,49 @@
+title = "GRHD non-equilibrium test -- two-ring collision, a=0.9M, 3x ntheta"
+
+# Same physical setup as decks/kerr_two_rings.toml (see there for the
+# outer/inner ring construction), just ntheta=32->96 (3x) and
+# substeps_per_frame=20->60 (3x, to match: r_min*dtheta is the CFL-limiting
+# grid spacing here, so tripling ntheta shrinks dt by ~3x, and tripling
+# substeps_per_frame keeps the same total physical-time coverage per
+# frame). Regenerate the IC first:
+#   python tools/make_two_ring_ic.py --M 1.0 --a 0.9 --gamma 1.333333 \
+#     --r_in_outer 13.0 --r_center_outer 15.0 --vphi_scale_outer 0.9 \
+#     --r_in_inner 8.0 --r_center_inner 9.5 --vphi_scale_inner 1.0 \
+#     --nr 96 --ntheta 96 --r_min 4.0 --r_max 30.0 --theta_min 0.5 \
+#     --out ic/hires/two_rings_a09_hires.bin
+#
+# Confirmed stable for the full 150-frame run (no NaN). This is the one
+# of three 3x-ntheta re-runs tried that actually survives: the
+# equivalent kerr_torus and kerr_blob_infall re-runs at 3x ntheta both
+# go NaN almost immediately (torus: whole-domain NaN by t~20-30, vs.
+# stable through t=897 at the original ntheta=64; blob: by t~18, vs.
+# t~120 originally) -- confirmed via a direct experiment that a 5x finer
+# timestep (cfl 0.15->0.03) does NOT delay the blowup, so this isn't a
+# CFL/timestepping bug, it's the documented near-horizon instability
+# (docs/SIMULATION.md Sec. 9) triggering much sooner at finer angular
+# resolution. Not investigated further; use the original ntheta=32 decks
+# for those two.
+geometry = "kerr_torus"
+
+[grid]
+nr = 96
+ntheta = 96
+r_min = 4.0
+r_max = 30.0
+theta_min = 0.5
+
+[physics]
+M = 1.0
+a = 0.9
+gamma = 1.333333
+
+[torus]
+ic_file = "ic/hires/two_rings_a09_hires.bin"
+
+[solver]
+cons_to_prim_iters = 40
+
+[time]
+cfl = 0.15
+substeps_per_frame = 60
+frames = 150
