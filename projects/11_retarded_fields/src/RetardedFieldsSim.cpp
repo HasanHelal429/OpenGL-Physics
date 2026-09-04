@@ -163,6 +163,15 @@ void RetardedFieldsSim::SeedOrbits(const fw::Deck& deck) {
     const double diag = std::sqrt(m_lx * m_lx + m_ly * m_ly);
     m_bufferSpan = deck.GetDouble("history.buffer_span",
                                   1.5 * (diag + 4.0 * maxR) / m_c);
+    // Hard floor: the charge-charge retarded query reaches back ~2 maxR / c.
+    // Below that the ring buffer clamps and injects a divergent spurious
+    // force (see Studies/retarded_fields/history_convergence).
+    const double floorSpan = 4.0 * std::max(maxR, 1.0) / m_c;
+    if (m_bufferSpan < floorSpan) {
+        std::printf("[lw] history.buffer_span %.2f below the %.2f floor "
+                    "(2 * pair reach); raising it\n", m_bufferSpan, floorSpan);
+        m_bufferSpan = floorSpan;
+    }
     std::size_t cap = static_cast<std::size_t>(m_bufferSpan / m_dt) + 4;
     cap = std::min<std::size_t>(cap, 400000);
     m_bufCap = cap;
