@@ -76,3 +76,6 @@ python projects/11_retarded_fields/tools/make_movie.py out/insp
 | `dipole_array.toml` | prescribed | two-source interference / array factor |
 | `synchrotron.toml` | prescribed | ultra-relativistic beaming (`beta = 0.98`, gamma = 5) |
 | `two_body_inspiral.toml` | self_consistent | bound `+q / -q` pair spiralling in |
+| `uniform_motion.toml` | prescribed | uniformly moving charge, no radiation -- squashed transverse field |
+| `figure8.toml` | prescribed | Lissajous figure-8 path -- fundamental + first-harmonic radiation |
+| `coulomb_bremsstrahlung.toml` | self_consistent | light charge deflecting past a fixed heavy one (unbound, vs. two_body_inspiral's bound orbit) |
