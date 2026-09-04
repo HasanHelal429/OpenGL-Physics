@@ -39,6 +39,8 @@ def main():
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--stride", type=int, default=1)
     ap.add_argument("--trail", type=int, default=500, help="trail length (frames)")
+    ap.add_argument("--no-annotate", action="store_true",
+                     help="suppress axis labels/ticks and the t= title (for clean web media)")
     args = ap.parse_args()
     d = args.results_dir
 
@@ -75,8 +77,13 @@ def main():
         ax.set_facecolor("#08080c")
     ax.set_xlim(-lx / 2, lx / 2)
     ax.set_ylim(-ly / 2, ly / 2)
-    ax.set_xlabel(ax_a)
-    ax.set_ylabel(ax_b)
+    if args.no_annotate:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    else:
+        ax.set_xlabel(ax_a)
+        ax.set_ylabel(ax_b)
     ax.set_aspect("equal")
     trails = [ax.plot([], [], "-", lw=1.1, color=colors[k])[0] for k in range(nq)]
     heads = [ax.plot([], [], "o", ms=5, mfc="white", mec=colors[k])[0]
@@ -91,7 +98,8 @@ def main():
         for k in range(nq):
             trails[k].set_data(Ax[k][lo:i + 1], Ay[k][lo:i + 1])
             heads[k].set_data([Ax[k][i]], [Ay[k][i]])
-        title.set_text(f"t = {t[i]:.2f}")
+        if not args.no_annotate:
+            title.set_text(f"t = {t[i]:.2f}")
         fig.canvas.draw()
         w, h = fig.canvas.get_width_height()
         buf = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)

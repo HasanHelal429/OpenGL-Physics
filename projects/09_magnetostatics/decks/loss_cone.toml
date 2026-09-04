@@ -1,0 +1,63 @@
+title = "Loss cone: three pitch angles in the same mirror bottle"
+
+# The validated decks/magnetic_bottle.toml field (same two same-current
+# coils), now with three charges of the same speed (0.594) but different
+# pitch angles instead of one. The mirror only traps a particle if its
+# pitch angle at the midplane is steep enough that the field at the
+# throats can still turn it around before it gets there -- the "loss
+# cone" is everything below that critical angle, which escapes straight
+# through instead. Bisected numerically here (headless runs, checking
+# whether |z| ever exceeds the throat position): trapped up to ~34 deg,
+# escaped by ~34.5 deg, for this bottle's throat/centre field ratio.
+#   45 deg (comfortably trapped, same IC as magnetic_bottle.toml) -- |z| stays < 1.1
+#   34 deg (just past the critical angle) -- escapes, but late and slowly (|z| up to ~9)
+#   20 deg (well inside the loss cone) -- escapes promptly and cleanly
+[grid]
+nx = 360
+ny = 360
+lx = 7.0
+ly = 7.0
+plane = "xz"
+
+[physics]
+mu0 = 1.0
+c = 1.0
+
+[time]
+dt = 0.0025
+substeps_per_frame = 30
+frames = 600
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, -1.6]
+axis = [0.0, 0.0, 1.0]
+current = 20.0
+segments = 240
+
+[[coil]]
+shape = "loop"
+radius = 1.0
+center = [0.0, 0.0, 1.6]
+axis = [0.0, 0.0, 1.0]
+current = 20.0
+segments = 240
+
+[[charge]]
+q_over_m = 1.0
+x0 = [0.12, 0.0, 0.0]
+v0 = [0.0, 0.42, 0.42]
+color = [1.0, 0.8, 0.25]
+
+[[charge]]
+q_over_m = 1.0
+x0 = [0.24, 0.0, 0.0]
+v0 = [0.0, 0.3322, 0.4924]
+color = [0.5, 1.0, 0.6]
+
+[[charge]]
+q_over_m = 1.0
+x0 = [0.36, 0.0, 0.0]
+v0 = [0.0, 0.2032, 0.5582]
+color = [0.5, 0.7, 1.0]

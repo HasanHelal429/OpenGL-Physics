@@ -1,0 +1,90 @@
+title = "Toroidal (tokamak-style) coil ring, xy slice"
+
+# 8 loop coils of radius 0.7 arranged around a circle of radius 2.0 in the
+# xy-plane, each coil's own axis tangential to the ring (perpendicular to
+# the local radius, in-plane) -- the standard tokamak toroidal-field-coil
+# arrangement, generalising the existing loop.toml/helmholtz.toml single-
+# and double-coil cases to N coils on a ring. All currents the same sign,
+# so the field concentrates in a roughly toroidal region threading the
+# ring and falls off outside -- confirmed by render-check (see
+# docs/SIMULATION.md); no analytic on-axis check exists for this one the
+# way loop.toml/helmholtz.toml have (no single symmetry axis), so this is
+# a qualitative/visual deck, not a --biot-selftest case.
+
+[grid]
+nx = 500
+ny = 500
+lx = 7.0
+ly = 7.0
+plane = "xy"
+plane_offset = 0.0
+
+[physics]
+mu0 = 1.0
+
+[time]
+frames = 1
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [2.0000, 0.0000, 0.0]
+axis = [0.0000, 1.0000, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [1.4142, 1.4142, 0.0]
+axis = [-0.7071, 0.7071, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [0.0000, 2.0000, 0.0]
+axis = [-1.0000, 0.0000, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [-1.4142, 1.4142, 0.0]
+axis = [-0.7071, -0.7071, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [-2.0000, 0.0000, 0.0]
+axis = [0.0000, -1.0000, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [-1.4142, -1.4142, 0.0]
+axis = [0.7071, -0.7071, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [-0.0000, -2.0000, 0.0]
+axis = [1.0000, -0.0000, 0.0]
+current = 1.0
+segments = 120
+
+[[coil]]
+shape = "loop"
+radius = 0.7
+center = [1.4142, -1.4142, 0.0]
+axis = [0.7071, 0.7071, 0.0]
+current = 1.0
+segments = 120

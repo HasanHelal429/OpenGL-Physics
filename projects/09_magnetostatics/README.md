@@ -68,6 +68,9 @@ All phases complete.
 | `cyclotron.toml` | one charge in uniform B | orbit radius / period / `KE` (pusher: r to 3e-7, `dgamma` 1e-15) |
 | `exb_drift.toml` | two opposite charges, crossed E, B | drift together at `v_d = E x B / B^2` (1e-5) |
 | `magnetic_bottle.toml` | charge in a mirror trap (two like-current loops) | bounces between throats; `mu` conserved bounce-to-bounce ~3.5% |
+| `magnetic_cusp.toml` | same two coils as the bottle, opposite current | null/saddle topology instead of a mirror; trapped-bottle IC escapes through it on the first pass |
+| `loss_cone.toml` | three pitch angles, same bottle field | critical angle found by bisection: trapped to ~34 deg, escaped by ~34.5 deg |
+| `toroidal_ring.toml` | 8 loops arranged tokamak-style on a ring | qualitative -- no single symmetry axis for an analytic check |
 
 ## Solver notes
 
