@@ -27,6 +27,7 @@ struct Args {
     std::string deck, out, renderCheck;
     int steps = 0, substeps = 0;
     bool interactive = false, selftest = false, gpuSelftest = false, cpu = false;
+    bool dynSelftest = false;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -41,6 +42,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--gpu-selftest") a.gpuSelftest = true;
+        else if (s == "--dynamics-selftest") a.dynSelftest = true;
         else if (s == "--cpu") a.cpu = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
@@ -227,12 +229,76 @@ phase = 1.5
     return ok;
 }
 
+// Phase 3 gate: a bound charge pair seeded on the non-radiating circular
+// orbit must hold shape for many periods (the trajectory buffer + cubic
+// lookup inject no spurious force), and the energy budget
+// KE + interaction + radiated must stay constant to a few percent.
+bool DynamicsSelfTest() {
+    const char* dk = R"(
+[domain]
+nx = 32
+ny = 32
+lx = 6.0
+ly = 6.0
+[mode]
+type = "self_consistent"
+seed_orbit = "kepler"
+separation = 6.0
+[time]
+dt = 0.1
+[[charge]]
+q = 1.0
+m = 1.0
+[[charge]]
+q = -1.0
+m = 1.0
+)";
+    lw::RetardedFieldsSim sim;
+    fw::Deck d = fw::Deck::FromString(dk);
+    sim.Configure(d);
+
+    const double d0 = glm::length(sim.ChargePos(0) - sim.ChargePos(1));
+    // Kepler period for this seed: omega^2 = k|q1q2|(m1+m2)/(d^3 m1 m2),
+    // k = 1/4pi. d0 = 6, m = 1, |q| = 1  ->  omega ~ 0.02715, T ~ 231.
+    const double kc = 1.0 / (4.0 * kPi);
+    const double omega = std::sqrt(kc * 2.0 / (d0 * d0 * d0));
+    const double T = 2.0 * kPi / omega;
+    const int periods = 3;
+    const long steps = static_cast<long>(periods * T / sim.Dt());
+
+    double dmin = d0, dmax = d0, errMax = 0.0;
+    for (long n = 0; n < steps; ++n) {
+        sim.Step(1);
+        const double sep = glm::length(sim.ChargePos(0) - sim.ChargePos(1));
+        dmin = std::min(dmin, sep);
+        dmax = std::max(dmax, sep);
+        errMax = std::max(errMax, sim.EnergyError());
+    }
+    const auto b = sim.Energy();
+    const double breathe = (dmax - dmin) / d0;
+    const double decay = (d0 - glm::length(sim.ChargePos(0) - sim.ChargePos(1))) / d0;
+
+    std::printf("  kepler pair, %d periods (T=%.1f, %ld steps):\n", periods, T, steps);
+    std::printf("    separation  d0=%.4f  range [%.4f, %.4f]  breathe %.2f%%  net decay %.2f%%\n",
+                d0, dmin, dmax, 100.0 * breathe, 100.0 * decay);
+    std::printf("    energy  KE=%.3e  PE=%.3e  radiated=%.3e  max |dE/E0| = %.2e\n",
+                b.kinetic, b.interaction, b.radiated, errMax);
+
+    bool ok = true;
+    if (breathe > 0.06) ok = false;       // buffer must not pump the orbit
+    if (errMax > 0.02) ok = false;        // budget closes to 2%
+    if (!(decay > -0.01)) ok = false;     // radiation removes energy: orbit shrinks
+    std::printf("dynamics-selftest: %s\n", ok ? "PASS" : "FAIL");
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
     if (a.selftest) return SelfTest() ? 0 : 1;
     if (a.gpuSelftest) return GpuSelfTest() ? 0 : 1;
+    if (a.dynSelftest) return DynamicsSelfTest() ? 0 : 1;
 
     if (a.deck.empty()) {
         std::fprintf(stderr,

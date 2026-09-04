@@ -19,7 +19,18 @@ namespace {
 glm::dvec3 Vec3(const std::vector<double>& a, glm::dvec3 def) {
     return a.size() == 3 ? glm::dvec3(a[0], a[1], a[2]) : def;
 }
+
+// Relativistic Larmor power: P = (q^2 / 6 pi eps0 c^3) gamma^6
+//   ( |a|^2 - |v x a|^2 / c^2 ).
+double LarmorPower(double q, const glm::dvec3& v, const glm::dvec3& a,
+                   double c, double eps0) {
+    const double b2 = glm::dot(v, v) / (c * c);
+    const double g2 = 1.0 / std::max(1e-12, 1.0 - b2);
+    const double a2 = glm::dot(a, a);
+    const double va2 = glm::dot(glm::cross(v, a), glm::cross(v, a)) / (c * c);
+    return q * q / (6.0 * kPi * eps0 * c * c * c) * g2 * g2 * g2 * (a2 - va2);
 }
+} // namespace
 
 RetardedFieldsSim::~RetardedFieldsSim() {
     for (GLuint b : {m_bE, m_bB, m_bTret, m_fieldBuf})
@@ -46,8 +57,14 @@ void RetardedFieldsSim::Configure(const fw::Deck& deck) {
       m_viewMode = vm == "Ex" ? 1 : vm == "Ez" ? 2
                  : (vm == "S_radial" || vm == "S_mag") ? 3 : 0; }
 
+    const std::string mode = deck.GetString("mode.type", deck.GetString("mode", "prescribed"));
+    m_selfConsistent = (mode == "self_consistent");
+    m_extB = Vec3(deck.GetDoubleArray("external.B0"), glm::dvec3(0.0));
+    m_extE = Vec3(deck.GetDoubleArray("external.E0"), glm::dvec3(0.0));
+
     m_paths.clear();
     m_q.clear();
+    m_mass.clear();
     for (const auto& ct : deck.GetTables("charge")) {
         ChargePath p;
         p.kind = ChargePath::ParseKind(ct.GetString("path", "circular"));
@@ -61,12 +78,14 @@ void RetardedFieldsSim::Configure(const fw::Deck& deck) {
         p.phase = ct.GetDouble("phase", 0.0);
         m_paths.push_back(p);
         m_q.push_back(ct.GetDouble("q", 1.0));
+        m_mass.push_back(ct.GetDouble("m", ct.GetDouble("mass", 1.0)));
     }
     if (m_paths.empty()) {           // a default so a bare deck still runs
         m_paths.push_back(ChargePath{});
         m_q.push_back(1.0);
+        m_mass.push_back(1.0);
     }
-    if (m_paths.size() > 8) { m_paths.resize(8); m_q.resize(8); }
+    if (m_paths.size() > 8) { m_paths.resize(8); m_q.resize(8); m_mass.resize(8); }
     m_pathsInit = m_paths;
 
     const int n = m_nx * m_ny;
@@ -75,14 +94,187 @@ void RetardedFieldsSim::Configure(const fw::Deck& deck) {
 
     m_time = 0.0;
     m_step = 0;
-    std::printf("[lw] %dx%d  domain %.1fx%.1f  %zu charge(s)  dt=%.3g  steps=%ld\n",
-                m_nx, m_ny, m_lx, m_ly, m_paths.size(), m_dt, m_totalSteps);
+    m_radiated = 0.0;
+    m_e0Set = false;
+
+    if (m_selfConsistent) {
+        m_forceCpu = true;            // GPU grid path is prescribed-only for now
+        SeedOrbits(deck);
+    }
+
+    std::printf("[lw] %dx%d  domain %.1fx%.1f  %zu charge(s)  dt=%.3g  steps=%ld  mode=%s\n",
+                m_nx, m_ny, m_lx, m_ly, m_paths.size(), m_dt, m_totalSteps,
+                m_selfConsistent ? "self_consistent" : "prescribed");
+}
+
+void RetardedFieldsSim::SeedOrbits(const fw::Deck& deck) {
+    const auto tables = deck.GetTables("charge");
+    const int nc = static_cast<int>(m_q.size());
+    const double k = 1.0 / (4.0 * kPi * m_eps0);
+
+    m_movers.assign(nc, Mover{});
+    m_buf.assign(nc, TrajectoryBuffer{});
+    std::vector<ChargePath>& seed = m_seed;
+    seed.assign(nc, ChargePath{});             // steady past for the prefill
+
+    // Global seed selection: "kepler" builds a 2-body bound circular orbit
+    // from [mode].separation; otherwise each charge follows its own uniform
+    // drift / fixed point from x0, v0.
+    std::string sorb = deck.GetString("mode.seed_orbit", "uniform");
+    if (!tables.empty()) sorb = tables[0].GetString("seed_orbit", sorb);
+
+    double maxR = 1.0, omega = 0.0;
+    if (sorb == "kepler" && nc == 2) {
+        const double d = deck.GetDouble("mode.separation",
+                                        deck.GetDouble("history.separation", 4.0));
+        const double m1 = m_mass[0], m2 = m_mass[1];
+        const double R1 = d * m2 / (m1 + m2), R2 = d * m1 / (m1 + m2);
+        const double Fmag = k * std::abs(m_q[0] * m_q[1]) / (d * d);
+        omega = std::sqrt(Fmag / (m1 * R1));
+        maxR = std::max(R1, R2);
+        seed[0] = ChargePath{ChargePath::Circular, glm::dvec3(0.0), glm::dvec3(0.0),
+                             R1, R1, omega, 0.0, glm::dvec3(1, 0, 0)};
+        seed[1] = ChargePath{ChargePath::Circular, glm::dvec3(0.0), glm::dvec3(0.0),
+                             R2, R2, omega, kPi, glm::dvec3(1, 0, 0)};
+        std::printf("[lw] kepler seed: d=%.3f  R=(%.3f,%.3f)  omega=%.4f  "
+                    "v=(%.3f,%.3f)  T=%.3f\n",
+                    d, R1, R2, omega, omega * R1, omega * R2, 2.0 * kPi / omega);
+    } else {
+        for (int c = 0; c < nc; ++c) {
+            const glm::dvec3 x0 = c < (int)tables.size()
+                ? Vec3(tables[c].GetDoubleArray("x0"), m_paths[c].center)
+                : m_paths[c].center;
+            const glm::dvec3 v0 = c < (int)tables.size()
+                ? Vec3(tables[c].GetDoubleArray("v0"), glm::dvec3(0.0))
+                : glm::dvec3(0.0);
+            const std::string sc = c < (int)tables.size()
+                ? tables[c].GetString("seed_orbit", sorb) : sorb;
+            ChargePath p;
+            p.kind = (sc == "static") ? ChargePath::Static : ChargePath::Uniform;
+            p.center = x0;
+            p.v0 = (sc == "static") ? glm::dvec3(0.0) : v0;
+            seed[c] = p;
+            maxR = std::max(maxR, glm::length(x0));
+        }
+    }
+
+    // Buffer span: cover the longest retarded lookback an in-domain observer
+    // can need -- domain diagonal plus a few orbit radii of source travel.
+    const double diag = std::sqrt(m_lx * m_lx + m_ly * m_ly);
+    m_bufferSpan = deck.GetDouble("history.buffer_span",
+                                  1.5 * (diag + 4.0 * maxR) / m_c);
+    std::size_t cap = static_cast<std::size_t>(m_bufferSpan / m_dt) + 4;
+    cap = std::min<std::size_t>(cap, 400000);
+    m_bufCap = cap;
+    m_settleSteps = static_cast<long>(cap);
+    LaySeed();
+}
+
+void RetardedFieldsSim::LaySeed() {
+    const int nc = static_cast<int>(m_q.size());
+    m_movers.assign(nc, Mover{});
+    m_buf.assign(nc, TrajectoryBuffer{});
+    for (int c = 0; c < nc; ++c) {
+        const ChargePath sp = m_seed[c];
+        m_buf[c].Init(m_dt, m_bufCap, -m_bufferSpan);
+        m_buf[c].Prefill(0.0, [sp](double t) {
+            return PathSample{sp.r(t), sp.v(t), sp.a(t)};
+        });
+        m_movers[c].x = sp.r(0.0);
+        m_movers[c].qm = m_q[c] / m_mass[c];
+        const glm::dvec3 v = sp.v(0.0);
+        const double g = 1.0 / std::sqrt(std::max(1e-12,
+                              1.0 - glm::dot(v, v) / (m_c * m_c)));
+        m_movers[c].u = g * v;
+    }
+    m_time = 0.0;
+    m_step = 0;
+    m_radiated = 0.0;
+    const EnergyBudget b0 = Energy();          // radiated is 0 here
+    m_e0 = b0.kinetic + b0.interaction;
+    m_e0Set = true;
+}
+
+void RetardedFieldsSim::FieldAt(const glm::dvec3& xp, double t, int skip,
+                                glm::dvec3& E, glm::dvec3& B) const {
+    E = m_extE;
+    B = m_extB;
+    for (int j = 0; j < (int)m_q.size(); ++j) {
+        if (j == skip) continue;
+        const LwResult lr = LwFields(m_buf[j].PathFn_(), xp, t, m_q[j], m_c, m_eps0,
+                                     std::numeric_limits<double>::quiet_NaN());
+        E += lr.E;
+        B += lr.B;
+    }
+}
+
+void RetardedFieldsSim::StepSelfConsistent(int substeps) {
+    const int nc = static_cast<int>(m_q.size());
+    for (int s = 0; s < substeps; ++s) {
+        // Fields on each charge from every other charge's retarded history.
+        std::vector<glm::dvec3> Ei(nc), Bi(nc), acc(nc);
+        for (int i = 0; i < nc; ++i)
+            FieldAt(m_movers[i].x, m_time, i, Ei[i], Bi[i]);
+
+        // Coordinate acceleration (for the buffer) at the pre-push state.
+        for (int i = 0; i < nc; ++i)
+            acc[i] = CoordAccel(m_movers[i], Ei[i], Bi[i], m_c);
+
+        // Radiated energy over this step (relativistic Larmor, midpoint-ish).
+        for (int i = 0; i < nc; ++i)
+            m_radiated += LarmorPower(m_q[i], m_movers[i].v(m_c), acc[i],
+                                      m_c, m_eps0) * m_dt;
+
+        // Push and record.
+        for (int i = 0; i < nc; ++i)
+            BorisPush(m_movers[i], Ei[i], Bi[i], m_dt, m_c);
+        m_time += m_dt;
+        m_step += 1;
+        for (int i = 0; i < nc; ++i) {
+            const glm::dvec3 v = m_movers[i].v(m_c);
+            // recompute a at the new position for the sample we store
+            glm::dvec3 En, Bn;
+            FieldAt(m_movers[i].x, m_time, i, En, Bn);
+            m_buf[i].Push(m_movers[i].x, v, CoordAccel(m_movers[i], En, Bn, m_c));
+        }
+    }
+
+}
+
+RetardedFieldsSim::EnergyBudget RetardedFieldsSim::Energy() const {
+    EnergyBudget b;
+    const double kc = 1.0 / (4.0 * kPi * m_eps0);
+    const int nc = static_cast<int>(m_q.size());
+    for (int i = 0; i < nc; ++i)
+        b.kinetic += m_mass[i] * m_movers[i].keSpecific(m_c);
+    for (int i = 0; i < nc; ++i)
+        for (int j = i + 1; j < nc; ++j) {
+            const double r = glm::length(m_movers[i].x - m_movers[j].x);
+            if (r > 1e-9) b.interaction += kc * m_q[i] * m_q[j] / r;
+        }
+    b.radiated = m_radiated;
+    return b;
+}
+
+double RetardedFieldsSim::EnergyError() const {
+    if (!m_e0Set) return 0.0;
+    const double e = Energy().total();
+    const double denom = std::max(1e-12, std::abs(m_e0));
+    return std::abs(e - m_e0) / denom;
+}
+
+glm::dvec3 RetardedFieldsSim::ChargePos(int c) const {
+    if (m_selfConsistent && c < (int)m_movers.size()) return m_movers[c].x;
+    return m_paths[c].r(m_time);
 }
 
 void RetardedFieldsSim::Reset() {
     m_paths = m_pathsInit;
     m_time = 0.0;
     m_step = 0;
+    m_radiated = 0.0;
+    m_e0Set = false;
+    if (m_selfConsistent && !m_seed.empty()) LaySeed();
     if (m_gpuInit) {
         std::vector<float> sentinel(m_nx * m_ny * m_paths.size(), 1e30f);
         glNamedBufferSubData(m_bTret, 0,
@@ -92,11 +284,14 @@ void RetardedFieldsSim::Reset() {
 }
 
 void RetardedFieldsSim::Step(int substeps) {
+    if (m_selfConsistent) { StepSelfConsistent(substeps); return; }
     m_time += m_dt * substeps;
     m_step += substeps;
 }
 
 PathFn RetardedFieldsSim::PathFor(int c) const {
+    if (m_selfConsistent && c < (int)m_buf.size())
+        return m_buf[c].PathFn_();
     const ChargePath p = m_paths[c];
     return [p](double tau) {
         return PathSample{p.r(tau), p.v(tau), p.a(tau)};
@@ -221,6 +416,28 @@ void RetardedFieldsSim::Snapshot(fw::OutputWriter& writer) {
     }
     writer.WriteScalar("E_max", emax);
     writer.WriteScalar("S_radial_sum", srsum);
+
+    if (m_selfConsistent) {
+        const EnergyBudget b = Energy();
+        writer.WriteScalar("KE", b.kinetic);
+        writer.WriteScalar("PE_interaction", b.interaction);
+        writer.WriteScalar("E_radiated", b.radiated);
+        writer.WriteScalar("E_total", b.total());
+        writer.WriteScalar("energy_error", EnergyError());
+        const int nc = static_cast<int>(m_q.size());
+        if (nc >= 2) {
+            writer.WriteScalar("separation",
+                               glm::length(m_movers[0].x - m_movers[1].x));
+        }
+        for (int c = 0; c < nc && c < 4; ++c) {
+            const glm::dvec3 p = m_movers[c].x;
+            const glm::dvec3 v = m_movers[c].v(m_c);
+            writer.WriteScalar("x" + std::to_string(c), p.x);
+            writer.WriteScalar("y" + std::to_string(c), p.y);
+            writer.WriteScalar("gamma" + std::to_string(c), m_movers[c].gamma(m_c));
+            writer.WriteScalar("speed" + std::to_string(c), glm::length(v));
+        }
+    }
 }
 
 fw::SimInfo RetardedFieldsSim::Info() const {
@@ -234,6 +451,10 @@ fw::SimInfo RetardedFieldsSim::Info() const {
     info.substepsPerFrame = m_substepsPerFrame;
     info.frameFields = {"Ex", "Ey", "Ez", "E_mag", "Bz", "S_radial"};
     info.diagnostics = {"E_max", "S_radial_sum"};
+    if (m_selfConsistent) {
+        info.diagnostics = {"E_max", "S_radial_sum", "KE", "PE_interaction",
+                            "E_radiated", "E_total", "energy_error", "separation"};
+    }
     return info;
 }
 
@@ -300,9 +521,15 @@ void RetardedFieldsSim::RepackField() {
     // r measured from the centroid of the active charge's orbit -- close
     // enough to the true source for the 1/r flattening to work everywhere
     // outside the near zone.
+    const int nc = NumCharges();
+    std::vector<glm::dvec2> src(nc);
     glm::dvec2 centroid(0.0);
-    for (const auto& p : m_paths) centroid += glm::dvec2(p.center.x, p.center.y);
-    centroid /= static_cast<double>(m_paths.size());
+    for (int c = 0; c < nc; ++c) {
+        const glm::dvec3 p = ChargePos(c);
+        src[c] = glm::dvec2(p.x, p.y);
+        centroid += src[c];
+    }
+    centroid /= static_cast<double>(nc);
     const double rNear = std::max(1.0, 3.0 * m_lx / m_nx);   // hide each near zone
     for (int j = 0; j < m_ny; ++j) {
         for (int i = 0; i < m_nx; ++i) {
@@ -316,9 +543,8 @@ void RetardedFieldsSim::RepackField() {
             }
             if (m_radWeight) {
                 double rMin = 1e30;
-                for (const auto& p : m_paths)
-                    rMin = std::min(rMin, std::hypot(x(i) - p.center.x,
-                                                     y(j) - p.center.y));
+                for (const auto& s : src)
+                    rMin = std::min(rMin, std::hypot(x(i) - s.x, y(j) - s.y));
                 const double rc = std::hypot(x(i) - centroid.x, y(j) - centroid.y);
                 v = rMin < rNear ? 0.0f : v * (float)rc;
             }
@@ -373,24 +599,53 @@ void RetardedFieldsSim::Render(int fbWidth, int fbHeight) {
     glBindVertexArray(0);
 
     static const char* kNames[4] = {"|E|", "Ex", "Ez", "S_radial"};
+    const int nc = NumCharges();
     double gmax = 1.0;
-    for (int c = 0; c < (int)m_paths.size(); ++c) {
-        const glm::dvec3 v = m_paths[c].v(m_time);
+    for (int c = 0; c < nc; ++c) {
+        const glm::dvec3 v = m_selfConsistent ? m_movers[c].v(m_c)
+                                              : m_paths[c].v(m_time);
         gmax = std::max(gmax, 1.0 / std::sqrt(std::max(1e-9,
                         1.0 - glm::dot(v, v) / (m_c * m_c))));
     }
-    const ChargePath& ap = m_paths[m_activeCharge];
     char line[256];
     std::snprintf(line, sizeof(line),
                   "field: %s (M)   log %s (L)   r-weight %s (R)   t=%.2f",
                   kNames[m_viewMode], m_logScale ? "on" : "off",
                   m_radWeight ? "on" : "off", m_time);
     char line2[256];
-    std::snprintf(line2, sizeof(line2),
-                  "charge %d/%zu (Tab)   omega=%.3f (,/.)   radius=%.2f (;/')"
-                  "   gamma_max=%.2f",
-                  m_activeCharge + 1, m_paths.size(), ap.omega, ap.radius, gmax);
+    if (m_selfConsistent) {
+        const EnergyBudget b = Energy();
+        const double sep = nc >= 2
+            ? glm::length(m_movers[0].x - m_movers[1].x) : 0.0;
+        std::snprintf(line2, sizeof(line2),
+                      "self-consistent  %d charges   separation=%.3f   "
+                      "gamma_max=%.3f   dE/E0=%.1e   E_rad=%.2e",
+                      nc, sep, gmax, EnergyError(), b.radiated);
+    } else {
+        const ChargePath& ap = m_paths[m_activeCharge];
+        std::snprintf(line2, sizeof(line2),
+                      "charge %d/%d (Tab)   omega=%.3f (,/.)   radius=%.2f (;/')"
+                      "   gamma_max=%.2f",
+                      m_activeCharge + 1, nc, ap.omega, ap.radius, gmax);
+    }
     m_text->SetViewport(fbWidth, fbHeight);
+
+    // charge markers
+    for (int c = 0; c < nc; ++c) {
+        const glm::dvec3 pw = ChargePos(c);
+        const float fx = (float)pw.x * pixPerUnit + 0.5f * fbWidth + m_panPix.x;
+        const float fy = (float)pw.y * pixPerUnit + 0.5f * fbHeight + m_panPix.y;
+        const float tx = fx, ty = fbHeight - fy;
+        if (tx < -20 || tx > fbWidth + 20 || ty < -20 || ty > fbHeight + 20)
+            continue;
+        const double qc = m_q.empty() ? 1.0 : m_q[c];
+        const char* mk = qc >= 0.0 ? "(+)" : "(-)";
+        const glm::vec4 col = qc >= 0.0 ? glm::vec4(1.0f, 0.9f, 0.5f, 1.0f)
+                                        : glm::vec4(0.55f, 0.8f, 1.0f, 1.0f);
+        m_text->Draw(m_font, mk, glm::vec2(tx - 11, ty + 7), glm::vec4(0, 0, 0, 0.7f));
+        m_text->Draw(m_font, mk, glm::vec2(tx - 12, ty + 6), col);
+    }
+
     for (int p = 0; p < 2; ++p) {
         const char* s = p == 0 ? line : line2;
         const float yy = 24.0f + p * 20.0f;
@@ -410,26 +665,32 @@ void RetardedFieldsSim::OnViewInput(const fw::ViewInput& in) {
 
 void RetardedFieldsSim::OnKey(int key, int action) {
     (void)action;
-    ChargePath& p = m_paths[m_activeCharge];
     const double step = 0.03 * std::min(m_lx, m_ly);
     switch (key) {
-    case 'M': m_viewMode = (m_viewMode + 1) % 4; break;
-    case 'L': m_logScale = !m_logScale; break;
-    case 'R': m_radWeight = !m_radWeight; break;
-    case '[': m_gain = std::max(0.1f, m_gain * 0.8f); break;
-    case ']': m_gain = std::min(30.0f, m_gain * 1.25f); break;
-    case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break;
-    case '=': m_gamma = std::min(2.0f, m_gamma + 0.05f); break;
+    case 'M': m_viewMode = (m_viewMode + 1) % 4; return;
+    case 'L': m_logScale = !m_logScale; return;
+    case 'R': m_radWeight = !m_radWeight; return;
+    case '[': m_gain = std::max(0.1f, m_gain * 0.8f); return;
+    case ']': m_gain = std::min(30.0f, m_gain * 1.25f); return;
+    case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); return;
+    case '=': m_gamma = std::min(2.0f, m_gamma + 0.05f); return;
+    case '\t':
+        m_activeCharge = (m_activeCharge + 1) % NumCharges();
+        return;
+    case '0':
+        m_zoom = 1.0f; m_panPix = {0, 0}; m_gain = 1.0f; m_gamma = 0.8f;
+        return;
+    default: break;
+    }
+
+    if (m_selfConsistent) return;   // charges are dynamical -- no live editing
+
+    ChargePath& p = m_paths[m_activeCharge];
+    switch (key) {
     case ',': p.omega *= 0.92; break;
     case '.': p.omega *= 1.08; break;
     case ';': p.radius = std::max(0.05, p.radius * 0.92); break;
     case '\'': p.radius *= 1.08; break;
-    case '\t':
-        m_activeCharge = (m_activeCharge + 1) % static_cast<int>(m_paths.size());
-        break;
-    case '0':
-        m_zoom = 1.0f; m_panPix = {0, 0}; m_gain = 1.0f; m_gamma = 0.8f;
-        break;
     case GLFW_KEY_LEFT:  p.center.x -= step; break;
     case GLFW_KEY_RIGHT: p.center.x += step; break;
     case GLFW_KEY_DOWN:  p.center.y -= step; break;

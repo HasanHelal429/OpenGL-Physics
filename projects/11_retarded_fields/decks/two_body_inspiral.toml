@@ -1,0 +1,44 @@
+title = "Two-body inspiral -- radiative orbital decay"
+
+# A bound pair of opposite charges seeded on the Newtonian circular orbit.
+# The mutual interaction is the *retarded* Lienard-Wiechert field, so the
+# lag in each partner's field does negative work on the other: the orbit
+# radiates, loses energy and spirals in, exactly as a gravitational binary
+# does through gravitational waves. The energy budget
+#   KE + interaction PE + integrated radiated power
+# is written to diagnostics.csv every frame and should hold constant.
+[domain]
+nx = 360
+ny = 360
+lx = 40.0
+ly = 40.0
+c = 1.0
+eps0 = 1.0
+
+[mode]
+type = "self_consistent"
+seed_orbit = "kepler"
+separation = 5.0
+
+[history]
+# buffer span defaults to 1.5 (diag + 4 R) / c; override if you shrink the box
+
+[time]
+dt = 0.08
+steps = 4000
+substeps_per_frame = 10
+
+[[charge]]
+q = 1.5
+m = 1.0
+
+[[charge]]
+q = -1.5
+m = 1.0
+
+[render]
+field = "E_mag"
+r_weight = true
+
+[render_check]
+warm_steps = 1600
