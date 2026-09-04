@@ -40,6 +40,12 @@ void RetardedFieldsSim::Configure(const fw::Deck& deck) {
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 1);
     m_title = deck.GetString("title", "Lienard-Wiechert radiated fields");
 
+    m_radWeight = deck.GetBool("render.r_weight", false);
+    m_logScale = deck.GetBool("render.log_scale", false);
+    { const std::string vm = deck.GetString("render.field", "E_mag");
+      m_viewMode = vm == "Ex" ? 1 : vm == "Ez" ? 2
+                 : (vm == "S_radial" || vm == "S_mag") ? 3 : 0; }
+
     m_paths.clear();
     m_q.clear();
     for (const auto& ct : deck.GetTables("charge")) {
@@ -291,12 +297,32 @@ void RetardedFieldsSim::EnsureRenderResources() {
 
 void RetardedFieldsSim::RepackField() {
     const int n = m_nx * m_ny;
-    for (int k = 0; k < n; ++k) {
-        switch (m_viewMode) {
-        case 1:  m_fieldScratch[k] = (float)m_Ex[k]; break;
-        case 2:  m_fieldScratch[k] = (float)m_Ez[k]; break;
-        case 3:  m_fieldScratch[k] = (float)m_Sr[k]; break;
-        default: m_fieldScratch[k] = (float)m_Emag[k]; break;
+    // r measured from the centroid of the active charge's orbit -- close
+    // enough to the true source for the 1/r flattening to work everywhere
+    // outside the near zone.
+    glm::dvec2 centroid(0.0);
+    for (const auto& p : m_paths) centroid += glm::dvec2(p.center.x, p.center.y);
+    centroid /= static_cast<double>(m_paths.size());
+    const double rNear = std::max(1.0, 3.0 * m_lx / m_nx);   // hide each near zone
+    for (int j = 0; j < m_ny; ++j) {
+        for (int i = 0; i < m_nx; ++i) {
+            const std::size_t k = idx(i, j);
+            float v;
+            switch (m_viewMode) {
+            case 1:  v = (float)m_Ex[k]; break;
+            case 2:  v = (float)m_Ez[k]; break;
+            case 3:  v = (float)m_Sr[k]; break;
+            default: v = (float)m_Emag[k]; break;
+            }
+            if (m_radWeight) {
+                double rMin = 1e30;
+                for (const auto& p : m_paths)
+                    rMin = std::min(rMin, std::hypot(x(i) - p.center.x,
+                                                     y(j) - p.center.y));
+                const double rc = std::hypot(x(i) - centroid.x, y(j) - centroid.y);
+                v = rMin < rNear ? 0.0f : v * (float)rc;
+            }
+            m_fieldScratch[k] = v;
         }
     }
     glNamedBufferSubData(m_fieldBuf, 0, n * sizeof(float), m_fieldScratch.data());
@@ -307,12 +333,22 @@ void RetardedFieldsSim::Render(int fbWidth, int fbHeight) {
     ComputeField();
     RepackField();
 
+    // Normalisation: with r-weighting on, a few cells clinging to a masked
+    // near zone shouldn't set the whole scale, so use the 99.5th percentile
+    // of |field|. Without it (raw 1/r^2, log scale) the near-field maximum is
+    // what the log compression is meant to tame -- keep the true max.
     const bool signedMode = m_viewMode != 0;
     float scale = 0.0f;
-    if (signedMode)
+    if (m_radWeight) {
+        std::vector<float> mag(m_fieldScratch.size());
+        for (std::size_t k = 0; k < mag.size(); ++k)
+            mag[k] = std::abs(m_fieldScratch[k]);
+        const std::size_t q = static_cast<std::size_t>(0.995 * (mag.size() - 1));
+        std::nth_element(mag.begin(), mag.begin() + q, mag.end());
+        scale = mag[q];
+    } else {
         for (float v : m_fieldScratch) scale = std::max(scale, std::abs(v));
-    else
-        for (float v : m_fieldScratch) scale = std::max(scale, v);
+    }
     if (scale < 1e-30f) scale = 1.0f;
 
     const float pixPerUnit =
@@ -343,14 +379,24 @@ void RetardedFieldsSim::Render(int fbWidth, int fbHeight) {
         gmax = std::max(gmax, 1.0 / std::sqrt(std::max(1e-9,
                         1.0 - glm::dot(v, v) / (m_c * m_c))));
     }
-    char line[192];
+    const ChargePath& ap = m_paths[m_activeCharge];
+    char line[256];
     std::snprintf(line, sizeof(line),
-                  "field: %s (M)   log %s (L)   t=%.2f   %zu charge(s)  gamma_max=%.2f",
-                  kNames[m_viewMode], m_logScale ? "on" : "off", m_time,
-                  m_paths.size(), gmax);
+                  "field: %s (M)   log %s (L)   r-weight %s (R)   t=%.2f",
+                  kNames[m_viewMode], m_logScale ? "on" : "off",
+                  m_radWeight ? "on" : "off", m_time);
+    char line2[256];
+    std::snprintf(line2, sizeof(line2),
+                  "charge %d/%zu (Tab)   omega=%.3f (,/.)   radius=%.2f (;/')"
+                  "   gamma_max=%.2f",
+                  m_activeCharge + 1, m_paths.size(), ap.omega, ap.radius, gmax);
     m_text->SetViewport(fbWidth, fbHeight);
-    m_text->Draw(m_font, line, glm::vec2(13, 25), glm::vec4(0, 0, 0, 0.55f));
-    m_text->Draw(m_font, line, glm::vec2(12, 24), glm::vec4(1, 1, 0.85f, 0.95f));
+    for (int p = 0; p < 2; ++p) {
+        const char* s = p == 0 ? line : line2;
+        const float yy = 24.0f + p * 20.0f;
+        m_text->Draw(m_font, s, glm::vec2(13, yy + 1), glm::vec4(0, 0, 0, 0.55f));
+        m_text->Draw(m_font, s, glm::vec2(12, yy), glm::vec4(1, 1, 0.85f, 0.95f));
+    }
     glEnable(GL_DEPTH_TEST);
 }
 
@@ -369,6 +415,7 @@ void RetardedFieldsSim::OnKey(int key, int action) {
     switch (key) {
     case 'M': m_viewMode = (m_viewMode + 1) % 4; break;
     case 'L': m_logScale = !m_logScale; break;
+    case 'R': m_radWeight = !m_radWeight; break;
     case '[': m_gain = std::max(0.1f, m_gain * 0.8f); break;
     case ']': m_gain = std::min(30.0f, m_gain * 1.25f); break;
     case '-': m_gamma = std::max(0.2f, m_gamma - 0.05f); break;
@@ -381,7 +428,7 @@ void RetardedFieldsSim::OnKey(int key, int action) {
         m_activeCharge = (m_activeCharge + 1) % static_cast<int>(m_paths.size());
         break;
     case '0':
-        m_zoom = 1.0f; m_panPix = {0, 0}; m_gain = 1.0f; m_gamma = 0.5f;
+        m_zoom = 1.0f; m_panPix = {0, 0}; m_gain = 1.0f; m_gamma = 0.8f;
         break;
     case GLFW_KEY_LEFT:  p.center.x -= step; break;
     case GLFW_KEY_RIGHT: p.center.x += step; break;

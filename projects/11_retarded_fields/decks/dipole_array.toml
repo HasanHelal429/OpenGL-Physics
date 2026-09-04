@@ -1,0 +1,44 @@
+title = "Two-element dipole array -- interference"
+
+# Two identical oscillators driven in phase, separated along x by d = 5.2
+# (~ lambda/2 for omega = 0.6, lambda ~ 10.5). The far field is the single-
+# element doughnut times an array factor cos(k d/2 sin theta_x): a broadside
+# main lobe with grating side lobes along x. Flip one charge's phase to pi to
+# switch to an end-fire pattern.
+[domain]
+nx = 420
+ny = 420
+lx = 48.0
+ly = 48.0
+c = 1.0
+eps0 = 1.0
+
+[time]
+dt = 0.04
+steps = 400
+substeps_per_frame = 4
+
+[[charge]]
+q = 1.0
+path = "linear_oscillator"
+center = [-2.6, 0.0, 0.0]
+axis = [0.0, 1.0, 0.0]
+amplitude = 1.2
+omega = 0.6
+phase = 0.0
+
+[[charge]]
+q = 1.0
+path = "linear_oscillator"
+center = [2.6, 0.0, 0.0]
+axis = [0.0, 1.0, 0.0]
+amplitude = 1.2
+omega = 0.6
+phase = 0.0
+
+[render_check]
+warm_steps = 120
+
+[render]
+field = "E_mag"
+r_weight = true
