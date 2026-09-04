@@ -2,8 +2,9 @@ title = "Oscillating charge -- dipole radiation lobes"
 
 # A charge driven sinusoidally along y. Far from the source the acceleration
 # (radiation) term dominates and the |E| pattern shows the classic sin^2(theta)
-# doughnut: nulls along the oscillation axis, maxima broadside. Wavelength
-# lambda = 2 pi c / omega ~ 10.5 here, so the box holds several wavelengths.
+# doughnut: nulls along the oscillation axis, maxima broadside. Peak
+# beta = A omega ~ 0.32 -- the lobes tip slightly forward but still read as
+# the textbook dipole. Wavelength lambda = 2 pi c / omega ~ 15.7 here.
 [domain]
 nx = 420
 ny = 420
@@ -22,8 +23,8 @@ q = 1.0
 path = "linear_oscillator"
 center = [0.0, 0.0, 0.0]
 axis = [0.0, 1.0, 0.0]
-amplitude = 1.2
-omega = 0.6
+amplitude = 0.8
+omega = 0.4
 
 [render_check]
 warm_steps = 120
