@@ -463,6 +463,14 @@ fw::SimInfo RetardedFieldsSim::Info() const {
     if (m_selfConsistent) {
         info.diagnostics = {"E_max", "S_radial_sum", "KE", "PE_interaction",
                             "E_radiated", "E_total", "energy_error", "separation"};
+        const int nc = std::min(4, NumCharges());
+        for (int c = 0; c < nc; ++c) {
+            const std::string s = std::to_string(c);
+            info.diagnostics.push_back("x" + s);
+            info.diagnostics.push_back("y" + s);
+            info.diagnostics.push_back("gamma" + s);
+            info.diagnostics.push_back("speed" + s);
+        }
     }
     return info;
 }
