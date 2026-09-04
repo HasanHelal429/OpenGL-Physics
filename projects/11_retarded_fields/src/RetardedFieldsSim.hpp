@@ -2,6 +2,8 @@
 
 #include "ChargePath.hpp"
 #include "LwFields.hpp"
+#include "Pusher.hpp"
+#include "TrajectoryBuffer.hpp"
 
 #include "framework/ComputeShader.hpp"
 #include "framework/Shader.hpp"
@@ -53,6 +55,17 @@ public:
     double LightSpeed() const { return m_c; }
     double Eps0() const { return m_eps0; }
 
+    // Self-consistent dynamics (Phase 3).
+    bool SelfConsistent() const { return m_selfConsistent; }
+    struct EnergyBudget {
+        double kinetic = 0.0, interaction = 0.0, radiated = 0.0;
+        double total() const { return kinetic + interaction + radiated; }
+    };
+    EnergyBudget Energy() const;
+    double EnergyError() const;            // |E(t) - E(0)| / |E(0)|
+    glm::dvec3 ChargePos(int c) const;
+    int NumCharges() const { return static_cast<int>(m_q.size()); }
+
 private:
     void EnsureGpu();
     void EnsureRenderResources();
@@ -70,6 +83,26 @@ private:
     std::vector<ChargePath> m_paths;
     std::vector<ChargePath> m_pathsInit;
     std::vector<double> m_q;
+
+    // Self-consistent dynamics
+    bool m_selfConsistent = false;
+    std::vector<Mover> m_movers;
+    std::vector<double> m_mass;
+    std::vector<TrajectoryBuffer> m_buf;
+    glm::dvec3 m_extB{0.0}, m_extE{0.0};
+    double m_bufferSpan = 0.0;
+    double m_radiated = 0.0;               // time-integrated radiated energy
+    double m_e0 = 0.0;                     // total energy at t = 0
+    bool m_e0Set = false;
+    long m_settleSteps = 0;                // steps before diagnostics trust the budget
+    std::vector<ChargePath> m_seed;        // steady past used for prefill / Reset
+    std::size_t m_bufCap = 0;
+
+    void SeedOrbits(const fw::Deck& deck);
+    void LaySeed();                        // (re)fill buffers + movers from m_seed
+    void StepSelfConsistent(int substeps);
+    void FieldAt(const glm::dvec3& xp, double t, int skip,
+                 glm::dvec3& E, glm::dvec3& B) const;
 
     double m_time = 0.0;
     long m_step = 0;

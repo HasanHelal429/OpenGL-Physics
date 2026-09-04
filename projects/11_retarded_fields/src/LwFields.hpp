@@ -30,7 +30,7 @@ inline double RetardedTime(const PathFn& path, const glm::dvec3& x, double t,
     auto g = [&](double tr) {
         return c * (t - tr) - glm::length(x - path(tr).r);
     };
-    while (g(tLo) <= 0.0) {
+    for (int guard = 0; g(tLo) <= 0.0 && guard < 80; ++guard) {
         window *= 2.0;
         tLo = t - window;
     }

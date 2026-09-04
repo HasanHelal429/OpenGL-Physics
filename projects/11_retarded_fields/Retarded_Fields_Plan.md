@@ -157,8 +157,8 @@ animation).
 
 ## Progress
 
-- [ ] Phase 1 — GPU LW field grid
-- [ ] Phase 2 — interactive prescribed
-- [ ] Phase 3 — self-consistent dynamics
+- [x] Phase 1 — GPU LW field grid
+- [x] Phase 2 — interactive prescribed
+- [x] Phase 3 — self-consistent dynamics
 - [ ] Phase 4 — radiation validation
 - [ ] Phase 5 — docs + media
