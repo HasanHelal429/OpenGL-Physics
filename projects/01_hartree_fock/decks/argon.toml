@@ -1,0 +1,17 @@
+title = "Argon - Kohn-Sham LDA"
+
+# The canonical closed-shell demo (matches the Python solver's scf_movie.py
+# reference animation). Converges to E_total ~ -525.925 Ha (LDA).
+
+[atom]
+Z = 18
+method = "lda"
+
+[scf]
+max_iter = 200
+mix = 0.3
+tol_e = 1e-6
+tol_n = 1e-5
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

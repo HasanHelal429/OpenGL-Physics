@@ -28,6 +28,10 @@ framework/          Shared library ("physgl"):
 projects/            One executable per simulation. Numbered by creation order.
   00_hello_triangle/  Sanity-check — spinning triangle + ImGui overlay.
   01_hartree_fock/    Atomic Hartree-Fock-Slater / Kohn-Sham LDA SCF solver.
+                       Original ImGui explorer (--interactive) plus a deck-driven
+                       headless path (--deck, --selftest) and tools/ for the
+                       SCF-convergence movie -- see its README and
+                       docs/SIMULATION.md.
   02/03_nbody_gravity Direct + Barnes-Hut N-body (3D / 2D-with-FMM).
   04_molecular_dynamics  3D periodic Lennard-Jones MD -- Nose-Hoover/Berendsen
                        thermostats, Berendsen NPT barostat, deck-driven
@@ -66,9 +70,10 @@ projects stay independent while sharing the windowing/render/shader boilerplate.
 ### Two ways a project can run
 
 Older projects (`01`–`03`) subclass `fw::Application` directly, with an ImGui
-control panel and live `Chart2D` plots. `04_molecular_dynamics` keeps that
-original app (`MDApp`) alongside a second, deck-driven `fw::Simulation`
-implementation (`MDSim`) added later -- see its README for why both exist.
+control panel and live `Chart2D` plots. `01_hartree_fock` and
+`04_molecular_dynamics` keep that original app alongside a second, deck-driven
+`fw::Simulation` implementation added later (`HFSim` / `MDSim`) for headless
+batch runs and `tools/` post-processing -- see their READMEs.
 
 From `05` on, the preferred model is `fw::Simulation` + an **input deck**:
 

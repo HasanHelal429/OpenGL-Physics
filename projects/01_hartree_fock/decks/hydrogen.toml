@@ -1,0 +1,19 @@
+title = "Hydrogen - self-interaction error (Z=1)"
+
+# One electron: the exact energy is -0.5 Ha. Local exchange (Xalpha / LDA)
+# does NOT fully cancel the electron's self-Hartree repulsion, so the SCF
+# converges high - Xalpha(0.7) lands near -0.416 Ha, exact-LDA-exchange near
+# -0.407 Ha. A clean, single-electron demonstration of the self-interaction
+# error, with no many-electron physics to confound it. (The exact -0.5 comes
+# only from the bare -Z/r eigensolver --selftest, which has no Hartree/xc.)
+
+[atom]
+Z = 1
+method = "xalpha"
+
+[scf]
+max_iter = 200
+mix = 0.3
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

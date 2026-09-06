@@ -1,0 +1,21 @@
+title = "Gadolinium - f-shell exception (4f7 5d1 6s2)"
+
+# Gd is the l_max = 3 (f-orbital) end-to-end test and a lanthanide Madelung
+# exception. SLOW: the SCF run takes many minutes at the default N = 4000
+# grid - this deck exists to exercise f-channel support, not for a quick
+# demo. Drop grid.n for a faster (less accurate) run.
+
+[atom]
+Z = 64
+method = "xalpha"
+alpha = 0.7
+
+[grid]
+n = 2500
+
+[scf]
+max_iter = 200
+mix = 0.25
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

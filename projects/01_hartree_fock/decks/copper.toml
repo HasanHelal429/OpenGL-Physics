@@ -1,0 +1,17 @@
+title = "Copper - Madelung exception (3d10 4s1)"
+
+# Cu fills as [Ar] 3d10 4s1, not the naive Madelung [Ar] 3d9 4s2 - the
+# exception table (Shells.cpp) is exercised here. Converged config printed
+# on stdout should read "... 3d10 4s1".
+
+[atom]
+Z = 29
+method = "xalpha"
+alpha = 0.7
+
+[scf]
+max_iter = 200
+mix = 0.3
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

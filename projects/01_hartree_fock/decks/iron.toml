@@ -1,0 +1,16 @@
+title = "Iron - open 3d shell"
+
+# Fe [Ar] 3d6 4s2 - normal Madelung filling, an open d-shell (the
+# configuration-averaged central field treats the partial 3d6 as a
+# spherically averaged fractional occupation).
+
+[atom]
+Z = 26
+method = "lda"
+
+[scf]
+max_iter = 200
+mix = 0.3
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

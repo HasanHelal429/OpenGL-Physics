@@ -1,0 +1,17 @@
+title = "Krypton - Xalpha"
+
+# Kr [Ar] 3d10 4s2 4p6, a heavier closed shell. Run this deck with
+# method = "lda" as well to compare Xalpha vs genuine Kohn-Sham LDA at
+# the same Z (see Studies/hartree_fock/xalpha_vs_lda).
+
+[atom]
+Z = 36
+method = "xalpha"
+alpha = 0.7
+
+[scf]
+max_iter = 200
+mix = 0.3
+
+[output]
+diagnostics = ["e_total", "de", "dn"]

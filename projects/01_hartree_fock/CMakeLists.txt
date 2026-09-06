@@ -3,6 +3,7 @@ find_package(spectra CONFIG REQUIRED)
 
 add_executable(01_hartree_fock
     src/main.cpp
+    src/HFSim.cpp
     src/Shells.cpp
     src/Potentials.cpp
     src/RadialEigensolver.cpp
