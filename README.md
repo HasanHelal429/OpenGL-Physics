@@ -62,6 +62,17 @@ projects/            One executable per simulation. Numbered by creation order.
                        flow past an immersed obstacle (cylinder vortex
                        shedding, Strouhal number vs. Roshko's correlation)
                        — see its README and docs/SIMULATION.md.
+  09_magnetostatics/   Vector-potential / Biot-Savart magnetostatics (GPU
+                       multigrid + compute-shader Biot-Savart) + a relativistic
+                       Boris test-particle pusher — see its README.
+  10_fdtd/             2D full-wave Maxwell FDTD (Yee/leapfrog, GPU, CPML,
+                       TFSF, dielectrics) — see its README and docs/SIMULATION.md.
+  11_retarded_fields/  Liénard-Wiechert fields of accelerating charges +
+                       self-consistent retarded charge dynamics — see its README.
+  12_tddft/            Real-time TDDFT on the GPU (3D split-step Fourier,
+                       multi-orbital Kohn-Sham) — the GPU port of
+                       Physics Simulations/Quantum Mechanics/TDDFT — see its
+                       README and TDDFT_GPU_Plan.md.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so
