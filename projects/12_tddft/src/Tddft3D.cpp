@@ -17,7 +17,7 @@ constexpr double kPi = 3.14159265358979323846;
 Tddft3D::~Tddft3D() {
     GLuint bufs[] = {m_psi, m_tmp, m_twiddle, m_vprop, m_kprop,
                      m_vnuc, m_rho, m_veff, m_veffPred, m_psiPred,
-                     m_scratchC, m_k2half, m_ktau, m_partials};
+                     m_scratchC, m_k2half, m_ktau, m_partials, m_mask};
     glDeleteBuffers(sizeof(bufs) / sizeof(bufs[0]), bufs);
 }
 
@@ -107,6 +107,59 @@ void Tddft3D::EnsureKsShaders() {
     m_scale = fw::ComputeShader::FromSource(ks::Scale(n));
     m_reduceMoment = fw::ComputeShader::FromSource(ks::ReduceMoment(n));
     m_reduceWeighted = fw::ComputeShader::FromSource(ks::ReduceWeighted(n));
+    m_addField = fw::ComputeShader::FromSource(ks::AddLinearField(n));
+    m_maskMul = fw::ComputeShader::FromSource(ks::MaskMul(n));
+}
+
+void Tddft3D::SetMask(double width, int order) {
+    EnsureKsShaders();
+    if (!m_mask) {
+        glCreateBuffers(1, &m_mask);
+        glNamedBufferData(m_mask, m_total * sizeof(float), nullptr, GL_STATIC_DRAW);
+    }
+    const double halfL = 0.5 * m_L, edge = halfL - width;
+    std::vector<float> m(m_total);
+    auto taper = [&](double c) {
+        double tt = (std::abs(c) - edge) / width;
+        tt = tt < 0.0 ? 0.0 : (tt > 1.0 ? 1.0 : tt);
+        return std::pow(std::cos(0.5 * kPi * tt), order);
+    };
+    for (int z = 0; z < m_n; ++z)
+        for (int y = 0; y < m_n; ++y)
+            for (int x = 0; x < m_n; ++x) {
+                const double cx = (x - m_n / 2) * m_dx, cy = (y - m_n / 2) * m_dx, cz = (z - m_n / 2) * m_dx;
+                m[(long(z) * m_n + y) * m_n + x] = (float)(taper(cx) * taper(cy) * taper(cz));
+            }
+    glNamedBufferSubData(m_mask, 0, m.size() * sizeof(float), m.data());
+}
+
+void Tddft3D::Kick(double kappa, int axis) {
+    EnsureKsShaders();
+    m_kick.Use();
+    m_kick.SetFloat("uKappa", (float)kappa);
+    m_kick.SetFloat("uDx", (float)m_dx);
+    m_kick.SetInt("uAxis", axis);
+    fw::ComputeShader::BindBuffer(0, m_psi);
+    m_kick.Dispatch((GLuint)((m_total + 63) / 64), 1, 1);
+    fw::ComputeShader::Barrier(GL_SHADER_STORAGE_BARRIER_BIT);
+}
+
+void Tddft3D::DensitySliceZ0(std::vector<float>& out) {
+    // read the whole psi and slice -- N^3 readback is fine at the interactive
+    // sizes (N<=64) this is used for.
+    const std::vector<cf> p = GetPsi();
+    const int n = m_n, mid = n / 2;
+    out.resize((size_t)n * n);
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            const cf v = p[(long(mid) * n + y) * n + x];
+            out[(size_t)y * n + x] = (float)(m_occWeight * std::norm(v));
+        }
+}
+
+void Tddft3D::LaserStepKS(double fieldNow, double fieldNext, int axis) {
+    EtrsStepKS(m_occWeight, fieldNow, fieldNext, axis);
+    glFinish();
 }
 
 void Tddft3D::SetSoftenedNucleus(double Z, double soft) {
@@ -266,8 +319,13 @@ void Tddft3D::ScalePsi(double f) {
     dispatchFlat(m_scale, m_total);
 }
 
-// psiSrc -> m_rho (occ-weighted) -> Poisson -> outVeff = V_nuc + V_H + v_xc
+// psiSrc -> m_rho (occ-weighted) -> Poisson -> outVeff = V_nuc + V_H + v_xc.
+// Bare mode: outVeff = V_nuc only.
 void Tddft3D::BuildVeff(GLuint psiSrc, GLuint outVeff, double occWeight) {
+    if (m_bare) {
+        glCopyNamedBufferSubData(m_vnuc, outVeff, 0, 0, m_total * sizeof(float));
+        return;
+    }
     m_density.Use();
     m_density.SetFloat("uWeight", (float)occWeight);
     m_density.SetInt("uAccumulate", 0);
@@ -359,7 +417,7 @@ Tddft3D::RelaxResult Tddft3D::RelaxKS(int nElectrons, double dtau, int maxIter, 
     return {epsPrev, occ * NormPsi(), it};
 }
 
-void Tddft3D::EtrsStepKS(double occWeight) {
+void Tddft3D::EtrsStepKS(double occWeight, double fieldNow, double fieldNext, int fieldAxis) {
     auto halfKick = [&](GLuint psi, GLuint v) {
         m_halfKick.Use();
         m_halfKick.SetFloat("uDt", (float)m_dt);
@@ -367,9 +425,19 @@ void Tddft3D::EtrsStepKS(double occWeight) {
         fw::ComputeShader::BindBuffer(1, v);
         dispatchFlat(m_halfKick, m_total);
     };
+    auto addField = [&](GLuint v, double E) {
+        if (E == 0.0) return;
+        m_addField.Use();
+        m_addField.SetFloat("uField", (float)E);
+        m_addField.SetFloat("uDx", (float)m_dx);
+        m_addField.SetInt("uAxis", fieldAxis);
+        fw::ComputeShader::BindBuffer(0, v);
+        dispatchFlat(m_addField, m_total);
+    };
 
-    // V0 = V_KS[rho(t)]
+    // V0 = V_KS[rho(t)] + E(t) x
     BuildVeff(m_psi, m_veff, occWeight);
+    addField(m_veff, fieldNow);
 
     // predictor: a full Strang step of a copy under V0 -> psi_pred
     glCopyNamedBufferSubData(m_psi, m_psiPred, 0, 0, m_total * 2 * sizeof(float));
@@ -379,8 +447,9 @@ void Tddft3D::EtrsStepKS(double occWeight) {
     Fft3D(m_psiPred, true);
     halfKick(m_psiPred, m_veff);
 
-    // V1 = V_KS[rho(psi_pred)]
+    // V1 = V_KS[rho(psi_pred)] + E(t+dt) x
     BuildVeff(m_psiPred, m_veffPred, occWeight);
+    addField(m_veffPred, fieldNext);
 
     // real ETRS step: exp(-iV1 dt/2) . T(dt) . exp(-iV0 dt/2)
     halfKick(m_psi, m_veff);
@@ -388,6 +457,13 @@ void Tddft3D::EtrsStepKS(double occWeight) {
     CMul(m_psi, m_kprop);
     Fft3D(m_psi, true);
     halfKick(m_psi, m_veffPred);
+
+    if (m_mask) {
+        m_maskMul.Use();
+        fw::ComputeShader::BindBuffer(0, m_psi);
+        fw::ComputeShader::BindBuffer(1, m_mask);
+        dispatchFlat(m_maskMul, m_total);
+    }
 }
 
 Tddft3D::DipoleTrace Tddft3D::KickAndRunKS(double kappa, int axis, int nSteps, int recordEvery) {
@@ -409,7 +485,7 @@ Tddft3D::DipoleTrace Tddft3D::KickAndRunKS(double kappa, int axis, int nSteps, i
     };
     record(0.0);
     for (int step = 1; step <= nSteps; ++step) {
-        EtrsStepKS(m_occWeight);
+        EtrsStepKS(m_occWeight, 0.0, 0.0, 0);
         if (step % recordEvery == 0) record(step * m_dt);
     }
     glFinish();

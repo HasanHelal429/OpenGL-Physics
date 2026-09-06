@@ -228,6 +228,39 @@ void main() {
 )";
 }
 
+// veff[i] += uField * coord_axis(i)   (length-gauge laser term E(t) x).
+inline std::string AddLinearField(int n) {
+    return R"(#version 460 core
+#define N )" + std::to_string(n) + R"(u
+#define TOTAL )" + std::to_string((long)n * n * n) + R"(u
+#define HALF )" + std::to_string(n / 2) + R"(.0
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Veff { float veff[]; };
+uniform float uField;
+uniform float uDx;
+uniform int uAxis;
+void main() {
+    uint g = gl_GlobalInvocationID.x;
+    if (g >= TOTAL) return;
+    uint x = g % N, y = (g / N) % N, z = g / (N * N);
+    uint c = (uAxis == 0) ? x : (uAxis == 1) ? y : z;
+    veff[g] += uField * (float(c) - HALF) * uDx;
+}
+)";
+}
+
+// psi[i] *= mask[i]   (real absorbing-boundary window).
+inline std::string MaskMul(int n) {
+    const long total = (long)n * n * n;
+    return R"(#version 460 core
+#define TOTAL )" + std::to_string(total) + R"(u
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) buffer Psi { vec2 psi[]; };
+layout(std430, binding = 1) readonly buffer M { float m[]; };
+void main() { uint i = gl_GlobalInvocationID.x; if (i < TOTAL) psi[i] *= m[i]; }
+)";
+}
+
 // psi[i] *= uFactor  (real scalar).
 inline std::string Scale(int n) {
     const long total = (long)n * n * n;

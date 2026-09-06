@@ -79,14 +79,24 @@ shader — one small rotate kernel does it.
 - `tools/spectrum.py` reproduces the Stage-1 `response.py` analysis + figure
   from the written `dipole.csv`.
 
-**Phase 9 — interactive absorption / HHG demo.**
-- `Tddft3DSim : fw::Simulation` + `fw::SimApp`: a 3D density isosurface or a
-  slice, the instantaneous dipole, and a live running-FFT `S(ω)` / harmonic-comb
-  panel that fills in as the propagation runs. `[[drive]]` (a `sin²` or flat-top
-  laser, ported from Stage-1's `perturb.py`) + `boundary_mask`.
-- `tools/make_movie.py` records the comb building up — the website asset.
-- **Validate:** the live-accumulated HHG spectrum converges to the Stage-1
-  Python result (odd harmonics, the intensity-scaling cutoff).
+**Phase 9 — HHG (laser + mask) + the harmonic-comb movie.  ✅ PHYSICS DONE.**
+- `kernels_ks.hpp`: `AddLinearField` (`V_eff += E(t) x`, length gauge),
+  `MaskMul` (cosine-taper absorbing boundary). `Tddft3D`: `SetBareMode`
+  (`V_eff = V_nuc` only — the SIE-free single-particle limit for hydrogen,
+  matching Stage-1's `method=None`), `SetMask`, `LaserStepKS` (an ETRS step
+  with the time-dependent field folded into V0/V1), `KickAndRunKS`.
+- `main.cpp --h-hhg` (3/3): H in a flat-top pulse (`FlatTop`, ported from
+  Stage-1's `perturb.flattop_pulse`), 11 k ETRS steps in ~40 s, a
+  dipole-acceleration analysis — **odd harmonics only (odd/even ~10⁴)**, a
+  **flat plateau ending in a sharp (>4-decade) cutoff at ~11 ω_L**,
+  **ionization 53%**. Matches the Stage-1 Python Phase-5 spectrum (odd-only
+  comb, plateau + cutoff, over-the-barrier — cutoff above `I_p + 3.17 U_p`
+  for this softened H).
+- `tools/hhg.py` — the harmonic-comb figure. `tools/make_movie.py` — the MP4
+  of the comb **building up** as the pulse advances (the website asset).
+- **Remaining:** the `fw::Simulation` + `SimApp` *live window* (a density
+  slice + a live running-FFT panel). The physics and the recorded artifact
+  are done; the interactive view is the last visualization piece.
 
 ## Layout
 
@@ -107,7 +117,8 @@ projects/12_tddft/
 - [x] Phase 7 — 3D FFT + single-orbital propagator + `--selftest` vs Python (8/8)
 - [x] Phase 8 — ALDA v_xc + 3D Hartree + He δ-kick spectrum vs Python
       (`--relax-test` 2/2, `--he-spectrum` 3/3)
-- [ ] Phase 9 — interactive absorption / HHG demo + MP4
+- [~] Phase 9 — HHG (laser + mask) vs Python (`--h-hhg` 3/3) + `hhg.py` +
+      `make_movie.py` (comb building up). The live `SimApp` window remains.
 
 ## Verification
 

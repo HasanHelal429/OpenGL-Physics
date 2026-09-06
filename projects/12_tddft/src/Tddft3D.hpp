@@ -60,10 +60,28 @@ public:
                         int inner = 4, bool verbose = false);
 
     // Delta-kick psi -> exp(i kappa x_axis) psi, then ETRS-propagate the KS
-    // system for `nSteps` of dt, recording the electronic dipole
-    // d_axis(t) = - integral x_axis rho d^3r every `recordEvery` steps.
+    // system for `nSteps` of dt, recording the electronic first moment
+    // integral x_axis rho d^3r every `recordEvery` steps.
     struct DipoleTrace { std::vector<double> t, d; };
     DipoleTrace KickAndRunKS(double kappa, int axis, int nSteps, int recordEvery);
+
+    // Bare single-particle mode: V_eff = V_nuc only (no Hartree/XC) -- the
+    // self-interaction-free limit used for hydrogen HHG, matching Stage-1's
+    // method=None. Call before RelaxKS.
+    void SetBareMode(bool bare) { m_bare = bare; }
+
+    // Cosine-taper absorbing boundary over the outer `width` (Bohr), applied
+    // to psi once per step (soaks up the ionized flux; norm loss = ionization).
+    void SetMask(double width, int order = 2);
+
+    // One ETRS step with a length-gauge laser term E(t) x_axis added to V_eff.
+    void LaserStepKS(double fieldNow, double fieldNext, int axis);
+
+    void Kick(double kappa, int axis);                 // psi -> exp(i kappa x) psi
+    double Dipole(int axis) { return m_occWeight * Moment(axis); }
+    double SurvivingNorm() { return m_occWeight * NormPsi(); }
+    void DensitySliceZ0(std::vector<float>& out);      // N*N radial density at z = N/2
+    double OccWeight() const { return m_occWeight; }
 
 private:
     void StrangStep();
@@ -76,7 +94,6 @@ private:
     double VExpectation();                      // integral V_eff |psi|^2 d^3r
     double KineticExpectation();                // <psi| -1/2 grad^2 |psi>
     double SumPartials(int count);
-    void EtrsStepKS(double occWeight);
 
     int m_n = 0;
     long m_total = 0;
@@ -92,8 +109,10 @@ private:
     fw::ComputeShader m_rotate;
     fw::ComputeShader m_cmul;
 
-    // Phase 8
+    // Phase 8-9
     bool m_ksReady = false;
+    bool m_bare = false;
+    GLuint m_mask = 0;     // float N^3 absorbing window (0 = disabled)
     GLuint m_vnuc = 0;      // float N^3
     GLuint m_rho = 0;       // float N^3
     GLuint m_veff = 0;      // float N^3
@@ -110,8 +129,10 @@ private:
     fw::ComputeShader m_density, m_realToComplex, m_poissonK, m_assembleVeff;
     fw::ComputeShader m_halfKick, m_halfKickImag, m_mulRealK, m_kick;
     fw::ComputeShader m_scale, m_reduceMoment, m_reduceWeighted;
+    fw::ComputeShader m_addField, m_maskMul;
 
     void EnsureKsShaders();
+    void EtrsStepKS(double occWeight, double fieldNow, double fieldNext, int fieldAxis);
 };
 
 } // namespace tddft

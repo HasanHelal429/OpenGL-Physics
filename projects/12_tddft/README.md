@@ -20,7 +20,7 @@ the phase plan.
 |---|---|---|
 | 7 | 3D FFT + single-orbital propagator + selftest vs Python | **done** |
 | 8 | ALDA `v_xc` + 3D Hartree + He δ-kick spectrum vs Python | **done** |
-| 9 | interactive absorption / HHG demo | not started |
+| 9 | HHG (laser + mask) vs Python + the comb-building movie | **physics done**; live window pending |
 
 ## Build & run
 
@@ -31,7 +31,10 @@ B=build/release/projects/12_tddft/12_tddft.exe
 $B --selftest                       # 3D FFT + free/harmonic vs Python (8/8)
 $B --relax-test                     # He Kohn-Sham ground state, imag. time (2/2)
 $B --he-spectrum [--out DIR]        # He delta-kick absorption vs Python (3/3)
-python tools/spectrum.py DIR        # -> S(omega) figure from --he-spectrum's dipole.csv
+$B --h-hhg [--out DIR]              # H high-harmonic generation vs Python (3/3, ~40 s)
+python tools/spectrum.py DIR        # -> S(omega) figure (--he-spectrum)
+python tools/hhg.py DIR             # -> harmonic-comb figure (--h-hhg)
+python tools/make_movie.py DIR      # -> hhg_movie.mp4, the comb building up (--h-hhg)
 ```
 
 None of these need a window (hidden GL context).
@@ -94,5 +97,14 @@ from imaginary-time relaxation (`dt → dτ` real, renormalize each step).
 Reductions (norm, dipole, `<V>`, `<T>`) are shared-memory partial sums
 finished on the CPU.
 
-**Phase 9** (not started) adds the `fw::Simulation` + `SimApp` interactive
-view with a live running-FFT harmonic-comb panel and `tools/make_movie.py`.
+**Phase 9** — the density-dependent path gains a length-gauge laser term
+(`AddLinearField`, `V_eff += E(t) x`) and a cosine-taper absorbing boundary
+(`MaskMul`), plus a `SetBareMode` (`V_eff = V_nuc` only — the SIE-free limit
+for hydrogen, matching Stage-1's `method=None`). `--h-hhg` runs H in a
+flat-top pulse and reproduces the Stage-1 Python Phase-5 HHG spectrum: **odd
+harmonics only** (odd/even ~10⁴), a flat plateau ending in a sharp cutoff at
+~11 ω_L, ionization ~53%. `tools/hhg.py` is the comb figure; `tools/make_movie.py`
+is the MP4 of the comb building up as the pulse advances.
+
+Still to do: the `fw::Simulation` + `SimApp` *live window* (a density slice +
+a running-FFT panel). The physics and the recorded movie are done.

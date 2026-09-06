@@ -262,6 +262,105 @@ void AnalyzeDipole(const std::vector<double>& t, const std::vector<double>& d, d
           "peak = " + std::to_string(wLow) + " Ha = " + std::to_string(wLow * 27.2114) + " eV");
 }
 
+// --- Phase 9: hydrogen HHG in a flat-top laser --------------------------
+struct FlatTop {
+    double E0, w, tUp, tFlat, tPulse;
+    FlatTop(double e0, double omega, int nRamp, int nFlat)
+        : E0(e0), w(omega) {
+        const double Tc = 2.0 * kPi / omega;
+        tUp = nRamp * Tc; tFlat = nFlat * Tc; tPulse = 2 * tUp + tFlat;
+    }
+    double operator()(double t) const {
+        if (t < 0 || t > tPulse) return 0.0;
+        double env;
+        if (t < tUp) env = std::pow(std::sin(kPi * t / (2 * tUp)), 2);
+        else if (t < tUp + tFlat) env = 1.0;
+        else env = std::pow(std::sin(kPi * (tPulse - t) / (2 * tUp)), 2);
+        return E0 * env * std::sin(w * t);
+    }
+};
+
+void AnalyzeHHG(const std::vector<double>& t, const std::vector<double>& d, double wL,
+                double flat0, double flat1, double ion) {
+    // dipole acceleration a(t) = d''(t), Hann-windowed over the flat portion.
+    int i0 = 0, i1 = (int)t.size() - 1;
+    for (int i = 0; i < (int)t.size(); ++i) { if (t[i] < flat0) i0 = i; if (t[i] <= flat1) i1 = i; }
+    const int m = i1 - i0 + 1;
+    const double dt = t[1] - t[0];
+    std::vector<double> a(m);
+    for (int i = 0; i < m; ++i) {
+        const int g = i0 + i;
+        const double dm = (g > 0) ? d[g - 1] : d[g];
+        const double dp = (g < (int)d.size() - 1) ? d[g + 1] : d[g];
+        a[i] = (dp - 2.0 * d[g] + dm) / (dt * dt);
+    }
+    for (int i = 0; i < m; ++i) a[i] *= 0.5 - 0.5 * std::cos(2.0 * kPi * i / (m - 1));
+
+    auto power = [&](double harm) {
+        double re = 0, im = 0;
+        const double wq = harm * wL;
+        for (int i = 0; i < m; ++i) { re += a[i] * std::cos(wq * (t[i0 + i] - t[i0])); im += a[i] * std::sin(wq * (t[i0 + i] - t[i0])); }
+        return re * re + im * im;
+    };
+    const double odd = (power(3) + power(5) + power(7)) / 3.0;
+    const double even = (power(2) + power(4) + power(6)) / 3.0;
+    const double plateau = 0.5 * (power(3) + power(5));
+    int cut = 3;
+    for (int h = 3; h < 25; ++h) if (power(h) > plateau * 1e-3) cut = h;
+
+    check("H HHG: odd harmonics dominate over even (inversion symmetry)", odd / even > 8.0,
+          "odd/even = " + std::to_string(odd / even));
+    check("H HHG: a plateau ends in a sharp cutoff",
+          power(cut - 2 > 3 ? cut - 2 : 3) / power(3) > 1e-2 && power(cut + 3) / plateau < 1e-3,
+          "plateau to order " + std::to_string(cut));
+    check("H HHG: ionization present (mask absorbed norm)", ion > 0.02 && ion < 0.98,
+          "ionized fraction = " + std::to_string(ion));
+    std::printf("    (Stage-1 Python: odd/even ~5000, plateau + sharp cutoff, cutoff "
+                "extends with intensity, ionization 59-92%%)\n");
+}
+
+int HydrogenHHG(const std::string& outDir) {
+    const int n = 64;
+    const double L = 32.0, dx = L / n, soft = 0.5 * dx, dt = 0.04, wL = 0.114;
+    tddft::Tddft3D t;
+    t.Configure(n, L, dt);
+    t.SetBareMode(true);                 // H: no Hartree/XC (SIE-free, like Stage-1 method=None)
+    t.SetSoftenedNucleus(1.0, soft);
+    t.SetMask(8.0, 2);
+    std::printf("relaxing H ground state (bare)...\n");
+    const auto r = t.RelaxKS(1, 0.2 * dx * dx, 800, 1e-8, 4, true);
+    std::printf("  eps_1s = %.4f Ha = %.1f eV\n", r.eps, r.eps * 27.2114);
+
+    FlatTop E(0.06, wL, 2, 4);
+    const int nSteps = (int)std::lround((E.tPulse + 5.0) / dt);
+    std::printf("flat-top pulse (E0=0.06, %d ETRS steps)...\n\n", nSteps);
+    std::vector<double> ts, ds;
+    ts.push_back(0.0); ds.push_back(t.Dipole(2));
+    for (int step = 1; step <= nSteps; ++step) {
+        const double tn = (step - 1) * dt, tnn = step * dt;
+        t.LaserStepKS(E(tn), E(tnn), 2);
+        ts.push_back(tnn); ds.push_back(t.Dipole(2));
+    }
+    const double ion = 1.0 - t.SurvivingNorm() / t.OccWeight();
+
+    AnalyzeHHG(ts, ds, wL, E.tUp, E.tUp + E.tFlat, ion);
+
+    if (!outDir.empty()) {
+        std::filesystem::create_directories(outDir);
+        std::FILE* f = std::fopen((outDir + "/dipole.csv").c_str(), "w");
+        std::fprintf(f, "t,dz\n");
+        for (size_t i = 0; i < ts.size(); ++i) std::fprintf(f, "%.6f,%.10e\n", ts[i], ds[i]);
+        std::fclose(f);
+        f = std::fopen((outDir + "/meta.txt").c_str(), "w");
+        std::fprintf(f, "omega_L %.6f\nflat0 %.6f\nflat1 %.6f\nIp %.6f\nE0 0.06\n",
+                     wL, E.tUp, E.tUp + E.tFlat, -r.eps);
+        std::fclose(f);
+        std::printf("\nwrote %s/dipole.csv\n", outDir.c_str());
+    }
+    std::printf("\n%d/%d checks passed\n", gPass, gPass + gFail);
+    return gFail == 0 ? 0 : 1;
+}
+
 // --- Phase 8: Helium delta-kick -> dipole trace --------------------------
 int HeliumSpectrum(const std::string& outDir) {
     const int n = 32;
@@ -303,7 +402,7 @@ int main(int argc, char** argv) {
     std::string mode, out;
     for (int i = 1; i < argc; ++i) {
         const std::string s = argv[i];
-        if (s == "--selftest" || s == "--relax-test" || s == "--he-spectrum") mode = s;
+        if (s == "--selftest" || s == "--relax-test" || s == "--he-spectrum" || s == "--h-hhg") mode = s;
         else if (s == "--out" && i + 1 < argc) out = argv[++i];
     }
     if (mode.empty()) {
@@ -311,7 +410,8 @@ int main(int argc, char** argv) {
                      "usage:\n"
                      "  12_tddft --selftest                 3D FFT + free/harmonic vs Python\n"
                      "  12_tddft --relax-test               He Kohn-Sham ground state (imag. time)\n"
-                     "  12_tddft --he-spectrum [--out DIR]  He delta-kick -> dipole.csv\n");
+                     "  12_tddft --he-spectrum [--out DIR]  He delta-kick absorption\n"
+                     "  12_tddft --h-hhg [--out DIR]        H atom high-harmonic generation\n");
         return 2;
     }
 
@@ -320,6 +420,10 @@ int main(int argc, char** argv) {
     if (mode == "--he-spectrum") {
         std::printf("12_tddft --he-spectrum -- He delta-kick absorption vs Stage-1 Python\n\n");
         return HeliumSpectrum(out);
+    }
+    if (mode == "--h-hhg") {
+        std::printf("12_tddft --h-hhg -- H atom high-harmonic generation vs Stage-1 Python\n\n");
+        return HydrogenHHG(out);
     }
 
     if (mode == "--selftest") {
