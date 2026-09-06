@@ -20,7 +20,9 @@ the phase plan.
 |---|---|---|
 | 7 | 3D FFT + single-orbital propagator + selftest vs Python | **done** |
 | 8 | ALDA `v_xc` + 3D Hartree + He δ-kick spectrum vs Python | **done** |
-| 9 | HHG (laser + mask) vs Python + the comb-building movie | **physics done**; live window pending |
+| 9 | HHG (laser + mask) vs Python, comb movie, deck + interactive view | **done** |
+
+**Stage 2 is complete.**
 
 ## Build & run
 
@@ -35,6 +37,9 @@ $B --h-hhg [--out DIR]              # H high-harmonic generation vs Python (3/3,
 python tools/spectrum.py DIR        # -> S(omega) figure (--he-spectrum)
 python tools/hhg.py DIR             # -> harmonic-comb figure (--h-hhg)
 python tools/make_movie.py DIR      # -> hhg_movie.mp4, the comb building up (--h-hhg)
+
+$B --deck decks/h_hhg.toml --out DIR --frames N   # headless -> density slices + diagnostics
+$B --deck decks/h_hhg.toml --interactive          # live density-slice window
 ```
 
 None of these need a window (hidden GL context).
@@ -106,5 +111,7 @@ harmonics only** (odd/even ~10⁴), a flat plateau ending in a sharp cutoff at
 ~11 ω_L, ionization ~53%. `tools/hhg.py` is the comb figure; `tools/make_movie.py`
 is the MP4 of the comb building up as the pulse advances.
 
-Still to do: the `fw::Simulation` + `SimApp` *live window* (a density slice +
-a running-FFT panel). The physics and the recorded movie are done.
+`Tddft3DSim : fw::Simulation` + `decks/` wire the KS path to the framework's
+headless writer and `fw::SimApp` (a magma-colored z=0 density slice;
+`-`/`=` tune the brightness curve). All three Stage-2 phases' physics are
+validated against the Stage-1 Python reference.

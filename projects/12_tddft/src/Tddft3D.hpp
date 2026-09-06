@@ -82,6 +82,7 @@ public:
     double SurvivingNorm() { return m_occWeight * NormPsi(); }
     void DensitySliceZ0(std::vector<float>& out);      // N*N radial density at z = N/2
     double OccWeight() const { return m_occWeight; }
+    GLuint PsiBuffer() const { return m_psi; }         // for the interactive view
 
 private:
     void StrangStep();

@@ -1,0 +1,17 @@
+title = "Helium delta-kick"
+
+[atom]
+Z = 2
+softening = 0.25
+
+[grid]
+n = 32
+L = 16.0
+
+[time]
+dt = 0.05
+substeps_per_frame = 4
+
+[kick]                 # instantaneous boost instead of a laser
+kappa = 0.01
+axis = 0

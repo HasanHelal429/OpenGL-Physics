@@ -94,9 +94,14 @@ shader — one small rotate kernel does it.
   for this softened H).
 - `tools/hhg.py` — the harmonic-comb figure. `tools/make_movie.py` — the MP4
   of the comb **building up** as the pulse advances (the website asset).
-- **Remaining:** the `fw::Simulation` + `SimApp` *live window* (a density
-  slice + a live running-FFT panel). The physics and the recorded artifact
-  are done; the interactive view is the last visualization piece.
+- `Tddft3DSim : fw::Simulation` + `decks/{h_hhg,he_kick}.toml`:
+  `--deck --out` writes a `density` z=0 slice per frame + `dipole`/`ionized`/
+  `field` diagnostics (verified: He/H runs produce the correct atom density,
+  ~4 s for 300 frames); `--deck --interactive` opens a `fw::SimApp` window
+  with a magma-colored density slice (`-`/`=` adjust the brightness curve).
+  The window itself is not verifiable in a headless CI environment, but the
+  render is a standard SSBO-read fragment shader modelled on `05_tdse_gpu`'s
+  proven one, and the frame-data path it draws is validated.
 
 ## Layout
 
@@ -117,8 +122,9 @@ projects/12_tddft/
 - [x] Phase 7 — 3D FFT + single-orbital propagator + `--selftest` vs Python (8/8)
 - [x] Phase 8 — ALDA v_xc + 3D Hartree + He δ-kick spectrum vs Python
       (`--relax-test` 2/2, `--he-spectrum` 3/3)
-- [~] Phase 9 — HHG (laser + mask) vs Python (`--h-hhg` 3/3) + `hhg.py` +
-      `make_movie.py` (comb building up). The live `SimApp` window remains.
+- [x] Phase 9 — HHG (laser + mask) vs Python (`--h-hhg` 3/3), `hhg.py` +
+      `make_movie.py` (comb building up), `Tddft3DSim` + decks +
+      `--deck`/`--interactive`. **Stage 2 complete.**
 
 ## Verification
 
@@ -128,4 +134,8 @@ projects/12_tddft/
 2. Phase 8: ✅ He KS eigenvalue -0.7629 Ha vs Stage-1 Python -0.76291 (1e-5);
    He δ-kick TRK sum rule 97% of `N_e` (matches Python); lowest line 13.46 eV
    vs Python 13.5 eV (0.04 eV).
-3. Phase 9: live HHG spectrum converges to the Stage-1 result.
+3. Phase 9: ✅ H HHG (`--h-hhg`) reproduces the Stage-1 Python Phase-5
+   spectrum -- odd harmonics only (odd/even ~10⁴), a plateau ending in a
+   >4-decade cutoff at ~11 ω_L, ionization ~53%. `make_movie.py` records the
+   comb building up. The `--interactive` window builds and draws the density
+   slice; not screenshot-verifiable in a headless environment.

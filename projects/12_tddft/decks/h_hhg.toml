@@ -1,0 +1,23 @@
+title = "Hydrogen HHG"
+
+[atom]
+Z = 1
+softening = 0.25
+
+[grid]
+n = 64
+L = 32.0
+
+[time]
+dt = 0.04
+substeps_per_frame = 6
+
+[drive]                # flat-top laser, length gauge, along z
+E0 = 0.06
+omega = 0.114          # ~400 nm
+n_ramp = 2
+n_flat = 4
+axis = 2
+
+[mask]
+width = 8.0

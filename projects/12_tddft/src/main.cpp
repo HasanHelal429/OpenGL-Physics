@@ -6,8 +6,12 @@
 //
 // See TDDFT_GPU_Plan.md.
 #include "Tddft3D.hpp"
+#include "Tddft3DSim.hpp"
 
+#include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
+#include "framework/HeadlessRunner.hpp"
+#include "framework/SimApp.hpp"
 
 #include <glad/glad.h>
 
@@ -399,19 +403,45 @@ int HeliumSpectrum(const std::string& outDir) {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    std::string mode, out;
+    std::string mode, out, deck;
+    bool interactive = false;
+    int frames = 0;
     for (int i = 1; i < argc; ++i) {
         const std::string s = argv[i];
         if (s == "--selftest" || s == "--relax-test" || s == "--he-spectrum" || s == "--h-hhg") mode = s;
+        else if (s == "--interactive") interactive = true;
+        else if (s == "--deck" && i + 1 < argc) deck = argv[++i];
         else if (s == "--out" && i + 1 < argc) out = argv[++i];
+        else if (s == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
     }
+
+    if (!deck.empty()) {
+        fw::Deck d = fw::Deck::FromFile(deck);
+        if (interactive) {
+            tddft::Tddft3DSim sim;
+            fw::SimApp app(sim, d, d.GetString("title", "rt-TDDFT (GPU)"));
+            app.Run();
+            return 0;
+        }
+        if (out.empty()) { std::fprintf(stderr, "error: --deck headless needs --out DIR\n"); return 2; }
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        tddft::Tddft3DSim sim;
+        sim.Configure(d);
+        fw::HeadlessOptions opts;
+        opts.outDir = out;
+        opts.frames = frames;
+        return fw::RunHeadless(sim, d, opts);
+    }
+
     if (mode.empty()) {
         std::fprintf(stderr,
                      "usage:\n"
                      "  12_tddft --selftest                 3D FFT + free/harmonic vs Python\n"
                      "  12_tddft --relax-test               He Kohn-Sham ground state (imag. time)\n"
                      "  12_tddft --he-spectrum [--out DIR]  He delta-kick absorption\n"
-                     "  12_tddft --h-hhg [--out DIR]        H atom high-harmonic generation\n");
+                     "  12_tddft --h-hhg [--out DIR]        H atom high-harmonic generation\n"
+                     "  12_tddft --deck f.toml --out DIR    headless run -> density frames + diagnostics\n"
+                     "  12_tddft --deck f.toml --interactive   live view\n");
         return 2;
     }
 

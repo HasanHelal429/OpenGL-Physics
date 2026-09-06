@@ -70,9 +70,10 @@ projects/            One executable per simulation. Numbered by creation order.
   11_retarded_fields/  Liénard-Wiechert fields of accelerating charges +
                        self-consistent retarded charge dynamics — see its README.
   12_tddft/            Real-time TDDFT on the GPU (3D split-step Fourier,
-                       multi-orbital Kohn-Sham) — the GPU port of
-                       Physics Simulations/Quantum Mechanics/TDDFT — see its
-                       README and TDDFT_GPU_Plan.md.
+                       Kohn-Sham + ALDA, FFT-Poisson Hartree) — the GPU port of
+                       Physics Simulations/Quantum Mechanics/TDDFT, validated
+                       against it (He absorption, H high-harmonic generation)
+                       — see its README and TDDFT_GPU_Plan.md.
 ```
 
 Each simulation project is its own executable linked against `physgl`, so
