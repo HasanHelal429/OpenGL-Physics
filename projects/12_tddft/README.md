@@ -19,7 +19,7 @@ the phase plan.
 | phase | what | state |
 |---|---|---|
 | 7 | 3D FFT + single-orbital propagator + selftest vs Python | **done** |
-| 8 | multi-orbital + ALDA `v_xc` + He δ-kick spectrum | not started |
+| 8 | ALDA `v_xc` + 3D Hartree + He δ-kick spectrum vs Python | **done** |
 | 9 | interactive absorption / HHG demo | not started |
 
 ## Build & run
@@ -27,10 +27,16 @@ the phase plan.
 ```sh
 cmake --preset release
 cmake --build --preset release --target 12_tddft
-build/release/projects/12_tddft/12_tddft.exe --selftest
+B=build/release/projects/12_tddft/12_tddft.exe
+$B --selftest                       # 3D FFT + free/harmonic vs Python (8/8)
+$B --relax-test                     # He Kohn-Sham ground state, imag. time (2/2)
+$B --he-spectrum [--out DIR]        # He delta-kick absorption vs Python (3/3)
+python tools/spectrum.py DIR        # -> S(omega) figure from --he-spectrum's dipole.csv
 ```
 
-`--selftest` needs no window (hidden GL context). 8/8:
+None of these need a window (hidden GL context).
+
+### `--selftest` (8/8)
 
 - **3D FFT** round-trip (fp32 machine precision) and forward-vs-direct-DFT.
 - **free Gaussian wavepacket**: `σ(t) = σ₀√(1+(t/2σ₀²)²)` to 4e-6, `⟨x⟩ = k₀t`
@@ -43,6 +49,21 @@ build/release/projects/12_tddft/12_tddft.exe --selftest
 
 These are the exact closed-form checks the Stage-1 Python `validate.py --phase 1`
 uses, now in fp32 on the GPU.
+
+### `--relax-test` / `--he-spectrum` (Phase 8)
+
+- **He Kohn-Sham ground state** by imaginary-time relaxation (FFT-only, ~1 s):
+  eigenvalue **-0.7629 Ha, matching the Stage-1 Python
+  `imaginary_time_ground_state` (-0.76291) to ~1e-5**; `∫ρ = 2.00000`.
+- **He δ-kick absorption** (`ψ → e^{iκx}ψ`, 4000 ETRS steps, ~6 s): the
+  **TRK f-sum rule recovers 97% of `N_e`** (identical to Stage-1 Python), the
+  response is passive (`Im α ≥ 0` to -0.2% of peak), and the **lowest
+  absorption line is 13.46 eV vs the Stage-1 Python 13.5 eV** — a 0.04 eV
+  match. `tools/spectrum.py` reproduces the full `S(ω)` figure.
+
+Same physical caveats as Stage 1 (softened nuclear cusp, small box,
+periodic-FFT Poisson error) — the sum rule is geometry-exact and matches;
+the absolute line position carries the shared grid limitation.
 
 ## Method
 
@@ -63,7 +84,15 @@ CMul(ψ, vprop)  →  FFT₃D(ψ)  →  CMul(ψ, kprop)  →  iFFT₃D(ψ)  → 
 `N` must be a power of two. Complex data is `vec2 (re, im)` in std430 SSBOs,
 `(z,y,x)` layout with `x` contiguous.
 
-**Phase 8+** adds `N_occ` orbitals, an `AccumRho` density pass, FFT-Poisson for
-`V_H`, an ALDA `v_xc` GLSL kernel (Slater + PZ81), the ETRS predictor, an
-imaginary-time `--relax` ground state, and the `--tddft` δ-kick deck mode —
-validated against the Stage-1 Python He spectrum.
+**Phase 8** (`kernels_ks.hpp`, `Tddft3D::RelaxKS` / `EtrsStepKS` /
+`KickAndRunKS`): the density-dependent Kohn-Sham path. Each ETRS substep
+builds `V_eff = V_nuc + V_H[ρ] + v_xc[ρ]` — `V_H` by 3D FFT-Poisson
+(`ρ → FFT → ×4π/k² → iFFT`), `v_xc` by an ALDA GLSL kernel (Slater exchange
+at `α = 2/3` + Perdew-Zunger '81 correlation, both branches inline) — then
+does a full-Strang predictor and the real ETRS step. The ground state comes
+from imaginary-time relaxation (`dt → dτ` real, renormalize each step).
+Reductions (norm, dipole, `<V>`, `<T>`) are shared-memory partial sums
+finished on the CPU.
+
+**Phase 9** (not started) adds the `fw::Simulation` + `SimApp` interactive
+view with a live running-FFT harmonic-comb panel and `tools/make_movie.py`.

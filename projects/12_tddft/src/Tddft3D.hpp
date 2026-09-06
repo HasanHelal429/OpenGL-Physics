@@ -47,9 +47,36 @@ public:
     double Dt() const { return m_dt; }
     GLuint MakeComplexBuffer(const std::vector<cf>& data) const;
 
+    // ---- Phase 8: Kohn-Sham (Hartree + ALDA) --------------------------------
+
+    // A softened point charge -Z / sqrt(r^2 + soft^2) at the box centre, uploaded
+    // as the nuclear potential. Enables the KS path.
+    void SetSoftenedNucleus(double Z, double softening);
+
+    struct RelaxResult { double eps = 0.0; double n_electrons = 0.0; int iters = 0; };
+    // Imaginary-time Kohn-Sham ground state for `nElectrons` (>=1, filling one
+    // spatial orbital at 2 e- -- He/H are the scope). Returns the KS eigenvalue.
+    RelaxResult RelaxKS(int nElectrons, double dtau, int maxIter = 500, double tol = 1e-7,
+                        int inner = 4, bool verbose = false);
+
+    // Delta-kick psi -> exp(i kappa x_axis) psi, then ETRS-propagate the KS
+    // system for `nSteps` of dt, recording the electronic dipole
+    // d_axis(t) = - integral x_axis rho d^3r every `recordEvery` steps.
+    struct DipoleTrace { std::vector<double> t, d; };
+    DipoleTrace KickAndRunKS(double kappa, int axis, int nSteps, int recordEvery);
+
 private:
     void StrangStep();
     void CMul(GLuint dst, GLuint by);
+
+    void BuildVeff(GLuint psiSrc, GLuint outVeff, double occWeight);
+    double NormPsi();                           // integral |psi|^2 d^3r  (GPU reduce)
+    void ScalePsi(double f);
+    double Moment(int axis);                    // integral coord_axis |psi|^2 d^3r
+    double VExpectation();                      // integral V_eff |psi|^2 d^3r
+    double KineticExpectation();                // <psi| -1/2 grad^2 |psi>
+    double SumPartials(int count);
+    void EtrsStepKS(double occWeight);
 
     int m_n = 0;
     long m_total = 0;
@@ -58,12 +85,33 @@ private:
     GLuint m_psi = 0;
     GLuint m_tmp = 0;       // rotate scratch
     GLuint m_twiddle = 0;   // length N
-    GLuint m_vprop = 0;     // exp(-i V dt/2), N^3 vec2
-    GLuint m_kprop = 0;     // exp(-i k^2 dt/2), N^3 vec2
+    GLuint m_vprop = 0;     // exp(-i V dt/2), N^3 vec2   (Phase 7 fixed-V path)
+    GLuint m_kprop = 0;     // exp(-i k^2 dt/2), N^3 vec2 (Phase 7)
 
     fw::ComputeShader m_fft;
     fw::ComputeShader m_rotate;
     fw::ComputeShader m_cmul;
+
+    // Phase 8
+    bool m_ksReady = false;
+    GLuint m_vnuc = 0;      // float N^3
+    GLuint m_rho = 0;       // float N^3
+    GLuint m_veff = 0;      // float N^3
+    GLuint m_veffPred = 0;  // float N^3 (ETRS V1)
+    GLuint m_psiPred = 0;   // vec2 N^3
+    GLuint m_scratchC = 0;  // vec2 N^3 (Poisson / kinetic-expectation FFT)
+    GLuint m_k2half = 0;    // float N^3  = |k|^2 / 2
+    GLuint m_ktau = 0;      // float N^3  = exp(-|k|^2 dtau / 2)
+    GLuint m_partials = 0;  // float, one per reduction workgroup
+    int m_nGroups256 = 0;
+
+    double m_occWeight = 2.0;
+
+    fw::ComputeShader m_density, m_realToComplex, m_poissonK, m_assembleVeff;
+    fw::ComputeShader m_halfKick, m_halfKickImag, m_mulRealK, m_kick;
+    fw::ComputeShader m_scale, m_reduceMoment, m_reduceWeighted;
+
+    void EnsureKsShaders();
 };
 
 } // namespace tddft

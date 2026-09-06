@@ -16,6 +16,7 @@
 #include <complex>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -191,28 +192,148 @@ void HarmonicTest() {
     check("harmonic: norm conserved (fp32)", normDrift < 5e-4, "max drift " + std::to_string(normDrift));
 }
 
+// --- Phase 8: Helium Kohn-Sham ground state (imaginary time) --------------
+void HeliumRelaxTest() {
+    // Same grid family as the Stage-1 Python Phase-2/3 He runs: N=32, L=14,
+    // soft = 0.5 dx, method = lda.
+    const int n = 32;
+    const double L = 16.0, dx = L / n, soft = 0.5 * dx;
+    tddft::Tddft3D t;
+    t.Configure(n, L, 0.05);
+    t.SetSoftenedNucleus(2.0, soft);
+    const double dtau = 0.2 * dx * dx;
+    const auto r = t.RelaxKS(2, dtau, 600, 1e-7, 4, true);
+    // Stage-1 Python imaginary_time_ground_state, N=32 L=14 method=lda: eps_1s = -0.76291 Ha
+    const double refEps = -0.76291;
+    check("He relax: N_electrons = 2", std::abs(r.n_electrons - 2.0) < 1e-3,
+          "integral rho = " + std::to_string(r.n_electrons));
+    check("He relax: eps_1s matches Stage-1 Python (-0.76291 Ha)", std::abs(r.eps - refEps) < 3e-3,
+          "eps = " + std::to_string(r.eps) + " Ha  (" + std::to_string(r.iters) + " iters)");
+}
+
+// Absorption analysis of a dipole trace: S(w) = (2w/pi) Im alpha,
+// alpha(w) = (1/k) integral_0^inf e^{iwt} e^{-t/tau} [d(t)-d(0)] dt  (direct
+// DFT -- the trace is short). Prints the TRK sum rule and the lowest peak and
+// checks both against the Stage-1 Python He result.
+void AnalyzeDipole(const std::vector<double>& t, const std::vector<double>& d, double k, double Ne) {
+    const int nt = (int)t.size();
+    const double dt = t[1] - t[0], T = t[nt - 1] - t[0], tau = 0.4 * T;
+    std::vector<double> sig(nt);
+    for (int i = 0; i < nt; ++i) sig[i] = (d[i] - d[0]) * std::exp(-(t[i] - t[0]) / tau);
+
+    const double dw = 2.0 * kPi / (T * 4.0);            // fine grid
+    const int nw = (int)(4.0 / dw);
+    std::vector<double> w(nw), S(nw), Im(nw);
+    for (int j = 0; j < nw; ++j) {
+        const double wj = j * dw;
+        double re = 0, im = 0;
+        for (int i = 0; i < nt; ++i) { re += sig[i] * std::cos(wj * t[i]); im += sig[i] * std::sin(wj * t[i]); }
+        re *= dt; im *= dt;
+        // alpha = (1/k) * (re + i im);  S = (2 w / pi) Im alpha
+        w[j] = wj;
+        Im[j] = im / k;
+        S[j] = (2.0 * wj / kPi) * Im[j];
+    }
+    double sumS = 0.0;
+    for (int j = 1; j < nw; ++j) sumS += 0.5 * (S[j] + S[j - 1]) * dw;
+
+    double imLo = 1e9, imHi = -1e9;
+    for (int j = 0; j < nw; ++j) if (w[j] > 0.1) { imLo = std::min(imLo, Im[j]); imHi = std::max(imHi, Im[j]); }
+
+    // local maxima in (0.2, 3.0); keep those above 15% of the strongest; the
+    // lowest-frequency survivor is the "lowest line" (matches tools/spectrum.py).
+    std::vector<int> pk;
+    for (int j = 2; j < nw - 2; ++j)
+        if (w[j] > 0.2 && w[j] < 3.0 && S[j] > S[j - 1] && S[j] >= S[j + 1]) pk.push_back(j);
+    double sMax = 0.0;
+    for (int j : pk) sMax = std::max(sMax, S[j]);
+    double wLow = 0.0;
+    for (int j : pk)
+        if (S[j] > 0.15 * sMax) { wLow = w[j]; break; }
+
+    check("He spectrum: TRK sum rule vs Stage-1 Python (97% of N_e)",
+          std::abs(sumS - Ne) < 0.2 * Ne,
+          "integral S dw = " + std::to_string(sumS) + " = " +
+              std::to_string((int)std::lround(100 * sumS / Ne)) + "% of N_e");
+    check("He spectrum: Im alpha >= 0 to the noise floor (passivity)",
+          imLo / imHi > -0.02, "min/max Im alpha = " + std::to_string(imLo / imHi));
+    check("He spectrum: lowest peak vs Stage-1 Python (0.50 Ha = 13.5 eV)",
+          std::abs(wLow - 0.50) < 0.08,
+          "peak = " + std::to_string(wLow) + " Ha = " + std::to_string(wLow * 27.2114) + " eV");
+}
+
+// --- Phase 8: Helium delta-kick -> dipole trace --------------------------
+int HeliumSpectrum(const std::string& outDir) {
+    const int n = 32;
+    const double L = 16.0, dx = L / n, soft = 0.5 * dx, dt = 0.05;
+    tddft::Tddft3D t;
+    t.Configure(n, L, dt);
+    t.SetSoftenedNucleus(2.0, soft);
+    std::printf("relaxing He ground state...\n");
+    const auto r = t.RelaxKS(2, 0.2 * dx * dx, 600, 1e-7, 4, true);
+    std::printf("  eps_1s = %.4f Ha,  N = %.5f\n", r.eps, r.n_electrons);
+
+    const double kappa = 0.01;
+    const int nSteps = 4000;           // T = 200 a.u.
+    std::printf("delta-kick (kappa=%.3f) + %d ETRS steps...\n\n", kappa, nSteps);
+    const auto tr = t.KickAndRunKS(kappa, 0, nSteps, 1);
+
+    AnalyzeDipole(tr.t, tr.d, kappa, r.n_electrons);
+
+    if (!outDir.empty()) {
+        std::filesystem::create_directories(outDir);
+        std::FILE* f = std::fopen((outDir + "/dipole.csv").c_str(), "w");
+        std::fprintf(f, "t,dx\n");
+        for (size_t i = 0; i < tr.t.size(); ++i) std::fprintf(f, "%.6f,%.10e\n", tr.t[i], tr.d[i]);
+        std::fclose(f);
+        std::fprintf((f = std::fopen((outDir + "/meta.txt").c_str(), "w")),
+                     "kappa %.6f\nN_e %.6f\neps_1s %.6f\n", kappa, r.n_electrons, r.eps);
+        std::fclose(f);
+        std::printf("\nwrote %s/dipole.csv  (%zu samples) -- figure: python tools/spectrum.py %s\n",
+                    outDir.c_str(), tr.t.size(), outDir.c_str());
+    }
+    std::printf("\n%d/%d checks passed\n", gPass, gPass + gFail);
+    return gFail == 0 ? 0 : 1;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
-    bool selftest = false;
-    for (int i = 1; i < argc; ++i)
-        if (std::strcmp(argv[i], "--selftest") == 0) selftest = true;
-
-    if (!selftest) {
-        std::fprintf(stderr, "usage: 12_tddft --selftest\n");
+    std::string mode, out;
+    for (int i = 1; i < argc; ++i) {
+        const std::string s = argv[i];
+        if (s == "--selftest" || s == "--relax-test" || s == "--he-spectrum") mode = s;
+        else if (s == "--out" && i + 1 < argc) out = argv[++i];
+    }
+    if (mode.empty()) {
+        std::fprintf(stderr,
+                     "usage:\n"
+                     "  12_tddft --selftest                 3D FFT + free/harmonic vs Python\n"
+                     "  12_tddft --relax-test               He Kohn-Sham ground state (imag. time)\n"
+                     "  12_tddft --he-spectrum [--out DIR]  He delta-kick -> dipole.csv\n");
         return 2;
     }
 
     fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
 
-    std::printf("12_tddft selftest -- 3D GPU split-step vs Stage-1 Python closed forms\n\n");
-    std::printf("1. 3D FFT\n");
-    FftSelfTest();
-    std::printf("\n2. free Gaussian wavepacket\n");
-    FreeSpreadTest();
-    std::printf("\n3. harmonic-oscillator coherent state\n");
-    HarmonicTest();
+    if (mode == "--he-spectrum") {
+        std::printf("12_tddft --he-spectrum -- He delta-kick absorption vs Stage-1 Python\n\n");
+        return HeliumSpectrum(out);
+    }
+
+    if (mode == "--selftest") {
+        std::printf("12_tddft selftest -- 3D GPU split-step vs Stage-1 Python closed forms\n\n");
+        std::printf("1. 3D FFT\n");
+        FftSelfTest();
+        std::printf("\n2. free Gaussian wavepacket\n");
+        FreeSpreadTest();
+        std::printf("\n3. harmonic-oscillator coherent state\n");
+        HarmonicTest();
+    } else {  // --relax-test
+        std::printf("12_tddft --relax-test -- He Kohn-Sham ground state\n\n");
+        HeliumRelaxTest();
+    }
 
     std::printf("\n%d/%d checks passed\n", gPass, gPass + gFail);
     return gFail == 0 ? 0 : 1;

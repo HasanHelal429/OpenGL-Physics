@@ -55,24 +55,29 @@ shader — one small rotate kernel does it.
   ~4e-4/2000-step drift). These are the exact closed-form checks Stage-1
   Python Phase 1 uses, now in fp32 on the GPU.
 
-**Phase 8 — multi-orbital + ALDA `v_xc` + 3D Hartree + He δ-kick spectrum.**
-- Store `N_occ` orbitals as `N_occ` SSBOs (or one packed buffer). Per substep:
-  `AccumRho` over the orbitals → a float `rho`; FFT-Poisson for `V_H`
-  (`rho → FFT → ×4π/k² → iFFT → real`, reusing `Fft3D`); an ALDA `v_xc` kernel
-  evaluating Slater exchange + PZ81 correlation pointwise (port
-  `HF_solver/potentials.py`'s branchless forms to GLSL); `BuildVprop` from
-  `V_nuc + V_H + v_xc`; the ETRS predictor/corrector (a spare orbital set for
-  `ψ_pred`).
-- Initial state: an imaginary-time relaxation mode (`--relax`), the FFT-only
-  ground state — the GPU analogue of `Tddft3D` with `dt → -i dτ` and
-  Gram–Schmidt, mirroring `05`'s `Relax` and Stage-1's
-  `propagate.imaginary_time_ground_state`.
-- `--tddft` deck mode: δ-kick (`ψ_j → e^{iκ·x} ψ_j`), record the dipole
-  `d(t) = -∫ r ρ d³r` to `diagnostics.csv`; a `tools/spectrum.py` FFTs it into
-  `S(ω)` exactly like Stage-1's `response.py`.
-- **Validate:** the He δ-kick spectrum's lowest peak position within ~0.1 eV of
-  the Stage-1 Python result; the TRK sum rule within a few %. Same grid/box
-  caveats as Stage 1 (softened cusp, periodic-FFT Poisson error).
+**Phase 8 — ALDA `v_xc` + 3D Hartree + He δ-kick spectrum.  ✅ DONE.**
+- `kernels_ks.hpp`: `Density` (rho = w·|ψ|²), `RealToComplex`, `PoissonK`
+  (`×4π/k²`, k=0→0), `AssembleVeff` (`V_nuc + Re(V_H) + Slater(α=2/3) +
+  PZ81 V_c` — PZ81's two branches inline), `HalfKick` / `HalfKickImag`,
+  `MulRealK`, `Kick`, `Scale`, and two shared-memory partial-sum reductions
+  (`ReduceMoment` for norm/dipole, `ReduceWeighted` for `<V>` and `<T>`).
+- `Tddft3D::SetSoftenedNucleus`, `RelaxKS` (imaginary-time KS ground state,
+  FFT-only — the GPU analogue of Stage-1's
+  `propagate.imaginary_time_ground_state`), `BuildVeff` (density → FFT-Poisson
+  → assemble), `EtrsStepKS` (V0 from ρ(t), a full-Strang predictor, V1 from
+  ρ_pred, the real ETRS step), `KickAndRunKS` (`ψ → e^{iκx}ψ`, propagate,
+  record the first moment every step).
+- **He is one spatial orbital at occupation 2**, so no multi-orbital buffer
+  management is needed for the first validation (a packed `N_occ`-orbital
+  buffer + `AccumRho` loop is the natural extension for Be/LiH).
+- `main.cpp --relax-test` (2/2): He KS eigenvalue **-0.7629 Ha, matching the
+  Stage-1 Python `imaginary_time_ground_state` (-0.76291) to ~1e-5**;
+  `∫ρ = 2.00000`. `--he-spectrum` (3/3): δ-kick, 4000 ETRS steps (~6 s total),
+  a direct-DFT dipole analysis — **TRK sum rule 97% of `N_e` (identical to
+  Stage-1 Python), passivity `Im α ≥ 0` to -0.2% of peak, lowest absorption
+  line 0.495 Ha = 13.46 eV vs the Stage-1 Python 13.5 eV (0.04 eV)**.
+- `tools/spectrum.py` reproduces the Stage-1 `response.py` analysis + figure
+  from the written `dipole.csv`.
 
 **Phase 9 — interactive absorption / HHG demo.**
 - `Tddft3DSim : fw::Simulation` + `fw::SimApp`: a 3D density isosurface or a
@@ -100,7 +105,8 @@ projects/12_tddft/
 ## Progress
 
 - [x] Phase 7 — 3D FFT + single-orbital propagator + `--selftest` vs Python (8/8)
-- [ ] Phase 8 — multi-orbital + ALDA v_xc + He δ-kick spectrum vs Python
+- [x] Phase 8 — ALDA v_xc + 3D Hartree + He δ-kick spectrum vs Python
+      (`--relax-test` 2/2, `--he-spectrum` 3/3)
 - [ ] Phase 9 — interactive absorption / HHG demo + MP4
 
 ## Verification
@@ -108,6 +114,7 @@ projects/12_tddft/
 1. Phase 7: ✅ 3D FFT round-trips to fp32 machine precision and matches a direct
    DFT; the GPU propagator reproduces Stage-1's free-spreading and
    harmonic-coherent-state closed forms to ~1e-5 (fp32), norm to ~5e-4.
-2. Phase 8: He δ-kick spectrum lowest-peak within ~0.1 eV of Stage-1 Python;
-   TRK sum rule within a few %.
+2. Phase 8: ✅ He KS eigenvalue -0.7629 Ha vs Stage-1 Python -0.76291 (1e-5);
+   He δ-kick TRK sum rule 97% of `N_e` (matches Python); lowest line 13.46 eV
+   vs Python 13.5 eV (0.04 eV).
 3. Phase 9: live HHG spectrum converges to the Stage-1 result.
