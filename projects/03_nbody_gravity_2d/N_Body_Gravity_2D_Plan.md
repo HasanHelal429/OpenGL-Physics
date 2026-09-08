@@ -51,4 +51,10 @@ records what is genuinely 2D-specific.
       (2D orbits precess rather than closing, so "eccentricity" isn't the
       same well-defined quantity -- see `Kepler()`'s own comment in
       `Scenarios.cpp`).
-- [ ] Phases 4-16 -- in parity with 02 (see that plan's Progress).
+- [x] Phase 4 -- compact-support spline softening, shared `ngrav::Softening`.
+      2D uses its own closed-form force (`SplineChi2D`, enclosed-"mass"/r
+      law) and a once-built quadrature table for the potential (the log
+      outer branch has no elementary closed form -- see 02's Progress entry
+      for the bug this caught). `--selftest` PASS: force == Newtonian to
+      2.2e-16 for r>=2h; spline-softened 2D orbit energy drift 2.4e-6.
+- [ ] Phases 5-16 -- in parity with 02 (see that plan's Progress).

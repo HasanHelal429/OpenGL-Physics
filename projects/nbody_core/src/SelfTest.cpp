@@ -145,6 +145,63 @@ bool CoreSelfTest3D() {
     }
 
     BHvsDirect<3>(ok, "barnes-hut vs direct 3D");
+
+    // --- compact-support spline softening (3D) ---------------------------
+    {
+        std::printf("[spline softening 3D]\n");
+        const double h = 0.1;
+        // (a) force-exactness: for r >= H = 2h, spline softening must match
+        // unsoftened Newtonian gravity to machine precision.
+        double maxRel = 0.0;
+        std::mt19937 rng(777);
+        std::uniform_real_distribution<double> ur(2.0 * h, 5.0 * h);
+        for (int t = 0; t < 200; ++t) {
+            const double r = ur(rng);
+            SoA<3> in;
+            in.Resize(2);
+            in.x[1] = r;
+            in.m[0] = in.m[1] = 1.0;
+            StepParams sp;
+            sp.G = 1.0;
+            sp.soft = Softening::Spline(h);
+            SoA<3> out;
+            ComputeAccelDirect<3>(ViewOf(in), sp, out);
+            const double exact = 1.0 / (r * r); // G=m=1, attractive: a on particle 0 points toward +x
+            const double got = out.ax[0];
+            maxRel = std::max(maxRel, std::abs(got - exact) / exact);
+        }
+        Check(ok, "spline force == Newtonian for r>=2h (max rel err)", maxRel, 1e-12);
+
+        // (b) energy conservation: an eccentric two-body orbit with spline
+        // softening instead of Plummer -- if AccumPairSpline (the force) and
+        // TotalEnergy's SplinePotential3D (the potential) were inconsistent,
+        // this would drift; if consistent, it conserves just as well as the
+        // Plummer Kepler test.
+        const double sep = 1.0, e = 0.5;
+        const double vRel = std::sqrt(2.0 * (2.0 / sep - (1.0 + e) / sep));
+        const double a = sep / (1.0 + e);
+        const double period = 2.0 * M_PI * std::sqrt(a * a * a / 2.0);
+        System<3> orbit = MakeSystem<3>({{-sep / 2, 0, 0}, {sep / 2, 0, 0}}, {{0, -vRel / 2, 0}, {0, vRel / 2, 0}},
+                                        {1.0, 1.0});
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Spline(0.02);
+        sp.solver = Solver::Direct;
+        sp.dt = period / 3000.0;
+        orbit.Prime(sp);
+        const double E0 = orbit.TotalEnergy(sp);
+        double Emin = E0, Emax = E0;
+        for (int k = 0; k < 4 * 3000; ++k) {
+            orbit.Step(sp);
+            if (k % 50 == 0) {
+                const double E = orbit.TotalEnergy(sp);
+                Emin = std::min(Emin, E);
+                Emax = std::max(Emax, E);
+            }
+        }
+        Check(ok, "spline-softened orbit energy drift", (Emax - Emin) / std::abs(0.5 * (Emax + Emin)), 1e-4);
+    }
+
     return ok;
 }
 
@@ -210,6 +267,53 @@ bool CoreSelfTest2D() {
     }
 
     BHvsDirect<2>(ok, "barnes-hut vs direct 2D");
+
+    // --- compact-support spline softening (2D) ---------------------------
+    {
+        std::printf("[spline softening 2D]\n");
+        const double h = 0.1;
+        double maxRel = 0.0;
+        std::mt19937 rng(778);
+        std::uniform_real_distribution<double> ur(2.0 * h, 5.0 * h);
+        for (int t = 0; t < 200; ++t) {
+            const double r = ur(rng);
+            SoA<2> in;
+            in.Resize(2);
+            in.x[1] = r;
+            in.m[0] = in.m[1] = 1.0;
+            StepParams sp;
+            sp.G = 1.0;
+            sp.soft = Softening::Spline(h);
+            SoA<2> out;
+            ComputeAccelDirect<2>(ViewOf(in), sp, out);
+            const double exact = 1.0 / r; // 2D: a ~ Gm/r, attractive toward +x
+            maxRel = std::max(maxRel, std::abs(out.ax[0] - exact) / exact);
+        }
+        Check(ok, "spline force == Newtonian for r>=2h (max rel err)", maxRel, 1e-12);
+
+        // Energy conservation for a spline-softened 2D orbit (precessing,
+        // as for the plain Kepler2D test -- assert conservation only).
+        const double vCirc = std::sqrt(2.0), vRel = 0.8 * vCirc;
+        System<2> orbit = MakeSystem<2>({{-0.5, 0}, {0.5, 0}}, {{0, -vRel / 2}, {0, vRel / 2}}, {1.0, 1.0});
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Spline(0.02);
+        sp.solver = Solver::Direct;
+        sp.dt = (2.0 * M_PI / vCirc) / 3000.0;
+        orbit.Prime(sp);
+        const double E0 = orbit.TotalEnergy(sp);
+        double Emin = E0, Emax = E0;
+        for (int k = 0; k < 4 * 3000; ++k) {
+            orbit.Step(sp);
+            if (k % 50 == 0) {
+                const double E = orbit.TotalEnergy(sp);
+                Emin = std::min(Emin, E);
+                Emax = std::max(Emax, E);
+            }
+        }
+        Check(ok, "spline-softened 2D orbit energy drift", (Emax - Emin) / std::abs(0.5 * (Emax + Emin)), 1e-4);
+    }
+
     return ok;
 }
 

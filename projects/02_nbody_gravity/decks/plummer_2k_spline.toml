@@ -1,0 +1,25 @@
+title = "Plummer sphere (N=2000, compact-support spline softening)"
+# Same IC as plummer_2k.toml, but with cubic-spline (Hernquist & Katz 1989)
+# softening instead of Plummer -- the force is exactly Newtonian for
+# r >= 2*softening.eps, unlike Plummer softening which is biased at every
+# radius. Compare virial ratio / RDF against plummer_2k.toml.
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "spline"
+eps = 0.025
+
+[time]
+frames = 200
+substeps_per_frame = 5
+
+[solver]
+kind = "barnes_hut"
+theta = 0.5
+
+[scenario]
+type = "plummer"
+n = 2000
+seed = 1

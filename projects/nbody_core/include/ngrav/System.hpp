@@ -99,8 +99,9 @@ public:
             const double v2 = s.vx[ii] * s.vx[ii] + s.vy[ii] * s.vy[ii] + ((D == 3) ? s.vz[ii] * s.vz[ii] : 0.0);
             kinetic += 0.5 * s.m[ii] * v2;
         }
-        const double eps2 = sp.soft.eps2;
+        const Softening soft = sp.soft;
         const double G = sp.G;
+        const bool spline = (soft.kind == SofteningKind::Spline);
         double potential = 0.0;
 #pragma omp parallel for reduction(+ : potential) schedule(dynamic, 32) if (n > 256)
         for (long i = 0; i < n; ++i) {
@@ -110,11 +111,25 @@ public:
                 const std::size_t jj = static_cast<std::size_t>(j);
                 const double dx = s.x[jj] - s.x[ii], dy = s.y[jj] - s.y[ii];
                 const double dz = (D == 3) ? (s.z[jj] - s.z[ii]) : 0.0;
-                const double r2 = dx * dx + dy * dy + dz * dz + eps2;
-                if constexpr (D == 3) {
-                    local -= G * s.m[ii] * s.m[jj] / std::sqrt(r2);
+                const double mij = s.m[ii] * s.m[jj];
+                if (spline) {
+                    const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
+                    const double q = (r <= 1e-300) ? 0.0 : r / soft.eps;
+                    if constexpr (D == 3) {
+                        // phi(q)*h/(Gm) -> phi = G*m*[that]/h; potential energy term = G*mi*mj*phi(q)/h.
+                        local += G * mij * detail::SplinePotential3D(q) / soft.eps;
+                    } else {
+                        // phi_actual(r) = ln(h) + phi(q); the table gives phi(q) directly
+                        // (-> ln(q) for q>=2, matching the unsoftened ln(r) branch exactly).
+                        local += G * mij * (std::log(soft.eps) + detail::Spline2DTable()(q));
+                    }
                 } else {
-                    local += G * s.m[ii] * s.m[jj] * std::log(std::sqrt(r2));
+                    const double r2 = dx * dx + dy * dy + dz * dz + soft.eps2;
+                    if constexpr (D == 3) {
+                        local -= G * mij / std::sqrt(r2);
+                    } else {
+                        local += G * mij * std::log(std::sqrt(r2));
+                    }
                 }
             }
             potential += local;

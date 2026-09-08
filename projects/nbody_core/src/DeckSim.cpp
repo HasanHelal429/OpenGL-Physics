@@ -53,6 +53,8 @@ void DeckSim<D>::Configure(const fw::Deck& deck) {
     m_deckG = deck.GetDouble("sim.G", 1.0);
     m_deckEps = deck.GetDouble("softening.eps", 0.05);
     m_deckDt = deck.GetDouble("time.dt", 1e-3);
+    m_deckSoftKind =
+        (deck.GetString("softening.kind", "plummer") == "spline") ? SofteningKind::Spline : SofteningKind::Plummer;
 
     LoadScenario();
 
@@ -70,7 +72,8 @@ template <int D>
 void DeckSim<D>::LoadScenario() {
     Scenario<D> sc = BuildScenario<D>(m_scenarioType, m_scenarioParams);
     m_sp.G = m_deckHasG ? m_deckG : sc.G;
-    m_sp.soft = Softening::Plummer(m_deckHasEps ? m_deckEps : sc.soft.eps);
+    const double softEps = m_deckHasEps ? m_deckEps : sc.soft.eps;
+    m_sp.soft = (m_deckSoftKind == SofteningKind::Spline) ? Softening::Spline(softEps) : Softening::Plummer(softEps);
     m_sp.dt = m_deckHasDt ? m_deckDt : sc.suggestedDt;
     m_lastDt = m_sp.dt;
     m_cameraScale = sc.cameraScale;

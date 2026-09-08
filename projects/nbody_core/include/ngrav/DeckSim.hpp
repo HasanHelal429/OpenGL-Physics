@@ -53,6 +53,7 @@ private:
     // Deck-vs-scenario override tracking (a scenario carries tuned defaults).
     bool m_deckHasG = false, m_deckHasEps = false, m_deckHasDt = false;
     double m_deckG = 1.0, m_deckEps = 0.05, m_deckDt = 1e-3;
+    SofteningKind m_deckSoftKind = SofteningKind::Plummer;
 
     fw::ParticleCloud m_cloud;
     fw::Camera m_camera;

@@ -329,7 +329,35 @@ renders (libx264 + PNG-fallback path exercised).
       acceleration enough that adaptive never needs to shrink below the
       fixed ceiling there -- expected to change once P4 allows tighter
       softening.
-- [ ] Phase 4 -- spline softening
+- [x] Phase 4 -- compact-support cubic-spline softening (Hernquist & Katz
+      1989), independently re-derived from the shell-theorem enclosed-mass
+      integral of the same normalized cubic B-spline SPH density kernel uses
+      (06_tidal_disruption's `SphKernelGlsl`), for both 3D and 2D. Exactly
+      Newtonian for r >= H = 2*eps; a finite, smooth correction inside;
+      `Softening::Spline(eps)`, deck `softening.kind = "spline"`.
+      **Gate met**: force == unsoftened Newtonian to 2.2e-16 (machine
+      precision) for r>=2h, both dims (`--selftest`, 200 random pairs each).
+      Derivation cross-checks: central 3D potential phi(0) = -1.4 G m/eps
+      matches the published Hernquist-Katz value exactly; both potential
+      branches agree at q=1 and reduce to exact -Gm/r / -Gm/r^2 at q=2
+      (verified to 1e-10 by finite-difference of the closed form against the
+      force). A genuine bug was caught and fixed here: the first attempt at
+      the 2D potential's outer-branch quadrature subtracted a `-1/q` term to
+      "cancel a log divergence" that turned out not to exist (chi_2D(q)/q is
+      already regular at q=0 since chi~q^2) -- the subtraction instead
+      introduced a spurious singularity; fixed by integrating the true
+      (regular) integrand directly.
+      **Energy conservation** (the real end-to-end check that force and
+      potential are mutually consistent, not just individually plausible):
+      spline-softened eccentric 3D orbit (e=0.5) drifts 1.2e-5 over 4
+      periods; 2D orbit drifts 2.4e-6 -- both comparable to the equivalent
+      Plummer-softened orbits. **Equilibrium check**: a 2000-body Plummer
+      sphere held with spline softening (eps=0.025) keeps its median radius
+      near the analytic half-mass value (1.305 in G=M=a=1 units) for 200
+      frames with energy drift <=0.005%, matching the Plummer-softened run
+      on the same IC (`decks/plummer_2k_spline.toml` vs `plummer_2k.toml`).
+      Deck-only for now (no app-UI toggle -- not called for by this phase;
+      P3's adaptive-dt slider was the one with an explicit app-UI bullet).
 - [ ] Phase 5 -- quadrupole BH + relative MAC
 - [ ] Phase 6 -- mutual dual-tree FMM + retire AdaptiveFmm
 - [ ] Phase 7 -- SphericalFmm speedup
