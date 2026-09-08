@@ -1,0 +1,24 @@
+title = "Plummer sphere (N=2000, equilibrium)"
+# An isotropic Plummer sphere in units G = M = a = 1. Held in virial
+# equilibrium it should keep its half-mass radius (~1.305 a) for many
+# crossing times (t_cross ~ 2*pi). Barnes-Hut theta=0.5.
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "plummer"
+eps = 0.05
+
+[time]
+frames = 200
+substeps_per_frame = 5
+
+[solver]
+kind = "barnes_hut"
+theta = 0.5
+
+[scenario]
+type = "plummer"
+n = 2000
+seed = 1

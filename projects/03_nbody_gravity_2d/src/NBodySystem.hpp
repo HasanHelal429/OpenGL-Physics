@@ -15,6 +15,10 @@ enum class SolverType { Direct, BarnesHut, ComplexFmm };
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec2>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec2>& accelOut);
 
+// Wire this project's still-in-project ComplexFmm solver onto an
+// ngrav::System<2> as an aux adapter.
+void RegisterFmmAdaptersOn(ngrav::System<2>& sys);
+
 // Softened-gravity 2D N-body system. Thin wrapper over ngrav::System<2>: it
 // owns the SoA state and the leapfrog integrator; NBodySystem keeps an AoS
 // mirror so the render / diagnostics call sites that expect

@@ -8,6 +8,9 @@ add_library(nbody_core STATIC
     src/Tree.cpp
     src/Solvers.cpp
     src/Integrator.cpp
+    src/Scenarios.cpp
+    src/DeckSim.cpp
+    src/SelfTest.cpp
 )
 
 target_include_directories(nbody_core PUBLIC
@@ -15,6 +18,7 @@ target_include_directories(nbody_core PUBLIC
 )
 
 target_link_libraries(nbody_core PUBLIC
+    physgl                     # fw::Simulation / Deck / OutputWriter / ParticleCloud
     glm::glm
     OpenMP::OpenMP_CXX
 )
@@ -29,6 +33,6 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(nbody_core PRIVATE -O3 -march=native -funroll-loops)
 endif()
 
-# Standalone numerics validation (no GL). Seeds 02/03's --selftest (P2).
-add_executable(nbody_core_selftest test/selftest.cpp)
+# Standalone numerics validation (no GL). Same checks as 02/03's --selftest.
+add_executable(nbody_core_selftest test/main.cpp)
 target_link_libraries(nbody_core_selftest PRIVATE nbody_core OpenMP::OpenMP_CXX)

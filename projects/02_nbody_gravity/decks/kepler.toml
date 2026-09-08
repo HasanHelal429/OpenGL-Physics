@@ -1,0 +1,13 @@
+title = "Two-body Kepler orbit"
+# Equal masses, eccentric bound orbit (e ~ 0.36). Integrated with Direct;
+# checks the leapfrog integrator against the analytic ellipse.
+
+[solver]
+kind = "direct"
+
+[time]
+frames = 400
+substeps_per_frame = 20
+
+[scenario]
+type = "kepler"

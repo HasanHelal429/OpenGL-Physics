@@ -74,24 +74,26 @@ void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const s
     for (std::size_t i = 0; i < n; ++i) accelOut[i] = glm::dvec3(out.ax[i], out.ay[i], out.az[i]);
 }
 
+void RegisterFmmAdaptersOn(ngrav::System<3>& sys) {
+    sys.SetAuxSolver(ngrav::Solver::AdaptiveFmm,
+                     [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
+                         const std::vector<glm::dvec3> pos = AoSPositions(in);
+                         std::vector<glm::dvec3> a;
+                         ComputeAccelAdaptiveFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                         WriteAccel(a, out);
+                     });
+    sys.SetAuxSolver(ngrav::Solver::SphericalFmm,
+                     [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
+                         const std::vector<glm::dvec3> pos = AoSPositions(in);
+                         std::vector<glm::dvec3> a;
+                         ComputeAccelSphericalFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                         WriteAccel(a, out);
+                     });
+}
+
 NBodySystem::NBodySystem() { RegisterFmmAdapters(); }
 
-void NBodySystem::RegisterFmmAdapters() {
-    m_core.SetAuxSolver(ngrav::Solver::AdaptiveFmm,
-                        [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
-                            const std::vector<glm::dvec3> pos = AoSPositions(in);
-                            std::vector<glm::dvec3> a;
-                            ComputeAccelAdaptiveFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
-                            WriteAccel(a, out);
-                        });
-    m_core.SetAuxSolver(ngrav::Solver::SphericalFmm,
-                        [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
-                            const std::vector<glm::dvec3> pos = AoSPositions(in);
-                            std::vector<glm::dvec3> a;
-                            ComputeAccelSphericalFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
-                            WriteAccel(a, out);
-                        });
-}
+void NBodySystem::RegisterFmmAdapters() { RegisterFmmAdaptersOn(m_core); }
 
 ngrav::StepParams NBodySystem::MakeParams(double G, double softening, SolverType solver, double theta) const {
     ngrav::StepParams sp;

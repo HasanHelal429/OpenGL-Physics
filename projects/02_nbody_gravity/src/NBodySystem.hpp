@@ -19,6 +19,11 @@ enum class SolverType { Direct, BarnesHut, AdaptiveFmm, SphericalFmm };
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec3>& accelOut);
 
+// Wire this project's still-in-project FMM solvers (AdaptiveFmm / SphericalFmm)
+// onto an ngrav::System<3> as aux adapters. Used by NBodySystem and by the
+// deck-driven NBodySim path in main.cpp.
+void RegisterFmmAdaptersOn(ngrav::System<3>& sys);
+
 // Softened-gravity N-body system. Thin wrapper over ngrav::System<3>: it owns
 // the SoA state and the kick-drift-kick integrator; NBodySystem keeps an AoS
 // position/velocity mirror so the render / diagnostics call sites that expect

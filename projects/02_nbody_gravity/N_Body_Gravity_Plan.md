@@ -299,7 +299,16 @@ renders (libx264 + PNG-fallback path exercised).
       `ngrav::System<D>` wrapper; `-O3 -march=native`. `nbody_core_selftest`
       PASS (Kepler 2.1e-5/5.6e-10, Lagrange 5.0e-6/2.4e-11, BH-vs-Direct
       6e-15/2e-14). Both projects build.
-- [ ] Phase 2 -- NBodySim + headless + decks + `--selftest`
+- [x] Phase 2 -- `ngrav::DeckSim<D>` (`fw::Simulation`), rewritten `main.cpp`
+      (`--deck --out --frames --substeps --interactive --selftest
+      --render-check`), `ngrav/ic/Plummer`, `ngrav::Scenarios<D>` (6 types),
+      `decks/{kepler,plummer_2k,cold_collapse}.toml`,
+      `tools/{plot_conservation,plot_orbit,nbody_ref}.py`. `--selftest` PASS
+      (both). Kepler deck: energy drift 2.1e-3%, |L| drift 6e-13% over 100
+      frames. Cold-collapse deck: uniform sphere free-falls to 65% median-
+      radius crash by t=1, energy conserved 0.7% (BH monopole). Headless
+      manifest/csv columns == `Info().diagnostics`; `--render-check` -> valid
+      PNG.
 - [ ] Phase 3 -- adaptive global dt
 - [ ] Phase 4 -- spline softening
 - [ ] Phase 5 -- quadrupole BH + relative MAC

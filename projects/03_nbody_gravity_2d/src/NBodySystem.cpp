@@ -60,17 +60,19 @@ void ComputeAccel(SolverType solver, const std::vector<glm::dvec2>& pos, const s
     for (std::size_t i = 0; i < n; ++i) accelOut[i] = glm::dvec2(out.ax[i], out.ay[i]);
 }
 
+void RegisterFmmAdaptersOn(ngrav::System<2>& sys) {
+    sys.SetAuxSolver(ngrav::Solver::ComplexFmm,
+                     [](const ngrav::SoA<2>& in, const ngrav::StepParams& sp, ngrav::SoA<2>& out) {
+                         const std::vector<glm::dvec2> pos = AoSPositions(in);
+                         std::vector<glm::dvec2> a;
+                         ComputeAccelComplexFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                         WriteAccel(a, out);
+                     });
+}
+
 NBodySystem::NBodySystem() { RegisterFmmAdapters(); }
 
-void NBodySystem::RegisterFmmAdapters() {
-    m_core.SetAuxSolver(ngrav::Solver::ComplexFmm,
-                        [](const ngrav::SoA<2>& in, const ngrav::StepParams& sp, ngrav::SoA<2>& out) {
-                            const std::vector<glm::dvec2> pos = AoSPositions(in);
-                            std::vector<glm::dvec2> a;
-                            ComputeAccelComplexFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
-                            WriteAccel(a, out);
-                        });
-}
+void NBodySystem::RegisterFmmAdapters() { RegisterFmmAdaptersOn(m_core); }
 
 ngrav::StepParams NBodySystem::MakeParams(double G, double softening, SolverType solver, double theta) const {
     ngrav::StepParams sp;
