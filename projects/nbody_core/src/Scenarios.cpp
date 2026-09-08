@@ -16,12 +16,24 @@ void Fill(SoA<D>& s, int n) {
 }
 
 // --- two-body Kepler --------------------------------------------------------
+// `pp.eccentricity` sets the 3D orbit's shape via vis-viva at apoapsis r0=1:
+// vRel = vCirc * sqrt(1-e), a = r0/(1+e). e=0.36 (the default) reproduces the
+// original fixed "0.8*vCirc" orbit exactly (sqrt(1-0.36) = 0.8) -- so this is
+// a strict generalization, not a behavior change, at the default. 2D has no
+// closed-orbit eccentricity in the usual sense (see ComplexFmm.hpp's header
+// comment on the 1/r force law); its velocity stays the fixed 0.8*vCirc.
 template <int D>
-Scenario<D> Kepler() {
+Scenario<D> Kepler(const ScenarioParams& pp) {
     Scenario<D> r;
     const double G = 1.0, m = 1.0, sep = 1.0;
     const double vCirc = (D == 3) ? std::sqrt(G * 2.0 * m / sep) : std::sqrt(G * 2.0 * m);
-    const double vRel = 0.8 * vCirc;
+    double vRel;
+    if constexpr (D == 3) {
+        const double e = std::clamp(pp.eccentricity, 0.0, 0.99);
+        vRel = vCirc * std::sqrt(1.0 - e);
+    } else {
+        vRel = 0.8 * vCirc;
+    }
     Fill<D>(r.state, 2);
     Vec<D> p0(0.0), p1(0.0), v0(0.0), v1(0.0);
     p0.x = -sep / 2;
@@ -37,7 +49,15 @@ Scenario<D> Kepler() {
     r.G = G;
     r.soft = Softening::Plummer(0.02);
     if constexpr (D == 3) {
-        const double period = 2.0 * M_PI * std::sqrt(sep * sep * sep / (G * 2.0 * m));
+        const double e = std::clamp(pp.eccentricity, 0.0, 0.99);
+        const double a = sep / (1.0 + e);
+        const double period = 2.0 * M_PI * std::sqrt(a * a * a / (G * 2.0 * m));
+        // Apoapsis-scale step (2000/period, same convention at every e) --
+        // deliberately NOT scaled up for a tight periapsis: a high-e orbit
+        // is exactly the case adaptive global timestepping exists for (see
+        // eccentric_orbit_{fixed,adaptive}.toml), so the "suggested" fixed
+        // dt should stay the cheap, apoapsis-appropriate one and let a fixed
+        // run visibly struggle at periapsis rather than papering over it.
         r.suggestedDt = period / 2000.0;
     } else {
         r.suggestedDt = (2.0 * M_PI * sep / vCirc) / 2000.0;
@@ -220,14 +240,14 @@ ScenarioType ScenarioFromString(const std::string& s, ScenarioType fallback) {
 template <int D>
 Scenario<D> BuildScenario(ScenarioType type, const ScenarioParams& params) {
     switch (type) {
-        case ScenarioType::TwoBodyKepler: return Kepler<D>();
+        case ScenarioType::TwoBodyKepler: return Kepler<D>(params);
         case ScenarioType::LagrangeTriangle: return Lagrange<D>();
         case ScenarioType::Cluster: return Cluster<D>(params);
         case ScenarioType::RotatingDisk: return RotatingDisk<D>(params);
         case ScenarioType::PlummerSphere: return PlummerEquilibrium<D>(params);
         case ScenarioType::ColdCollapse: return ColdUniform<D>(params);
     }
-    return Kepler<D>();
+    return Kepler<D>(params);
 }
 
 template Scenario<2> BuildScenario<2>(ScenarioType, const ScenarioParams&);

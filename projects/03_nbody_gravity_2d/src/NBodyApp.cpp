@@ -103,8 +103,8 @@ void NBodyApp::OnFixedUpdate(double fixedDt) {
     const auto t0 = std::chrono::steady_clock::now();
     int steps = 0;
     for (; steps < maxSteps; ++steps) {
-        m_system.Step(m_dt, m_G, m_softening, m_solver, m_theta);
-        m_simTime += m_dt;
+        m_lastDtTaken = m_system.Step(m_dt, m_G, m_softening, m_solver, m_theta, m_adaptiveDt, m_eta);
+        m_simTime += m_lastDtTaken;
         ++m_stepCount;
 
         const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -248,7 +248,16 @@ void NBodyApp::DrawControls() {
         m_softening = static_cast<double>(softening);
 
     float dt = static_cast<float>(m_dt);
-    if (ImGui::SliderFloat("dt", &dt, 1e-5f, 0.05f, "%.5f", ImGuiSliderFlags_Logarithmic)) m_dt = static_cast<double>(dt);
+    if (ImGui::SliderFloat(m_adaptiveDt ? "dt (ceiling)" : "dt", &dt, 1e-5f, 0.05f, "%.5f", ImGuiSliderFlags_Logarithmic))
+        m_dt = static_cast<double>(dt);
+
+    ImGui::Checkbox("Adaptive dt (eta*min sqrt(eps/|a|))", &m_adaptiveDt);
+    ImGui::BeginDisabled(!m_adaptiveDt);
+    float eta = static_cast<float>(m_eta);
+    if (ImGui::SliderFloat("eta", &eta, 0.005f, 0.1f, "%.3f", ImGuiSliderFlags_Logarithmic)) m_eta = static_cast<double>(eta);
+    ImGui::SameLine();
+    ImGui::Text("dt taken: %.3e", m_lastDtTaken);
+    ImGui::EndDisabled();
 
     ImGui::SliderInt("Substeps / frame", &m_substeps, 1, 30);
 

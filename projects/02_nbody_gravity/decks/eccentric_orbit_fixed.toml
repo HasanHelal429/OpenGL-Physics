@@ -1,0 +1,18 @@
+title = "Eccentric two-body orbit (e=0.9, fixed dt)"
+# A highly eccentric bound orbit: periapsis speed is (1+e)/(1-e) = 19x
+# apoapsis speed. The scenario's suggested dt (period/2000) is tuned for
+# APOAPSIS -- fine for most of the orbit, but too coarse to resolve
+# periapsis, so this run loses real energy on every close passage. Compare
+# against eccentric_orbit_adaptive.toml, same nominal dt as a ceiling but
+# shrinking near periapsis.
+
+[solver]
+kind = "direct"
+
+[time]
+frames = 400
+substeps_per_frame = 20
+
+[scenario]
+type = "kepler"
+eccentricity = 0.9

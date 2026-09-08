@@ -80,10 +80,14 @@ private:
 
     double m_G = 1.0;
     double m_softening = 0.05;
-    double m_dt = 1e-3;
+    double m_dt = 1e-3; // fixed step, or the adaptive ceiling when m_adaptiveDt
     double m_theta = 0.5;
     SolverType m_solver = SolverType::BarnesHut;
     int m_substeps = 4; // leapfrog steps per fixed-update tick -- the sim-speed dial
+
+    bool m_adaptiveDt = false;
+    double m_eta = 0.03;
+    double m_lastDtTaken = 0.0;
 
     bool m_running = true;
     bool m_stepOnce = false;

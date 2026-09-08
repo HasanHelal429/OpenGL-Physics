@@ -40,7 +40,11 @@ public:
     // G/softening/solver/theta change while paused.
     void PrimeAccelerations(double G, double softening, SolverType solver, double theta);
 
-    void Step(double dt, double G, double softening, SolverType solver, double theta);
+    // `adaptive` replaces the fixed `dt` with eta*min sqrt(softening/|a|),
+    // clamped to at most `dt` (dt is then just the ceiling / "as if fixed"
+    // step). Returns the dt actually taken, so callers can plot/inspect it.
+    double Step(double dt, double G, double softening, SolverType solver, double theta, bool adaptive = false,
+                double eta = 0.03);
 
     double TotalEnergy(double G, double softening) const;
     glm::dvec3 AngularMomentum() const; // about the center of mass

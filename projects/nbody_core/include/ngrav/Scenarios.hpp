@@ -21,6 +21,7 @@ enum class ScenarioType {
 struct ScenarioParams {
     int n = 2000;
     double diskRotationFraction = 0.7;
+    double eccentricity = 0.36; // TwoBodyKepler (3D only); 0.36 == the original fixed orbit
     std::uint32_t seed = 1;
 };
 

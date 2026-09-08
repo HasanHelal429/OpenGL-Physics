@@ -10,4 +10,10 @@ namespace ngrav {
 bool CoreSelfTest3D();
 bool CoreSelfTest2D();
 
+// Adaptive global timestep: a highly-eccentric two-body orbit where a coarse
+// fixed dt loses energy at periapsis but adaptive dt = eta*min sqrt(eps/|a|)
+// stays bounded, at fewer force evaluations than the fixed dt that matches
+// its accuracy. Also checks the fixed-dt path is unchanged.
+bool CoreDtSelfTest();
+
 } // namespace ngrav

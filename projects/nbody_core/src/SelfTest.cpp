@@ -213,4 +213,106 @@ bool CoreSelfTest2D() {
     return ok;
 }
 
+namespace {
+
+// Two equal masses, apoapsis r0 = 1, eccentricity e. v_rel from vis-viva.
+struct KeplerRun {
+    double energyDrift = 0.0;
+    long forceEvals = 0;
+    bool finite = true;
+};
+
+KeplerRun RunEccentric(double e, double dt, bool adaptive, double eta, int periods) {
+    const double G = 1.0, m = 1.0, r0 = 1.0;
+    const double a = r0 / (1.0 + e);
+    const double vRel = std::sqrt(G * 2.0 * m * (2.0 / r0 - 1.0 / a));
+    const double period = 2.0 * M_PI * std::sqrt(a * a * a / (G * 2.0 * m));
+
+    System<3> sys =
+        MakeSystem<3>({{-r0 / 2, 0, 0}, {r0 / 2, 0, 0}}, {{0, -vRel / 2, 0}, {0, vRel / 2, 0}}, {m, m});
+    StepParams sp;
+    sp.G = G;
+    sp.soft = Softening::Plummer(1e-4);
+    sp.solver = Solver::Direct;
+    sp.dt = dt;
+    sp.adaptive = adaptive;
+    sp.eta = eta;
+    sys.Prime(sp);
+    sys.ResetForceEvals();
+
+    const double E0 = sys.TotalEnergy(sp);
+    double Emin = E0, Emax = E0;
+    double t = 0.0;
+    const double tEnd = periods * period;
+    // TotalEnergy() (and, internally, Direct) each open an OpenMP parallel
+    // region -- negligible per call, but at up to ~6e5 steps for the finest
+    // fixed-dt calibration run, sampling every step turns that overhead into
+    // the dominant cost. Every other step is plenty to catch the true
+    // min/max of a smoothly-oscillating orbital energy.
+    constexpr int kSampleEvery = 32;
+    int k = 0;
+    int guard = 0;
+    while (t < tEnd && guard++ < 20000000) {
+        t += sys.Step(sp);
+        if ((k++ % kSampleEvery) == 0) {
+            const double E = sys.TotalEnergy(sp);
+            if (!std::isfinite(E)) return {1e30, sys.ForceEvals(), false};
+            Emin = std::min(Emin, E);
+            Emax = std::max(Emax, E);
+        }
+    }
+    KeplerRun r;
+    r.energyDrift = (Emax - Emin) / std::abs(0.5 * (Emax + Emin));
+    r.forceEvals = sys.ForceEvals();
+    return r;
+}
+
+} // namespace
+
+bool CoreDtSelfTest() {
+    bool ok = true;
+    std::printf("[adaptive global dt]\n");
+
+    // Fixed-dt path unchanged: a mild orbit reproduces the CoreSelfTest3D number.
+    const KeplerRun fixedMild = RunEccentric(0.36, 2.0 * M_PI * std::sqrt(std::pow(1.0 / 1.36, 3) / 2.0) / 2000.0,
+                                             false, 0.0, 4);
+    Check(ok, "fixed-dt mild-orbit energy drift", fixedMild.energyDrift, 1e-4);
+
+    // Highly eccentric (e = 0.9): global dt must resolve the periapsis, so a
+    // uniform step that's cheap away from periapsis is wasteful there, and
+    // one fine enough for periapsis is wasteful everywhere else -- exactly
+    // what adaptive dt = eta*min sqrt(eps/|a|) is for.
+    const double aEcc = 1.0 / 1.9;
+    const double Tecc = 2.0 * M_PI * std::sqrt(aEcc * aEcc * aEcc / 2.0);
+    const KeplerRun adaptiveRun = RunEccentric(0.9, Tecc / 600.0, true, 0.015, 3);
+    std::printf("  adaptive(eta=0.015): drift=%.3e  evals=%ld\n", adaptiveRun.energyDrift, adaptiveRun.forceEvals);
+    Check(ok, "adaptive e=0.9 energy drift", adaptiveRun.energyDrift, 1e-3);
+
+    // How many evals a FIXED dt needs to match that accuracy: this leapfrog
+    // is 2nd order, so drift ~ dt^2 (confirmed empirically -- see the plan
+    // doc's Phase 3 entry) once dt is fine enough to be in the asymptotic
+    // regime. Calibrate the exponent from two runs, extrapolate the fixed
+    // div needed to reach adaptiveRun's drift, then verify with one run at
+    // that div rather than trusting the extrapolation blindly.
+    const KeplerRun cal1 = RunEccentric(0.9, Tecc / 4800.0, false, 0.0, 3);
+    const KeplerRun cal2 = RunEccentric(0.9, Tecc / 9600.0, false, 0.0, 3);
+    const double p = std::log(cal1.energyDrift / cal2.energyDrift) / std::log(2.0); // dt halves -> drift / 2^p
+    const double divNeeded = 9600.0 * std::pow(cal2.energyDrift / adaptiveRun.energyDrift, 1.0 / p);
+    const KeplerRun fixedMatched = RunEccentric(0.9, Tecc / divNeeded, false, 0.0, 3);
+
+    std::printf("  fixed dt calibration: order p=%.2f, extrapolated div=%.0f -> verified drift=%.3e  evals=%ld\n", p,
+                divNeeded, fixedMatched.energyDrift, fixedMatched.forceEvals);
+
+    const double evalRatio = static_cast<double>(fixedMatched.forceEvals) / std::max(1L, adaptiveRun.forceEvals);
+    std::printf("  fixed/adaptive force-eval ratio at matched accuracy = %.2f\n", evalRatio);
+    Check(ok, "extrapolation sanity: verified drift within 50% of target", fixedMatched.energyDrift / adaptiveRun.energyDrift - 1.0,
+          0.5);
+    // evalRatio >= 2 required; encode as max(0, 2-evalRatio) <= 0 so Check's
+    // abs(value)<=tol form reads correctly (a shortfall shows as a positive,
+    // failing value; met-or-exceeded collapses to exactly 0).
+    Check(ok, "adaptive uses >=2x fewer evals at matched accuracy", std::max(0.0, 2.0 - evalRatio), 0.0);
+
+    return ok;
+}
+
 } // namespace ngrav

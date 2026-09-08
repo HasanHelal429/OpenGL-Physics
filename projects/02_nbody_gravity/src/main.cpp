@@ -26,6 +26,7 @@ struct Args {
     int substeps = 0;
     bool interactive = false;
     bool selftest = false;
+    bool dtSelftest = false;
     std::string renderCheck;
 };
 
@@ -40,6 +41,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--substeps") a.substeps = std::atoi(next());
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
+        else if (s == "--dt-selftest") a.dtSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -58,6 +60,11 @@ int main(int argc, char** argv) {
     if (a.selftest) {
         const bool ok = ngrav::CoreSelfTest3D();
         std::printf("\nselftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (a.dtSelftest) {
+        const bool ok = ngrav::CoreDtSelfTest();
+        std::printf("\ndt-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 

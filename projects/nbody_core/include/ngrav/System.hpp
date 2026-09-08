@@ -38,6 +38,7 @@ public:
 
     // Fill acceleration for `solver` over `in`, writing into `out` (G included).
     void ComputeAccel(Solver solver, const SoA<D>& in, const StepParams& sp, SoA<D>& out) const {
+        ++m_forceEvals;
         const PosMassView<D> v = ViewOf(in);
         switch (solver) {
             case Solver::Direct:
@@ -101,7 +102,7 @@ public:
         const double eps2 = sp.soft.eps2;
         const double G = sp.G;
         double potential = 0.0;
-#pragma omp parallel for reduction(+ : potential) schedule(dynamic, 32)
+#pragma omp parallel for reduction(+ : potential) schedule(dynamic, 32) if (n > 256)
         for (long i = 0; i < n; ++i) {
             const std::size_t ii = static_cast<std::size_t>(i);
             double local = 0.0;
@@ -155,6 +156,9 @@ public:
     SoA<D>& MutableState() { return m_state; }
     std::span<const double> AOldMag() const { return m_aOldMag; }
 
+    long ForceEvals() const { return m_forceEvals; }
+    void ResetForceEvals() { m_forceEvals = 0; }
+
 private:
     void RecomputeAccel(const StepParams& sp) {
         ComputeAccel(sp.solver, m_state, sp, m_state);
@@ -175,6 +179,7 @@ private:
     std::vector<double> m_aOldMag;
     std::unordered_map<int, AccelFn<D>> m_aux;
     bool m_primed = false;
+    mutable long m_forceEvals = 0;
 };
 
 } // namespace ngrav

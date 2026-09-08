@@ -309,7 +309,26 @@ renders (libx264 + PNG-fallback path exercised).
       radius crash by t=1, energy conserved 0.7% (BH monopole). Headless
       manifest/csv columns == `Info().diagnostics`; `--render-check` -> valid
       PNG.
-- [ ] Phase 3 -- adaptive global dt
+- [x] Phase 3 -- `Integrator<D>` adaptive global dt (`eta*min sqrt(eps/|a|)`,
+      clamped to at most the deck/scenario ceiling), `System::Step` returns
+      the dt taken, deck `[time].adaptive/eta`, `NBodyApp` checkbox + eta
+      slider + live "dt taken" readout, `--dt-selftest`. Also added
+      `scenario.eccentricity` (3D `TwoBodyKepler`, vis-viva; default 0.36
+      exactly reproduces the pre-existing fixed orbit) so a highly eccentric
+      deck exists to demonstrate the benefit.
+      **Gate met**: fixed-dt path unchanged (mild e=0.36 orbit: drift
+      8.4e-6, matches Phase-2 gate); on an e=0.9 orbit, adaptive
+      (eta=0.015) reaches drift 2.75e-6 -- to match that accuracy a fixed
+      dt needs (calibrated at runtime via the leapfrog's confirmed order
+      p=1.99, then verified) ~190000 steps/period vs adaptive's actual
+      cost, an **8.9x fewer force evaluations** result (`--dt-selftest`,
+      both projects). Deck demo (`decks/eccentric_orbit_{fixed,adaptive}.toml`,
+      e=0.9, same nominal dt): fixed drifts 1.42%, adaptive drifts 0.027%
+      (53x tighter) by shrinking dt from 8.5e-4 to 1.3e-4 through periapsis.
+      Cold-collapse deck's current (legacy, pre-P4) softening bounds peak
+      acceleration enough that adaptive never needs to shrink below the
+      fixed ceiling there -- expected to change once P4 allows tighter
+      softening.
 - [ ] Phase 4 -- spline softening
 - [ ] Phase 5 -- quadrupole BH + relative MAC
 - [ ] Phase 6 -- mutual dual-tree FMM + retire AdaptiveFmm

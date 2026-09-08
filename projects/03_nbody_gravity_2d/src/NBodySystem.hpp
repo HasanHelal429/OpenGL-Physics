@@ -31,7 +31,10 @@ public:
                        std::vector<double> masses);
 
     void PrimeAccelerations(double G, double softening, SolverType solver, double theta);
-    void Step(double dt, double G, double softening, SolverType solver, double theta);
+    // `adaptive` replaces the fixed `dt` with eta*min sqrt(softening/|a|),
+    // clamped to at most `dt`. Returns the dt actually taken.
+    double Step(double dt, double G, double softening, SolverType solver, double theta, bool adaptive = false,
+                double eta = 0.03);
 
     double TotalEnergy(double G, double softening) const;
     double AngularMomentum() const; // 2D: the scalar z-component

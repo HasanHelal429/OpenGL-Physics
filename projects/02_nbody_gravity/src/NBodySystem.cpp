@@ -134,12 +134,16 @@ void NBodySystem::SyncMirrorFromCore() {
     }
 }
 
-void NBodySystem::Step(double dt, double G, double softening, SolverType solver, double theta) {
-    if (m_pos.empty()) return;
+double NBodySystem::Step(double dt, double G, double softening, SolverType solver, double theta, bool adaptive,
+                          double eta) {
+    if (m_pos.empty()) return dt;
     ngrav::StepParams sp = MakeParams(G, softening, solver, theta);
     sp.dt = dt;
-    m_core.Step(sp);
+    sp.adaptive = adaptive;
+    sp.eta = eta;
+    const double taken = m_core.Step(sp);
     SyncMirrorFromCore();
+    return taken;
 }
 
 double NBodySystem::TotalEnergy(double G, double softening) const {

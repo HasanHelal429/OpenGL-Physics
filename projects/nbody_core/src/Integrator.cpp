@@ -51,9 +51,11 @@ double ChooseAdaptiveDt(const SoA<D>& s, double eta, double eps, double dtFallba
     }
     if (minTau == std::numeric_limits<double>::max()) return dtFallback;
     const double dt = eta * minTau;
-    // Clamp within 4x of the deck's nominal dt so a single close pass can't
-    // stall the whole run to a crawl (block timesteps in P15 remove this cap).
-    return std::clamp(dt, 0.25 * dtFallback, 4.0 * dtFallback);
+    // dtFallback acts as the maximum step (the deck's nominal / a scenario's
+    // suggested dt); adaptive may shrink it freely for a close pass, down to
+    // a floor that stops a hard collision stalling the run forever (block
+    // timesteps in P15 handle that regime properly).
+    return std::clamp(dt, dtFallback / 4096.0, dtFallback);
 }
 
 template double LeapfrogStep<2>(SoA<2>&, const StepParams&, const AccelFn<2>&, SoA<2>&);

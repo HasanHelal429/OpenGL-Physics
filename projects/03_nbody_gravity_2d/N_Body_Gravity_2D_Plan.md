@@ -42,4 +42,13 @@ records what is genuinely 2D-specific.
       `nbody_core`'s flat quadtree; `ComplexFmm` kept in-project via adapter.
       `nbody_core_selftest` 2D checks PASS (Kepler E-drift 5.4e-6 / L-drift
       1.7e-14; BH theta=0 vs Direct 2e-14). Builds and links `nbody_core`.
-- [ ] Phases 2-16 -- in parity with 02 (see that plan's Progress).
+- [x] Phase 3 -- adaptive global dt (shared `ngrav::Integrator<D>`), deck
+      `[time].adaptive/eta`, `NBodyApp` checkbox/slider, `--dt-selftest`
+      (runs the same 3D eccentric-orbit validation as 02 -- 2D's `1/r`
+      force law has no closed-form vis-viva orbit; the integrator code
+      itself is dimension-generic). No 2D-specific eccentric-orbit deck:
+      2D's `Kepler()` intentionally keeps its fixed `0.8*vCirc` convention
+      (2D orbits precess rather than closing, so "eccentricity" isn't the
+      same well-defined quantity -- see `Kepler()`'s own comment in
+      `Scenarios.cpp`).
+- [ ] Phases 4-16 -- in parity with 02 (see that plan's Progress).

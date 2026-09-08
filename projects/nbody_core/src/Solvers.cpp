@@ -49,7 +49,7 @@ void ComputeAccelDirect(const PosMassView<D>& pts, const StepParams& sp, SoA<D>&
     const double* z = (D == 3) ? pts.z.data() : nullptr;
     const double* m = pts.m.data();
 
-#pragma omp parallel for schedule(static)
+#pragma omp parallel for schedule(static) if (n > 256)
     for (int i = 0; i < n; ++i) {
         const double xi = x[i];
         const double yi = y[i];
@@ -129,7 +129,7 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, cons
     const double theta2 = sp.mac.theta * sp.mac.theta;
     const bool haveOld = (aOld.size() == static_cast<std::size_t>(n));
 
-#pragma omp parallel for schedule(dynamic, 64)
+#pragma omp parallel for schedule(dynamic, 64) if (n > 256)
     for (int i = 0; i < n; ++i) {
         const double xi = pts.x[static_cast<std::size_t>(i)];
         const double yi = pts.y[static_cast<std::size_t>(i)];
