@@ -10,25 +10,31 @@ namespace nbody {
 
 namespace {
 
-void ComputeAccelDirect(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
-                         double softening, std::vector<glm::dvec3>& accel) {
-    const int n = static_cast<int>(pos.size());
-    const double eps2 = softening * softening;
-    accel.assign(static_cast<size_t>(n), glm::dvec3(0.0));
+ngrav::Solver ToCore(SolverType s) {
+    switch (s) {
+        case SolverType::Direct: return ngrav::Solver::Direct;
+        case SolverType::BarnesHut: return ngrav::Solver::BarnesHut;
+        case SolverType::AdaptiveFmm: return ngrav::Solver::AdaptiveFmm;
+        case SolverType::SphericalFmm: return ngrav::Solver::SphericalFmm;
+    }
+    return ngrav::Solver::BarnesHut;
+}
 
-#pragma omp parallel for schedule(static)
-    for (int i = 0; i < n; ++i) {
-        glm::dvec3 acc(0.0);
-        const glm::dvec3 pi = pos[static_cast<size_t>(i)];
-        for (int j = 0; j < n; ++j) {
-            if (j == i) continue;
-            const glm::dvec3 d = pos[static_cast<size_t>(j)] - pi;
-            const double dist2 = glm::dot(d, d) + eps2;
-            const double invDist = 1.0 / std::sqrt(dist2);
-            const double invDist3 = invDist * invDist * invDist;
-            acc += G * mass[static_cast<size_t>(j)] * invDist3 * d;
-        }
-        accel[static_cast<size_t>(i)] = acc;
+// Build an AoS position array from an ngrav SoA view -- the two FMM solvers
+// still take std::vector<glm::dvec3>. One alloc per FMM force eval; these are
+// O(N log N)+ so it's noise. Removed in P6/P7 when they move into nbody_core.
+std::vector<glm::dvec3> AoSPositions(const ngrav::SoA<3>& s) {
+    std::vector<glm::dvec3> p(s.Count());
+    for (std::size_t i = 0; i < s.Count(); ++i) p[i] = glm::dvec3(s.x[i], s.y[i], s.z[i]);
+    return p;
+}
+
+void WriteAccel(const std::vector<glm::dvec3>& a, ngrav::SoA<3>& out) {
+    out.ResizeAccel(a.size());
+    for (std::size_t i = 0; i < a.size(); ++i) {
+        out.ax[i] = a[i].x;
+        out.ay[i] = a[i].y;
+        out.az[i] = a[i].z;
     }
 }
 
@@ -36,12 +42,64 @@ void ComputeAccelDirect(const std::vector<glm::dvec3>& pos, const std::vector<do
 
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec3>& accelOut) {
-    switch (solver) {
-        case SolverType::Direct: ComputeAccelDirect(pos, mass, G, softening, accelOut); return;
-        case SolverType::BarnesHut: ComputeAccelBarnesHut(pos, mass, G, softening, theta, accelOut); return;
-        case SolverType::AdaptiveFmm: ComputeAccelAdaptiveFmm(pos, mass, G, softening, theta, accelOut); return;
-        case SolverType::SphericalFmm: ComputeAccelSphericalFmm(pos, mass, G, softening, theta, accelOut); return;
+    const std::size_t n = pos.size();
+    if (solver == SolverType::AdaptiveFmm) {
+        ComputeAccelAdaptiveFmm(pos, mass, G, softening, theta, accelOut);
+        return;
     }
+    if (solver == SolverType::SphericalFmm) {
+        ComputeAccelSphericalFmm(pos, mass, G, softening, theta, accelOut);
+        return;
+    }
+    // Direct / Barnes-Hut via nbody_core.
+    ngrav::SoA<3> in;
+    in.Resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        in.x[i] = pos[i].x;
+        in.y[i] = pos[i].y;
+        in.z[i] = pos[i].z;
+        in.m[i] = mass[i];
+    }
+    ngrav::StepParams sp;
+    sp.G = G;
+    sp.soft = ngrav::Softening::Plummer(softening);
+    sp.mac.theta = theta;
+    ngrav::SoA<3> out;
+    const ngrav::PosMassView<3> v = ngrav::ViewOf(in);
+    if (solver == SolverType::Direct)
+        ngrav::ComputeAccelDirect<3>(v, sp, out);
+    else
+        ngrav::ComputeAccelBarnesHut<3>(v, sp, out);
+    accelOut.resize(n);
+    for (std::size_t i = 0; i < n; ++i) accelOut[i] = glm::dvec3(out.ax[i], out.ay[i], out.az[i]);
+}
+
+NBodySystem::NBodySystem() { RegisterFmmAdapters(); }
+
+void NBodySystem::RegisterFmmAdapters() {
+    m_core.SetAuxSolver(ngrav::Solver::AdaptiveFmm,
+                        [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
+                            const std::vector<glm::dvec3> pos = AoSPositions(in);
+                            std::vector<glm::dvec3> a;
+                            ComputeAccelAdaptiveFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                            WriteAccel(a, out);
+                        });
+    m_core.SetAuxSolver(ngrav::Solver::SphericalFmm,
+                        [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
+                            const std::vector<glm::dvec3> pos = AoSPositions(in);
+                            std::vector<glm::dvec3> a;
+                            ComputeAccelSphericalFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                            WriteAccel(a, out);
+                        });
+}
+
+ngrav::StepParams NBodySystem::MakeParams(double G, double softening, SolverType solver, double theta) const {
+    ngrav::StepParams sp;
+    sp.G = G;
+    sp.soft = ngrav::Softening::Plummer(softening);
+    sp.mac.theta = theta;
+    sp.solver = ToCore(solver);
+    return sp;
 }
 
 void NBodySystem::SetParticles(std::vector<glm::dvec3> positions, std::vector<glm::dvec3> velocities,
@@ -49,71 +107,47 @@ void NBodySystem::SetParticles(std::vector<glm::dvec3> positions, std::vector<gl
     m_pos = std::move(positions);
     m_vel = std::move(velocities);
     m_mass = std::move(masses);
-    m_accel.assign(m_pos.size(), glm::dvec3(0.0));
-}
 
-void NBodySystem::RecomputeAccel(double G, double softening, SolverType solver, double theta) {
-    ComputeAccel(solver, m_pos, m_mass, G, softening, theta, m_accel);
+    ngrav::SoA<3> s;
+    s.Resize(m_pos.size());
+    for (std::size_t i = 0; i < m_pos.size(); ++i) {
+        s.SetPos(i, m_pos[i]);
+        s.SetVel(i, m_vel[i]);
+        s.m[i] = m_mass[i];
+    }
+    m_core.SetParticles(std::move(s));
 }
 
 void NBodySystem::PrimeAccelerations(double G, double softening, SolverType solver, double theta) {
-    RecomputeAccel(G, softening, solver, theta);
+    m_core.Prime(MakeParams(G, softening, solver, theta));
+}
+
+void NBodySystem::SyncMirrorFromCore() {
+    const ngrav::SoA<3>& s = m_core.State();
+    m_pos.resize(s.Count());
+    m_vel.resize(s.Count());
+    for (std::size_t i = 0; i < s.Count(); ++i) {
+        m_pos[i] = glm::dvec3(s.x[i], s.y[i], s.z[i]);
+        m_vel[i] = glm::dvec3(s.vx[i], s.vy[i], s.vz[i]);
+    }
 }
 
 void NBodySystem::Step(double dt, double G, double softening, SolverType solver, double theta) {
-    const size_t n = m_pos.size();
-    if (n == 0) return;
-
-    for (size_t i = 0; i < n; ++i) m_vel[i] += 0.5 * dt * m_accel[i];
-    for (size_t i = 0; i < n; ++i) m_pos[i] += dt * m_vel[i];
-
-    RecomputeAccel(G, softening, solver, theta);
-
-    for (size_t i = 0; i < n; ++i) m_vel[i] += 0.5 * dt * m_accel[i];
+    if (m_pos.empty()) return;
+    ngrav::StepParams sp = MakeParams(G, softening, solver, theta);
+    sp.dt = dt;
+    m_core.Step(sp);
+    SyncMirrorFromCore();
 }
 
 double NBodySystem::TotalEnergy(double G, double softening) const {
-    const long n = static_cast<long>(m_pos.size());
-
-    double kinetic = 0.0;
-    for (long i = 0; i < n; ++i) {
-        const glm::dvec3& v = m_vel[static_cast<size_t>(i)];
-        kinetic += 0.5 * m_mass[static_cast<size_t>(i)] * glm::dot(v, v);
-    }
-
-    const double eps2 = softening * softening;
-    double potential = 0.0;
-#pragma omp parallel for reduction(+ : potential) schedule(dynamic, 32)
-    for (long i = 0; i < n; ++i) {
-        double local = 0.0;
-        for (long j = i + 1; j < n; ++j) {
-            const glm::dvec3 d = m_pos[static_cast<size_t>(j)] - m_pos[static_cast<size_t>(i)];
-            const double dist = std::sqrt(glm::dot(d, d) + eps2);
-            local -= G * m_mass[static_cast<size_t>(i)] * m_mass[static_cast<size_t>(j)] / dist;
-        }
-        potential += local;
-    }
-
-    return kinetic + potential;
+    ngrav::StepParams sp;
+    sp.G = G;
+    sp.soft = ngrav::Softening::Plummer(softening);
+    return m_core.TotalEnergy(sp);
 }
 
-glm::dvec3 NBodySystem::CenterOfMass() const {
-    double totalMass = 0.0;
-    glm::dvec3 com(0.0);
-    for (size_t i = 0; i < m_pos.size(); ++i) {
-        com += m_mass[i] * m_pos[i];
-        totalMass += m_mass[i];
-    }
-    return totalMass > 0.0 ? com / totalMass : com;
-}
-
-glm::dvec3 NBodySystem::AngularMomentum() const {
-    const glm::dvec3 com = CenterOfMass();
-    glm::dvec3 L(0.0);
-    for (size_t i = 0; i < m_pos.size(); ++i) {
-        L += m_mass[i] * glm::cross(m_pos[i] - com, m_vel[i]);
-    }
-    return L;
-}
+glm::dvec3 NBodySystem::AngularMomentum() const { return m_core.AngularMomentum(); }
+glm::dvec3 NBodySystem::CenterOfMass() const { return m_core.CenterOfMass(); }
 
 } // namespace nbody

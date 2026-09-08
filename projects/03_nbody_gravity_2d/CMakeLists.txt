@@ -13,5 +13,6 @@ add_executable(03_nbody_gravity_2d
 
 target_link_libraries(03_nbody_gravity_2d PRIVATE
     physgl
+    nbody_core
     OpenMP::OpenMP_CXX
 )
