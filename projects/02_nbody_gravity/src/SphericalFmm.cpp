@@ -16,14 +16,17 @@ namespace {
 
 using sh::Expansion;
 
-// Expansion order: how many degrees (0..p) each multipole/local expansion
-// carries. Unlike the Cartesian FMM (where going past quadrupole/octupole
-// means hand-deriving a whole new tensor and field formula), this is just a
-// bigger loop bound -- see SphericalHarmonics.hpp. Kept a compile-time
-// constant for this first pass rather than a runtime slider (see this
-// project's plan doc); p=5 is a reasonable balance for the naive O(p^4)
-// M2M/M2L/L2L translations this pass uses (no rotation-based speedup yet).
-constexpr int kOrder = 5;
+// Expansion order p is a runtime parameter (Phase 7 -- was a compile-time
+// kOrder=5 constant); threaded through as `kOrder` below to keep every
+// downstream reference unchanged. Unlike the Cartesian FMM (where going
+// past quadrupole/octupole means hand-deriving a whole new tensor and field
+// formula), this is just a bigger loop bound -- see SphericalHarmonics.hpp.
+// M2M/M2L/L2L are still the naive O(p^4) translation (no rotation-based
+// O(p^3) speedup -- see this project's plan doc for why that's out of scope
+// for this pass: getting the Wigner-rotation coefficients right for this
+// module's specific solid-harmonic sign convention carries real bug risk
+// for a flexible-schedule optimization, and analytic L2P similarly needs a
+// from-scratch gradient-recurrence derivation in this convention).
 
 // x's children, or {x} itself if x is a leaf -- identical helper to
 // AdaptiveFmm.cpp's own ChildrenOrSelf/SplitPair, duplicated rather than
@@ -71,7 +74,8 @@ std::vector<std::pair<int, int>> SplitPair(const std::vector<OctreeNode>& nodes,
 // TraverseSubtree's own comment on why a plain, *exact* per-node radius is
 // both simpler and more principled than a moment-ratio heuristic once the
 // expansion order is a free parameter instead of fixed at quadrupole.
-void BuildMultipoles(const AdaptiveOctree& tree, std::vector<Expansion>& multipole, std::vector<double>& maxRadius) {
+void BuildMultipoles(const AdaptiveOctree& tree, int kOrder, std::vector<Expansion>& multipole,
+                     std::vector<double>& maxRadius) {
     const std::vector<OctreeNode>& nodes = tree.Nodes();
     const std::vector<glm::dvec3>& pos = tree.Positions();
     const std::vector<double>& mass = tree.Masses();
@@ -112,7 +116,7 @@ void BuildMultipoles(const AdaptiveOctree& tree, std::vector<Expansion>& multipo
 // accept/reject test and the accumulation step are this solver's own: see
 // the two comments below for what actually changed and why.
 void TraverseSubtree(const std::vector<OctreeNode>& nodes, const std::vector<Expansion>& multipole,
-                      const std::vector<double>& maxRadius, double theta2, double minSep2,
+                      const std::vector<double>& maxRadius, int kOrder, double theta2, double minSep2,
                       const std::vector<std::pair<int, int>>& seeds, std::vector<Expansion>& local,
                       std::vector<std::pair<int, int>>& nearPairsOut) {
     std::vector<std::pair<int, int>> stack(seeds);
@@ -185,7 +189,7 @@ void TraverseSubtree(const std::vector<OctreeNode>& nodes, const std::vector<Exp
             // pair, so nothing is lost when this later gets pushed further
             // down the tree via L2L (unlike the Cartesian path's linear-
             // only local side -- see this project's plan doc).
-            local[static_cast<size_t>(t)] += sh::M2L(multipole[static_cast<size_t>(s)], nodeT.com, kOrder);
+            sh::M2LInto(multipole[static_cast<size_t>(s)], nodeT.com, kOrder, local[static_cast<size_t>(t)]);
             continue;
         }
 
@@ -220,7 +224,7 @@ void TraverseSubtree(const std::vector<OctreeNode>& nodes, const std::vector<Exp
 
 void ComputeAccelSphericalFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                                double softening, double theta, std::vector<glm::dvec3>& accelOut,
-                               SphericalFmmStats* stats) {
+                               SphericalFmmStats* stats, int kOrder) {
     const int n = static_cast<int>(pos.size());
     accelOut.assign(static_cast<size_t>(n), glm::dvec3(0.0));
     if (n == 0) return;
@@ -231,7 +235,7 @@ void ComputeAccelSphericalFmm(const std::vector<glm::dvec3>& pos, const std::vec
 
     std::vector<Expansion> multipole;
     std::vector<double> maxRadius;
-    BuildMultipoles(tree, multipole, maxRadius);
+    BuildMultipoles(tree, kOrder, multipole, maxRadius);
     const auto tMultipole1 = std::chrono::steady_clock::now();
 
     const std::vector<OctreeNode>& nodes = tree.Nodes();
@@ -280,8 +284,8 @@ void ComputeAccelSphericalFmm(const std::vector<glm::dvec3>& pos, const std::vec
 
 #pragma omp parallel for schedule(dynamic, 4)
     for (int ti = 0; ti < numTargets; ++ti) {
-        TraverseSubtree(nodes, multipole, maxRadius, theta2, minSep2, seedsPerTarget[static_cast<size_t>(ti)], local,
-                         nearPairsPerTarget[static_cast<size_t>(omp_get_thread_num())]);
+        TraverseSubtree(nodes, multipole, maxRadius, kOrder, theta2, minSep2, seedsPerTarget[static_cast<size_t>(ti)],
+                         local, nearPairsPerTarget[static_cast<size_t>(omp_get_thread_num())]);
     }
     const auto tTraverse1 = std::chrono::steady_clock::now();
 

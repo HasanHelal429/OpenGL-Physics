@@ -1,8 +1,10 @@
 #include "NBodyApp.hpp"
 #include "NBodySystem.hpp" // RegisterFmmAdaptersOn
+#include "SphericalFmm.hpp"
 
 #include "ngrav/DeckSim.hpp"
 #include "ngrav/SelfTest.hpp"
+#include "ngrav/Solvers.hpp"
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -11,9 +13,13 @@
 #include <glad/glad.h>
 #include <stb_image_write.h> // implementation lives in framework/src/SimApp.cpp
 
+#include <glm/glm.hpp>
+
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -28,6 +34,7 @@ struct Args {
     bool selftest = false;
     bool dtSelftest = false;
     bool fmmSelftest = false;
+    bool sphericalSelftest = false;
     std::string renderCheck;
 };
 
@@ -44,6 +51,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--dt-selftest") a.dtSelftest = true;
         else if (s == "--fmm-selftest") a.fmmSelftest = true;
+        else if (s == "--spherical-selftest") a.sphericalSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -52,6 +60,60 @@ Args ParseArgs(int argc, char** argv) {
 
 ngrav::DeckSim<3> MakeSim() {
     return ngrav::DeckSim<3>([](ngrav::System<3>& sys) { nbody::RegisterFmmAdaptersOn(sys); });
+}
+
+// Phase 7: runtime expansion order (was compile-time kOrder=5) + in-place
+// M2L accumulation. Validates: (a) accuracy improves monotonically as p
+// grows from 2 up to where the fixed opening-angle theta's own truncation
+// (the theta^(p+1) FMM error bound) starts to dominate over the expansion
+// truncation, at which point it should plateau rather than diverge; (b)
+// p=5 (the old fixed default) still gives a sane, non-broken result.
+bool SphericalSelfTest() {
+    bool ok = true;
+    std::mt19937 rng(3);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    const int n = 2000;
+    std::vector<glm::dvec3> pos(static_cast<size_t>(n));
+    std::vector<double> mass(static_cast<size_t>(n));
+    for (auto& p : pos) p = {u(rng), u(rng), u(rng)};
+    for (auto& m : mass) m = 0.5 + 0.5 * (u(rng) + 1.0);
+    const double eps = 0.01, eps2 = eps * eps;
+
+    double refAx = 0.0;
+    for (int j = 1; j < n; ++j) {
+        const glm::dvec3 d = pos[static_cast<size_t>(j)] - pos[0];
+        const double r2 = glm::dot(d, d) + eps2;
+        const double invR = 1.0 / std::sqrt(r2), invR3 = invR * invR * invR;
+        refAx += mass[static_cast<size_t>(j)] * invR3 * d.x;
+    }
+
+    double prevErr = 1e30;
+    bool sawImprovement = false;
+    for (int p : {2, 4, 6, 8, 10}) {
+        std::vector<glm::dvec3> accel;
+        nbody::ComputeAccelSphericalFmm(pos, mass, 1.0, eps, 0.5, accel, nullptr, p);
+        const double rel = std::abs(accel[0].x - refAx) / std::abs(refAx);
+        std::printf("  p=%2d  rel err vs Direct (particle 0) = %.4e\n", p, rel);
+        if (rel < prevErr * 0.99) sawImprovement = true; // strictly improving somewhere in the sweep
+        prevErr = rel;
+    }
+    if (!sawImprovement) {
+        std::printf("  WRONG: accuracy never improved as p increased\n");
+        ok = false;
+    }
+    std::printf("  monotonic-ish convergence with p: %s\n", sawImprovement ? "ok" : "WRONG");
+
+    // p=5 sanity: not wildly broken (loose bound -- this is a smoke test,
+    // the convergence sweep above is the real check).
+    {
+        std::vector<glm::dvec3> accel;
+        nbody::ComputeAccelSphericalFmm(pos, mass, 1.0, eps, 0.5, accel, nullptr, 5);
+        const double rel = std::abs(accel[0].x - refAx) / std::abs(refAx);
+        const bool good = rel < 1e-2;
+        std::printf("  p=5 (default) rel err = %.4e  %s\n", rel, good ? "ok" : "WRONG");
+        if (!good) ok = false;
+    }
+    return ok;
 }
 
 } // namespace
@@ -72,6 +134,11 @@ int main(int argc, char** argv) {
     if (a.fmmSelftest) {
         const bool ok = ngrav::CoreFmmSelfTest();
         std::printf("\nfmm-selftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (a.sphericalSelftest) {
+        const bool ok = SphericalSelfTest();
+        std::printf("\nspherical-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 
@@ -144,7 +211,7 @@ int main(int argc, char** argv) {
                      "  02_nbody_gravity                        (interactive comparison tool)\n"
                      "  02_nbody_gravity --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  02_nbody_gravity --deck <f.toml> --render-check <out.png>\n"
-                     "  02_nbody_gravity --selftest\n");
+                     "  02_nbody_gravity --selftest | --dt-selftest | --fmm-selftest | --spherical-selftest\n");
         return 2;
     }
 

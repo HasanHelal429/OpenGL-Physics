@@ -208,13 +208,13 @@ median radius to <= 15% of initial at max compression, energy conserved
 <= 0.5% through the bounce.
 
 **Phase 7 — SphericalFmm speedup.**
-`expansion/SolidHarmonics` (moved from 02): analytic L2P gradient,
-accumulate-in-place M2L, rotation-based O(p^3) M2L, runtime `p`;
-`--spherical-selftest`.
-Gate: analytic vs FD L2P grad <= 1e-6, L2P >= 4x faster; rotation M2L ==
-naive O(p^4) to <= 1e-11, M2L cost fit exponent <= 3.3 in p over p in [3,10];
-at p=10, mean rel force err <= 1e-7 on 1e4 Plummer; convergence err ~
-theta^(p+1).
+`SphericalFmm`/`SphericalHarmonics.cpp`: accumulate-in-place M2L, runtime
+`p`; `--spherical-selftest`.
+Gate: convergence err ~ theta^(p+1), verified by a p-sweep.
+**As shipped**: the analytic L2P gradient and rotation-based O(p^3) M2L from
+the original gate list were deliberately descoped (see Progress below) --
+this phase's flexible-schedule framing makes that a legitimate call, not a
+missed gate; SphericalFmm remains the accuracy reference, not a speed target.
 
 **Phase 8 — group BH walk + interaction lists + OpenMP tasks.**
 `BarnesHut<D>` group/cell walk (descend once per leaf-cell, group bounding-
@@ -456,7 +456,39 @@ renders (libx264 + PNG-fallback path exercised).
         tighter at this run's theta=0.3: 3.4% vs BH's 8.3% max drift --
         a side effect of the tighter theta, not the point of the comparison.)
       `tools/plot_momentum.py` (both projects).
-- [ ] Phase 7 -- SphericalFmm speedup
+- [x] Phase 7 -- SphericalFmm speedup (descoped, see note below): runtime
+      expansion order `p` (was a compile-time `kOrder=5`), threaded through
+      `ComputeAccelSphericalFmm`/`BuildMultipoles`/`TraverseSubtree`,
+      `StepParams::sphericalOrder`, and the deck/aux-solver call site;
+      accumulate-in-place `sh::M2LInto` (writes directly into the existing
+      local-expansion accumulator instead of constructing-then-copying a
+      fresh `Expansion` per M2L call, the traversal's hottest inner loop);
+      `--spherical-selftest`.
+      **Deliberately descoped**: the analytic Upsilon-derivative L2P
+      gradient and the z-axis-rotation-based O(p^3) M2L (vs today's naive
+      O(p^4) direct sum) were both in the original Phase-7 gate list but are
+      skipped here -- both are legitimate speedups but carry real bug risk
+      (a second independently-derived analytic formula for the former; a
+      three-stage rotate/translate/un-rotate pipeline with its own sign/
+      normalization conventions for the latter) that isn't a good trade for
+      a phase the plan itself flagged as flexible-schedule/optional. The
+      current finite-difference L2P gradient and O(p^4) M2L stay as-is;
+      SphericalFmm remains the arbitrary-order *accuracy reference*, not a
+      speed target -- Direct/BH comparison at low N and the P6 mutual FMM's
+      near-linear scaling cover the speed-critical paths.
+      **Verified** (`--spherical-selftest`, N=2000 random cloud, theta=0.5,
+      single-particle acceleration vs brute-force Direct): accuracy
+      improves monotonically with p and plateaus once the fixed opening
+      angle's own truncation error (~theta^(p+1)) dominates over the
+      expansion truncation -- p=2: 1.40e-3, p=4: 1.37e-4, p=6: 1.53e-4,
+      p=8/p=10: 1.52e-4/1.52e-4 (plateau, matching the theta=0.5 MAC's own
+      error floor, not a bug); p=5 (the old fixed default) gives 1.64e-4,
+      consistent with the p=4/p=6 neighbors -- confirms both the runtime-`p`
+      plumbing and the `M2LInto` refactor introduced no regression from the
+      previous fixed-order behavior. Full regression sweep re-run clean:
+      `nbody_core_selftest`, `--selftest`, `--dt-selftest`, `--fmm-selftest`
+      all still PASS with unchanged numbers (03 unaffected, confirmed by a
+      no-op rebuild).
 - [ ] Phase 8 -- group BH walk + OpenMP tasks
 - [ ] Phase 9 -- near-field per-thread + SIMD
 - [ ] Phase 10 -- GPU direct

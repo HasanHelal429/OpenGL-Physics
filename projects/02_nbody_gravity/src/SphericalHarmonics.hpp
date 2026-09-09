@@ -109,6 +109,10 @@ Expansion M2M(const Expansion& m, const glm::dvec3& newCenter);
 // multipole's own order, though in practice both are the same project-wide
 // constant).
 Expansion M2L(const Expansion& m, const glm::dvec3& targetCenter, int p);
+// Same M2L sum, accumulated directly into `accum` (which must already be
+// centered at targetCenter) -- avoids one heap allocation per call, the
+// traversal's hottest inner loop (Phase 7).
+void M2LInto(const Expansion& m, const glm::dvec3& targetCenter, int p, Expansion& accum);
 
 // L2L: shifts a local expansion to a new (child) center (eq. 3e). Output
 // order matches `l`'s own order.

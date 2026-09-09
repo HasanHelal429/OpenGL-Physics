@@ -30,8 +30,10 @@ struct SphericalFmmStats {
     size_t nearPairCount = 0;
 };
 
+// `order` is the runtime expansion degree p (Phase 7 -- was a compile-time
+// kOrder=5 constant); default matches the original fixed value.
 void ComputeAccelSphericalFmm(const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                                double softening, double theta, std::vector<glm::dvec3>& accelOut,
-                               SphericalFmmStats* stats = nullptr);
+                               SphericalFmmStats* stats = nullptr, int order = 5);
 
 } // namespace nbody

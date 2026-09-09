@@ -78,7 +78,8 @@ void RegisterFmmAdaptersOn(ngrav::System<3>& sys) {
                      [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
                          const std::vector<glm::dvec3> pos = AoSPositions(in);
                          std::vector<glm::dvec3> a;
-                         ComputeAccelSphericalFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
+                         ComputeAccelSphericalFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a, nullptr,
+                                                   sp.sphericalOrder);
                          WriteAccel(a, out);
                      });
 }

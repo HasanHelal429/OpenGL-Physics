@@ -170,6 +170,25 @@ Expansion M2L(const Expansion& m, const glm::dvec3& targetCenter, int p) {
     return out;
 }
 
+// Same M2L sum, added directly into an existing local expansion instead of
+// returning a fresh one (Phase 7): avoids one CoeffCount(p)-sized heap
+// allocation per M2L call, the traversal's hottest inner loop. `accum` must
+// already be centered at `targetCenter` (true of every local[] entry, which
+// is seeded at its own node's center before the traversal starts).
+void M2LInto(const Expansion& m, const glm::dvec3& targetCenter, int p, Expansion& accum) {
+    const Expansion th = EvalTheta(targetCenter - m.center, p);
+    for (int n = 0; n <= p; ++n) {
+        for (int mOut = 0; mOut <= n; ++mOut) {
+            Complex sum{0.0, 0.0};
+            const int kMax = p - n;
+            for (int k = 0; k <= kMax; ++k) {
+                for (int l = -k; l <= k; ++l) sum += std::conj(m.at(k, l)) * th.at(n + k, mOut + l);
+            }
+            accum.raw(n, mOut) += sum;
+        }
+    }
+}
+
 Expansion L2L(const Expansion& l, const glm::dvec3& newCenter) {
     const int p = l.order;
     const Expansion u = EvalUpsilon(l.center - newCenter, p);
