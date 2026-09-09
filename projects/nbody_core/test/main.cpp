@@ -10,7 +10,8 @@ int main() {
     const bool okdt = ngrav::CoreDtSelfTest();
     const bool okfmm = ngrav::CoreFmmSelfTest();
     const bool okic = ngrav::CoreIcSelfTest();
-    const bool ok = ok3 && ok2 && okdt && okfmm && okic;
+    const bool okrung = ngrav::CoreRungSelfTest();
+    const bool ok = ok3 && ok2 && okdt && okfmm && okic && okrung;
     std::printf("\nnbody_core selftest: %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
 }

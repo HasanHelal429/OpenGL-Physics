@@ -818,4 +818,112 @@ bool CoreIcSelfTest() {
     return ok;
 }
 
+bool CoreRungSelfTest() {
+    bool ok = true;
+    std::printf("[block / rung timesteps]\n");
+
+    // A slow Plummer cloud (the bulk -- all on rung 0) plus one tight, fast
+    // binary bolted on far away (needs a deep rung). Global-adaptive drives
+    // EVERY particle at the tight pair's tiny step; the block scheme lets
+    // the ~200-particle bulk stay coarse. Direct solver.
+    {
+        auto build = []() {
+            ic::PlummerParams pp;
+            pp.n = 200;
+            pp.seed = 12;
+            SoA<3> cloud = ic::Plummer<3>(pp);
+            SoA<3> s;
+            s.Resize(202);
+            for (int i = 0; i < 200; ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                s.x[ii] = cloud.x[ii] - 8.0; // shift the cloud away from the binary
+                s.y[ii] = cloud.y[ii];
+                s.z[ii] = cloud.z[ii];
+                s.vx[ii] = cloud.vx[ii];
+                s.vy[ii] = cloud.vy[ii];
+                s.vz[ii] = cloud.vz[ii];
+                s.m[ii] = cloud.m[ii];
+            }
+            // tight fast pair near +8, separation 0.08
+            s.SetPos(200, Vec<3>(7.96, 0, 0));
+            s.SetPos(201, Vec<3>(8.04, 0, 0));
+            const double vt = 0.5 * std::sqrt(1.0 * 2.0 / 0.08);
+            s.SetVel(200, Vec<3>(0, -vt, 0));
+            s.SetVel(201, Vec<3>(0, vt, 0));
+            s.m[200] = s.m[201] = 1.0;
+            return s;
+        };
+        const double T = 2.0; // total physical time -- both schemes integrate to here
+        auto run = [&](bool block, bool adaptive, long& pevals, double& drift, double& elapsed) {
+            System<3> sys;
+            sys.SetParticles(build());
+            StepParams sp;
+            sp.G = 1.0;
+            sp.soft = Softening::Plummer(0.01);
+            sp.solver = Solver::Direct;
+            sp.dt = 5e-3; // fine for the wide pair, way too coarse for the tight one
+            sp.eta = 0.02;
+            sp.block = block;
+            sp.adaptive = adaptive;
+            sp.blockMaxRung = 8;
+            sys.Prime(sp);
+            const double e0 = sys.TotalEnergy(sp);
+            sys.ResetParticleEvals();
+            double t = 0.0;
+            while (t < T) t += sys.Step(sp); // block/fixed advance by sp.dt; adaptive by its chosen dt
+            pevals = sys.ParticleEvals();
+            elapsed = t;
+            drift = std::abs((sys.TotalEnergy(sp) - e0) / e0);
+        };
+
+        long peBlock = 0, peAdaptive = 0, peGlobalFixed = 0;
+        double drBlock = 0, drAdaptive = 0, drGlobalFixed = 0, elBlock = 0, elAdaptive = 0, elFixed = 0;
+        run(true, false, peBlock, drBlock, elBlock);
+        run(false, true, peAdaptive, drAdaptive, elAdaptive);
+        run(false, false, peGlobalFixed, drGlobalFixed, elFixed);
+        const double ratio = peBlock > 0 ? double(peAdaptive) / double(peBlock) : 0.0;
+        std::printf("  200-body cloud + 1 tight binary, integrated to t=%.1f:\n", T);
+        std::printf("    fixed global    drift %.2e   %ld pevals  (t=%.2f)\n", drGlobalFixed, peGlobalFixed, elFixed);
+        std::printf("    adaptive global drift %.2e   %ld pevals  (t=%.2f)\n", drAdaptive, peAdaptive, elAdaptive);
+        std::printf("    block           drift %.2e   %ld pevals  (t=%.2f)   (%.1fx fewer than adaptive)\n", drBlock,
+                    peBlock, elBlock, ratio);
+        Check(ok, "block-scheme energy drift", drBlock, 1e-2);
+        Check(ok, "block uses >=2x fewer force evals than global-adaptive (matched physical time)",
+              (ratio >= 2.0) ? 0.0 : 1.0, 0.0);
+    }
+
+    // Barnes-Hut path smoke test: a cold Plummer collapse under the block
+    // scheme conserves energy through the first infall (the tree-rebuild-
+    // per-substep path is exercised; correctness, not a savings claim,
+    // since a shallow collapse keeps most particles on rung 0).
+    {
+        ic::PlummerParams pp;
+        pp.n = 1200;
+        pp.seed = 4;
+        SoA<3> s = ic::Plummer<3>(pp);
+        std::fill(s.vx.begin(), s.vx.end(), 0.0);
+        std::fill(s.vy.begin(), s.vy.end(), 0.0);
+        std::fill(s.vz.begin(), s.vz.end(), 0.0);
+        System<3> sys;
+        sys.SetParticles(std::move(s));
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Plummer(0.02);
+        sp.solver = Solver::BarnesHut;
+        sp.mac.theta = 0.5;
+        sp.dt = 3e-3;
+        sp.eta = 0.03;
+        sp.block = true;
+        sp.blockMaxRung = 5;
+        sys.Prime(sp);
+        const double e0 = sys.TotalEnergy(sp);
+        for (int i = 0; i < 150; ++i) sys.Step(sp);
+        const double drift = std::abs((sys.TotalEnergy(sp) - e0) / e0);
+        std::printf("  BH cold collapse N=1200, 150 base steps: block-scheme energy drift %.2e\n", drift);
+        Check(ok, "block-scheme BH cold-collapse energy drift", drift, 0.05);
+    }
+
+    return ok;
+}
+
 } // namespace ngrav

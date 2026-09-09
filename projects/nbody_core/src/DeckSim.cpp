@@ -29,6 +29,10 @@ void DeckSim<D>::Configure(const fw::Deck& deck) {
     m_sp = StepParams{};
     m_sp.adaptive = deck.GetBool("time.adaptive", false);
     m_sp.eta = deck.GetDouble("time.eta", 0.03);
+    // time.scheme = "global" (default) | "block". Block => power-of-2 rung
+    // timesteps (Direct/Barnes-Hut only; falls back to `adaptive` otherwise).
+    m_sp.block = (deck.GetString("time.scheme", "global") == "block");
+    m_sp.blockMaxRung = deck.GetInt("time.block_max_rung", 8);
     m_substepsPerFrame = deck.GetInt("time.substeps_per_frame", 4);
 
     m_sp.solver = SolverFromString(deck.GetString("solver.kind", "barnes_hut"));
@@ -157,6 +161,11 @@ void DeckSim<D>::Snapshot(fw::OutputWriter& writer) {
     writer.WriteScalar("com_y", com.y);
     writer.WriteScalar("com_z", (D == 3) ? Zc(com) : 0.0);
     writer.WriteScalar("dt_last", m_lastDt);
+    // P15: deepest rung in use (0 for the global scheme). rung_max=k means
+    // the finest particle is stepping at dt/2^k this frame.
+    int rungMax = 0;
+    for (int r : m_sys.Rungs()) rungMax = std::max(rungMax, r);
+    writer.WriteScalar("rung_max", static_cast<double>(rungMax));
 }
 
 template <int D>
@@ -166,8 +175,8 @@ fw::SimInfo DeckSim<D>::Info() const {
     info.dt = m_sp.dt;
     info.substepsPerFrame = m_substepsPerFrame;
     info.frameFields = {"pos", "vel"};
-    info.diagnostics = {"energy",   "energy_drift_pct", "L_mag", "L_drift_pct", "p_mag",
-                        "com_x",    "com_y",           "com_z", "dt_last"};
+    info.diagnostics = {"energy", "energy_drift_pct", "L_mag",   "L_drift_pct", "p_mag",
+                        "com_x",  "com_y",            "com_z",   "dt_last",     "rung_max"};
     return info;
 }
 

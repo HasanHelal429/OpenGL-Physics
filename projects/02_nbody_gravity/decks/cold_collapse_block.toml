@@ -1,0 +1,37 @@
+title = "Cold collapse (N=4000, block / power-of-2 rung timesteps)"
+# Same cold-collapse IC as cold_collapse.toml, integrated with the P15
+# block-timestep scheme: a particle whose eta-criterion wants a step
+# smaller than time.dt drops to a finer rung dt/2^k, while the bulk of the
+# (still slowly-infalling) cloud stays on rung 0. Only the active set gets
+# a force evaluation each finest substep -- so through the dense-core phase
+# this does far fewer per-particle force evaluations than a global adaptive
+# dt (which would drag every particle down to the core's tiny step).
+#
+# The rung_max diagnostic column shows the deepest rung in use per frame
+# (0 before the core forms, climbing as it collapses). Barnes-Hut (the
+# block scheme is Direct/Barnes-Hut only -- the mutual FMM's symmetric M2L
+# has no target-subset form).
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "plummer"
+eps = 0.03
+
+[time]
+dt = 3.0e-3
+scheme = "block"
+block_max_rung = 6
+eta = 0.03
+frames = 260
+substeps_per_frame = 6
+
+[solver]
+kind = "barnes_hut"
+theta = 0.5
+
+[scenario]
+type = "cold_collapse"
+n = 4000
+seed = 1

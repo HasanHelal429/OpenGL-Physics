@@ -3,10 +3,14 @@
 #include "SphericalFmm.hpp"
 
 #include "ngrav/DeckSim.hpp"
+#include "ngrav/MutualFmm.hpp"
 #include "ngrav/SelfTest.hpp"
 #include "ngrav/Solvers.hpp"
+#include "ngrav/ic/Plummer.hpp"
 #include "ngrav/gpu/GpuBarnesHut.hpp"
 #include "ngrav/gpu/GpuDirect.hpp"
+
+#include <chrono>
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -38,7 +42,17 @@ struct Args {
     bool fmmSelftest = false;
     bool sphericalSelftest = false;
     bool gpuSelftest = false;
+    bool rungSelftest = false;
     std::string renderCheck;
+
+    // --bench: force-evaluation timing + accuracy for one solver, for the
+    // Studies scaling suite. `--bench <solver> --bench-n <N> [--bench-theta T]
+    // [--bench-reps R]`; prints one CSV line to stdout.
+    std::string bench;
+    int benchN = 10000;
+    double benchTheta = 0.5;
+    int benchReps = 5;
+    int benchOrder = 5; // spherical_fmm expansion order
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -56,6 +70,12 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--fmm-selftest") a.fmmSelftest = true;
         else if (s == "--spherical-selftest") a.sphericalSelftest = true;
         else if (s == "--gpu-selftest") a.gpuSelftest = true;
+        else if (s == "--rung-selftest") a.rungSelftest = true;
+        else if (s == "--bench") a.bench = next();
+        else if (s == "--bench-n") a.benchN = std::atoi(next());
+        else if (s == "--bench-theta") a.benchTheta = std::atof(next());
+        else if (s == "--bench-reps") a.benchReps = std::atoi(next());
+        else if (s == "--bench-order") a.benchOrder = std::atoi(next());
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -206,6 +226,86 @@ bool GpuSelftest() {
     return ok;
 }
 
+// --bench: time one solver's force evaluation on an N-body Plummer sphere
+// and report its mean per-eval wall time + mean relative force error vs the
+// exact Direct sum. One CSV line to stdout (header printed to stderr), for
+// Studies/nbody_gravity/scaling_and_crossover. Not a correctness gate --
+// that's the --*-selftest flags; this is a measurement tool.
+int RunBench(const Args& a) {
+    ngrav::ic::PlummerParams pp;
+    pp.n = a.benchN;
+    pp.seed = 1;
+    ngrav::SoA<3> s = ngrav::ic::Plummer<3>(pp);
+    const ngrav::PosMassView<3> v = ngrav::ViewOf(s);
+
+    ngrav::StepParams sp;
+    sp.G = 1.0;
+    sp.soft = ngrav::Softening::Plummer(0.02);
+    sp.mac.theta = a.benchTheta;
+
+    // Exact reference (skip for very large N -- O(N^2) gets slow; then the
+    // error column is reported as -1).
+    ngrav::SoA<3> aRef;
+    const bool haveRef = (a.benchN <= 60000);
+    if (haveRef) ngrav::ComputeAccelDirect<3>(v, sp, aRef);
+
+    auto timeIt = [&](auto&& fn) {
+        ngrav::SoA<3> out;
+        fn(out); // warm
+        const auto t0 = std::chrono::steady_clock::now();
+        for (int r = 0; r < a.benchReps; ++r) fn(out);
+        const auto t1 = std::chrono::steady_clock::now();
+        const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count() / a.benchReps;
+        double meanRel = -1.0;
+        if (haveRef) {
+            double sum = 0.0;
+            for (int i = 0; i < a.benchN; ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                const double rx = aRef.ax[ii], ry = aRef.ay[ii], rz = aRef.az[ii];
+                const double ex = out.ax[ii] - rx, ey = out.ay[ii] - ry, ez = out.az[ii] - rz;
+                sum += std::sqrt(ex * ex + ey * ey + ez * ez) /
+                       std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30);
+            }
+            meanRel = sum / a.benchN;
+        }
+        return std::make_pair(ms, meanRel);
+    };
+
+    std::pair<double, double> result{0.0, -1.0};
+    if (a.bench == "direct")
+        result = timeIt([&](ngrav::SoA<3>& out) { ngrav::ComputeAccelDirect<3>(v, sp, out); });
+    else if (a.bench == "barnes_hut" || a.bench == "bh")
+        result = timeIt([&](ngrav::SoA<3>& out) { ngrav::ComputeAccelBarnesHut<3>(v, sp, out); });
+    else if (a.bench == "fmm")
+        result = timeIt([&](ngrav::SoA<3>& out) { ngrav::ComputeAccelMutualFmm(v, sp, out); });
+    else if (a.bench == "spherical_fmm") {
+        result = timeIt([&](ngrav::SoA<3>& out) {
+            std::vector<glm::dvec3> pos(static_cast<std::size_t>(a.benchN));
+            for (int i = 0; i < a.benchN; ++i)
+                pos[static_cast<std::size_t>(i)] =
+                    glm::dvec3(s.x[static_cast<std::size_t>(i)], s.y[static_cast<std::size_t>(i)],
+                               s.z[static_cast<std::size_t>(i)]);
+            std::vector<glm::dvec3> acc;
+            nbody::ComputeAccelSphericalFmm(pos, s.m, sp.G, sp.soft.eps, sp.mac.theta, acc, nullptr, a.benchOrder);
+            out.ResizeAccel(static_cast<std::size_t>(a.benchN));
+            for (int i = 0; i < a.benchN; ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                out.ax[ii] = acc[ii].x;
+                out.ay[ii] = acc[ii].y;
+                out.az[ii] = acc[ii].z;
+            }
+        });
+    } else {
+        std::fprintf(stderr, "bench: unknown solver '%s' (direct|barnes_hut|fmm|spherical_fmm)\n", a.bench.c_str());
+        return 2;
+    }
+
+    std::fprintf(stderr, "solver,n,theta,order,ms_per_eval,mean_rel_err\n");
+    std::printf("%s,%d,%.3f,%d,%.4f,%.6e\n", a.bench.c_str(), a.benchN, a.benchTheta, a.benchOrder, result.first,
+                result.second);
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -233,12 +333,18 @@ int main(int argc, char** argv) {
         std::printf("\nspherical-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
+    if (a.rungSelftest) {
+        const bool ok = ngrav::CoreRungSelfTest();
+        std::printf("\nrung-selftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
     if (a.gpuSelftest) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
         const bool ok = GpuSelftest();
         std::printf("\ngpu-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
+    if (!a.bench.empty()) return RunBench(a);
 
     // No deck / no explicit mode -> the rich interactive comparison tool.
     if (a.deck.empty() && !a.interactive) {
@@ -310,7 +416,7 @@ int main(int argc, char** argv) {
                      "  02_nbody_gravity --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  02_nbody_gravity --deck <f.toml> --render-check <out.png>\n"
                      "  02_nbody_gravity --selftest | --dt-selftest | --fmm-selftest | --spherical-selftest |\n"
-                     "                   --gpu-selftest\n");
+                     "                   --gpu-selftest | --rung-selftest\n");
         return 2;
     }
 

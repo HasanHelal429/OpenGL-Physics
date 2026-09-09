@@ -29,6 +29,12 @@ struct StepParams {
     bool adaptive = false;  // adaptive global timestep (P3)
     double eta = 0.03;      // dt = eta * min sqrt(eps / |a|)
 
+    bool block = false;     // block / power-of-2 rung timesteps (P15; Direct/Barnes-Hut only,
+                            // else falls back to `adaptive`). `dt` is the coarsest (rung-0) step;
+                            // a particle whose eta-criterion wants a smaller step drops to a finer
+                            // rung dt/2^k. One System::Step advances by `dt` regardless of scheme.
+    int blockMaxRung = 8;   // finest rung is dt / 2^blockMaxRung
+
     int fmmOrder = 3;       // Cartesian-Taylor order (P6)
     int sphericalOrder = 5; // solid-harmonic expansion order (P7)
 };
@@ -58,5 +64,22 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, SoA<
 template <int D>
 void ComputeAccelBarnesHutPerParticle(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
                                       std::span<const double> aOld, SoA<D>& out);
+
+// ---- target-subset force evaluation (P15 block timesteps) ------------------
+// Compute acceleration for ONLY the particles named in `targets` (all N
+// particles are still sources, at their current positions). Writes only
+// out.a{x,y,z}[targets[k]]; other entries of `out` are left untouched.
+// `out` must already be sized to N (ResizeAccel). This is what makes rung/
+// block timestepping actually cheaper -- an inactive particle's force isn't
+// recomputed, but the force *from* it stays current because it drifted.
+// The mutual FMM has no target-subset form (its M2L is symmetric by
+// construction), so block timestepping is Direct/Barnes-Hut only; see
+// Integrator.hpp.
+template <int D>
+void ComputeAccelDirectTargets(const PosMassView<D>& pts, const StepParams& sp, std::span<const int> targets,
+                               SoA<D>& out);
+template <int D>
+void ComputeAccelBarnesHutTargets(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                                  std::span<const int> targets, SoA<D>& out);
 
 } // namespace ngrav

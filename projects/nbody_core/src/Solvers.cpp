@@ -105,6 +105,34 @@ void ComputeAccelDirect(const PosMassView<D>& pts, const StepParams& sp, SoA<D>&
     }
 }
 
+template <int D>
+void ComputeAccelDirectTargets(const PosMassView<D>& pts, const StepParams& sp, std::span<const int> targets,
+                               SoA<D>& out) {
+    const int n = static_cast<int>(pts.Count());
+    const int nt = static_cast<int>(targets.size());
+    const Softening soft = sp.soft;
+    const double G = sp.G;
+    const double* x = pts.x.data();
+    const double* y = pts.y.data();
+    const double* z = (D == 3) ? pts.z.data() : nullptr;
+    const double* m = pts.m.data();
+
+#pragma omp parallel for schedule(static) if (nt > 64)
+    for (int t = 0; t < nt; ++t) {
+        const int i = targets[static_cast<std::size_t>(t)];
+        const double xi = x[i], yi = y[i], zi = (D == 3) ? z[i] : 0.0;
+        double axi = 0.0, ayi = 0.0, azi = 0.0;
+        for (int j = 0; j < n; ++j) {
+            if (j == i) continue;
+            const double dx = x[j] - xi, dy = y[j] - yi, dz = (D == 3) ? (z[j] - zi) : 0.0;
+            AccumPair<D>(dx, dy, dz, G * m[j], soft, axi, ayi, azi);
+        }
+        out.ax[static_cast<std::size_t>(i)] = axi;
+        out.ay[static_cast<std::size_t>(i)] = ayi;
+        if constexpr (D == 3) out.az[static_cast<std::size_t>(i)] = azi;
+    }
+}
+
 namespace {
 
 // Traceless-quadrupole correction to a well-separated node's monopole field,
@@ -354,6 +382,29 @@ void ComputeAccelBarnesHutPerParticle(const PosMassView<D>& pts, const StepParam
 }
 
 template <int D>
+void ComputeAccelBarnesHutTargets(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                                  std::span<const int> targets, SoA<D>& out) {
+    const int nt = static_cast<int>(targets.size());
+    const Softening soft = sp.soft;
+    const double G = sp.G;
+    const double theta2 = sp.mac.theta * sp.mac.theta;
+    // Always the geometric per-particle walk here: the relative MAC needs
+    // each particle's previous |a|, which the block integrator doesn't track
+    // per rung -- and geometric is the correct default for this path anyway.
+    for (int t = 0; t < nt; ++t) {
+        const int i = targets[static_cast<std::size_t>(t)];
+        const double xi = pts.x[static_cast<std::size_t>(i)];
+        const double yi = pts.y[static_cast<std::size_t>(i)];
+        const double zi = (D == 3) ? pts.z[static_cast<std::size_t>(i)] : 0.0;
+        double axi = 0.0, ayi = 0.0, azi = 0.0;
+        WalkBH<D>(tree, pts, tree.Root(), i, xi, yi, zi, G, theta2, soft, MacKind::Geometric, 0.0, 0.0, axi, ayi, azi);
+        out.ax[static_cast<std::size_t>(i)] = axi;
+        out.ay[static_cast<std::size_t>(i)] = ayi;
+        if constexpr (D == 3) out.az[static_cast<std::size_t>(i)] = azi;
+    }
+}
+
+template <int D>
 void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
                            std::span<const double> aOld, SoA<D>& out) {
     if (sp.mac.kind == MacKind::Geometric) {
@@ -382,5 +433,11 @@ template void ComputeAccelBarnesHut<3>(const PosMassView<3>&, const StepParams&,
                                        std::span<const double>, SoA<3>&);
 template void ComputeAccelBarnesHut<2>(const PosMassView<2>&, const StepParams&, SoA<2>&);
 template void ComputeAccelBarnesHut<3>(const PosMassView<3>&, const StepParams&, SoA<3>&);
+template void ComputeAccelDirectTargets<2>(const PosMassView<2>&, const StepParams&, std::span<const int>, SoA<2>&);
+template void ComputeAccelDirectTargets<3>(const PosMassView<3>&, const StepParams&, std::span<const int>, SoA<3>&);
+template void ComputeAccelBarnesHutTargets<2>(const PosMassView<2>&, const StepParams&, const AdaptiveTree<2>&,
+                                              std::span<const int>, SoA<2>&);
+template void ComputeAccelBarnesHutTargets<3>(const PosMassView<3>&, const StepParams&, const AdaptiveTree<3>&,
+                                              std::span<const int>, SoA<3>&);
 
 } // namespace ngrav

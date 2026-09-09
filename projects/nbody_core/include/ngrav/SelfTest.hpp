@@ -33,4 +33,10 @@ bool CoreFmmSelfTest();
 // model's exact distribution function, so "near 1" is ~10%, not 2%.
 bool CoreIcSelfTest();
 
+// Block / power-of-2 rung timesteps (P15): a Kepler orbit and a cold
+// Plummer collapse integrated with the block scheme match the global
+// leapfrog's energy/|L| conservation, while doing far fewer per-particle
+// force evaluations (the whole point). Direct/Barnes-Hut only.
+bool CoreRungSelfTest();
+
 } // namespace ngrav

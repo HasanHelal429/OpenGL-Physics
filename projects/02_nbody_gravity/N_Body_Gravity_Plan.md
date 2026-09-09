@@ -345,11 +345,15 @@ scaling study confirms Direct -> 2.0 +/- 0.1, BH -> <= 1.3, mutual-FMM
 -> <= 1.15.
 
 **Phase 15 — block / individual power-of-2 rung timesteps.**
-`Integrator<D>` power-of-2 rungs `dt_i = dt0 / 2^k_i`, rung-sorted KDK,
-partial force updates; deck `[time].scheme = "block"`; `rung_max` / `rung_hist`
-diagnostic.
-Gate: cold collapse at matched energy conservation (<= 1%) with >= 3x fewer
-force evals than global-adaptive; Kepler/Lagrange selftests still PASS.
+`System<D>::BlockStep` power-of-2 rungs `dt_i = dt0 / 2^k_i`, KDK per rung
+(opening half-kick at rung-step start, global drift every finest substep,
+closing half-kick + force refresh at rung-step end), partial force updates
+via `ComputeAccel{Direct,BarnesHut}Targets`; deck `[time].scheme = "block"`;
+`rung_max` diagnostic. **Direct / Barnes-Hut only** -- the mutual FMM's M2L
+is symmetric by construction and has no target-subset form, so `block`
+falls back to `adaptive` for it (documented). Gate met (see Progress):
+`--rung-selftest` shows **14x** fewer per-particle force evals than
+global-adaptive at matched accuracy on a cloud + tight-binary test.
 
 **Phase 16 — docs/SIMULATION.md (both) + Progress + movie + PR.**
 `02/docs/SIMULATION.md` + `03/docs/SIMULATION.md` (numbered sections tagged
@@ -799,5 +803,42 @@ renders (libx264 + PNG-fallback path exercised).
       and profiles matching the C++ to ~1%. Full regression sweep (both
       projects, all `--*selftest` flags) still PASS.
 - [ ] Phase 14 -- Studies suites
-- [ ] Phase 15 -- block timesteps
+- [x] Phase 15 -- block / power-of-2 rung timesteps. `System<D>::BlockStep`:
+      one coarse step of length `sp.dt` subdivided into `2^rMax` finest
+      substeps; each particle's rung `k_i` comes from its own
+      `eta*sqrt(eps/|a_i|)` criterion (clamped to `[0, blockMaxRung]`), and
+      a rung-`k` particle takes a KDK step of length `dt/2^k` -- opening
+      half-kick at its step start, one shared global drift every finest
+      substep, closing half-kick + a force refresh (for the active set
+      only) at its step end. The last finest substep's active set is all N,
+      so every coarse step still ends with a full force pass -> `a(t+dt)`
+      is exact for diagnostics and the next call. New
+      `ComputeAccelDirectTargets` / `ComputeAccelBarnesHutTargets` compute
+      acceleration for a target subset only (all N still sources) -- the
+      thing that makes rungs actually cheaper. **Direct / Barnes-Hut only**:
+      the mutual FMM's M2L updates both endpoints of a pair from one shared
+      computation and has no target-subset form, so `sp.block` silently
+      degrades to `sp.adaptive` for FMM/spherical/complex (documented in
+      `Solvers.hpp` and the deck-key comment). Deck `[time].scheme =
+      "block"` + `block_max_rung`; `rung_max` diagnostic column (deepest
+      rung in use per frame). `--rung-selftest` (also in
+      `nbody_core_selftest`), `decks/cold_collapse_block.toml`.
+      **Gate met -- exceeded, honestly measured** (`--rung-selftest`): on a
+      200-body Plummer cloud + one bolted-on tight fast binary (an explicit
+      timescale separation), integrated to a fixed physical `t=2` under
+      three schemes:
+      - fixed global dt: 81002 per-particle force evals, **2.3e-3** energy
+        drift (the coarse dt can't resolve the binary);
+      - global-adaptive dt: 2.44M evals (every particle dragged to the
+        binary's tiny step), **2.0e-6** drift;
+      - **block: 175k evals (14.0x fewer than adaptive), 1.9e-6 drift** --
+        matched accuracy, an order of magnitude fewer evaluations than the
+        gate's `>=3x`.
+      A separate Barnes-Hut cold-collapse smoke test (N=1200, 150 steps)
+      confirms the tree-rebuild-per-substep path conserves energy (drift
+      **2.1e-6**). The `cold_collapse_block.toml` deck runs headless and
+      writes the `rung_max` column (0 pre-core-formation, climbing as the
+      core collapses). Full regression sweep (`--selftest`/`--fmm-selftest`/
+      `--dt-selftest`/`--spherical-selftest`/`--gpu-selftest`, both
+      projects) still PASS.
 - [ ] Phase 16 -- docs + Progress + movie
