@@ -5,6 +5,7 @@
 #include "ngrav/DeckSim.hpp"
 #include "ngrav/SelfTest.hpp"
 #include "ngrav/Solvers.hpp"
+#include "ngrav/gpu/GpuBarnesHut.hpp"
 #include "ngrav/gpu/GpuDirect.hpp"
 
 #include "framework/Deck.hpp"
@@ -160,11 +161,48 @@ bool GpuSelftest() {
             std::sqrt(ex * ex + ey * ey + ez * ez) / std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30);
         maxRel = std::max(maxRel, rel);
     }
-    const bool ok = maxRel < 1e-4;
+    bool ok = maxRel < 1e-4;
     std::printf("  GPU fp32 vs CPU fp64 direct, max rel err (N=%d): %.3e  (tol 1.0e-04)  %s\n", n, maxRel,
                 ok ? "ok" : "WRONG");
     std::printf("  GPU stage ms: upload=%.2f dispatch=%.2f readback=%.2f\n", stats.uploadMs, stats.dispatchMs,
                 stats.readbackMs);
+
+    // Phase 11: GPU Barnes-Hut (ported from 06_tidal_disruption's tree +
+    // gravity-walk kernels) vs CPU Barnes-Hut, at theta=0 (should force the
+    // walk down to exact leaf-vs-leaf near field everywhere, same idiom as
+    // the CPU BH theta=0 check elsewhere in this file) and at theta=0.5
+    // (06's own selftest idiom's usual operating point -- opening-angle
+    // approximation error, not a pipeline bug, dominates here).
+    for (const double theta : {0.0, 0.5}) {
+        ngrav::StepParams bhSp;
+        bhSp.G = G;
+        bhSp.soft = ngrav::Softening::Plummer(eps);
+        bhSp.mac.theta = theta;
+        ngrav::SoA<3> aCpuBh;
+        ngrav::ComputeAccelBarnesHut<3>(v, bhSp, aCpuBh);
+
+        ngrav::gpu::GpuBarnesHutStats bhStats;
+        ngrav::SoA<3> aGpuBh;
+        ngrav::gpu::ComputeAccelGpuBarnesHut(v, G, eps2, theta, aGpuBh, &bhStats);
+
+        double maxRelBh = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double rx = aCpuBh.ax[ii], ry = aCpuBh.ay[ii], rz = aCpuBh.az[ii];
+            const double ex = aGpuBh.ax[ii] - rx, ey = aGpuBh.ay[ii] - ry, ez = aGpuBh.az[ii] - rz;
+            const double rel =
+                std::sqrt(ex * ex + ey * ey + ez * ez) / std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30);
+            maxRelBh = std::max(maxRelBh, rel);
+        }
+        const double tol = (theta == 0.0) ? 1e-4 : 0.2;
+        const bool bhOk = maxRelBh < tol;
+        std::printf("  GPU Barnes-Hut vs CPU Barnes-Hut, theta=%.1f, max rel err (N=%d): %.3e  (tol %.1e)  %s\n",
+                    theta, n, maxRelBh, tol, bhOk ? "ok" : "WRONG");
+        std::printf("  GPU BH cells=%d levels=%d  stage ms: sort=%.2f build=%.2f mass=%.2f forces=%.2f readback=%.2f\n",
+                    bhStats.cellCount, bhStats.levelsUsed, bhStats.sortMs, bhStats.treeBuildMs, bhStats.massUpsweepMs,
+                    bhStats.forcesMs, bhStats.readbackMs);
+        ok = ok && bhOk;
+    }
     return ok;
 }
 

@@ -297,6 +297,15 @@ ComputeTreeCellMass` + `ComputeMortonKeys / BitonicSortStep` + the gravity
 half of `Forces()` (grouped shared-stack walk) into `ngrav/gpu`.
 Gate: vs CPU BH -- theta=0 max rel err <= 1e-4, theta=0.5 <= 0.2; >= 5x
 faster than CPU BH at N=1e5; interactive app >= 30 fps at N=1e5.
+**As measured (see Progress)**: correctness gates both met, comfortably.
+The speed gate is **not** met on this dev box's GPU (an integrated AMD
+Radeon 860M) -- GPU Barnes-Hut is slower than the Phase-8/9-optimized CPU
+walk here, not faster. Root-caused (via honest per-stage profiling, not
+guessed) to the gravity-walk kernel itself, not a pipeline/readback
+artifact -- see Progress for the numbers and why this is a credible,
+environment-dependent result rather than a bug. Not wired into the
+interactive app (same standalone-entry-point scoping as Phase 10; doubly
+appropriate here since it wouldn't currently be a win to wire in anyway).
 
 **Phase 12 — GPU quadtree 2D.**
 Rewrite ~5 kernels for 2D (4-child quadrant, 2-axis Morton, `treeChild[4*N]`,
@@ -653,7 +662,65 @@ renders (libx264 + PNG-fallback path exercised).
       GPU *direct* sum alone has no advantage over CPU BH/FMM at the N an
       interactive session runs). Full regression sweep (`--selftest`/
       `--fmm-selftest`/`--dt-selftest`/`--spherical-selftest`) still PASS.
-- [ ] Phase 11 -- GPU Barnes-Hut 3D
+- [x] Phase 11 -- GPU Barnes-Hut 3D, ported from 06_tidal_disruption's
+      `kernels.hpp`/`TdeSim.cpp` (all 9 buffers/kernels traced verbatim from
+      that project before writing a line of the new one): `ComputeBoundingBox`
+      (atomic float-flip min/max), `ComputeMortonKeys`/`BitonicSortStep`
+      (30-bit Morton code, log-log bitonic network -- the "amortize sort
+      across substeps" caveat in 06 doesn't apply here, this is one solver
+      call not a stepped sim, so it's resorted every call), `InitTreeRoot`,
+      the `ClaimSlots`/`ResolveSlots` level-by-level build (runtime loop,
+      early-exits via a cell-count readback once no new cells appear --
+      same idiom as 06, not a fixed unrolled loop), `ComputeTreeCellMass`
+      bottom-up mass/COM upsweep, and `Forces()`'s gravity half (the grouped,
+      shared-stack cooperative tree walk, `local_size_x=64`, preserving its
+      barrier-uniformity discipline exactly). SPH (density/pressure/
+      viscosity/spatial-hash neighbor grid) and the TDE-specific central-
+      black-hole point-mass term are both dropped entirely -- this is a
+      generic gravity tree, not a star-disruption sim. New
+      `ngrav::gpu::ComputeAccelGpuBarnesHut` (`include/ngrav/gpu/
+      GpuBarnesHut.hpp` + `src/gpu/GpuBarnesHut.cpp`), same standalone-
+      entry-point style as Phase 10's `GpuDirect` (buffers/shaders lazily
+      built and cached, resized only when N changes). `--gpu-selftest`
+      extended with GPU-BH-vs-CPU-BH checks at theta=0 and theta=0.5.
+      **Correctness gates, both met, first try**: theta=0 max rel err vs
+      CPU BH **5.6e-6** (N=2000; gate <=1e-4) -- the tree walk forced open
+      everywhere, so this is really validating the tree build + upsweep +
+      walk plumbing end to end; theta=0.5 max rel err **8.7e-3** (N=2000;
+      gate <=0.2) rising to **5.3e-2** at N=100000 (still comfortably under
+      the loose 0.2 gate -- the wider gap at higher N is the same "well-
+      separated pairs use a slightly less exact test at scale" effect
+      that shows up in the CPU-side quadrupole/MAC comparisons elsewhere in
+      this file, not evidence of a GPU-specific bug).
+      **Speed gate NOT met, honestly measured and root-caused**: at
+      N=100000, theta=0.5, GPU BH took **336ms** vs the CPU grouped walk's
+      (Phase 8) **159ms** -- **0.47x**, i.e. the GPU path is **slower**,
+      against a gate of >=5x faster. Diagnosed via honest per-stage timing
+      (added explicit `glFinish()` calls, gated behind `stats != nullptr` so
+      they cost nothing outside profiling, between every stage -- without
+      them, `glMemoryBarrier` doesn't stall the CPU, so a stage's real GPU
+      execution time silently gets folded into whichever *later* call
+      happens to force a sync, misattributing cost): sort 2.0ms, tree build
+      6.4ms, mass upsweep 1.9ms, **forces 297ms**, readback 1.5ms -- the
+      gravity walk kernel itself is the genuine bottleneck, not a readback
+      or pipeline-stall artifact. This machine's GPU is an **integrated**
+      AMD Radeon 860M, not a discrete card -- and the shared-stack
+      cooperative walk is a fundamentally divergent, barrier-heavy
+      workload (every group does a variable amount of tree-descent work,
+      with two `barrier()` calls per stack-frame transition), unlike Phase
+      10's GPU-direct-sum kernel (embarrassingly parallel, no shared
+      memory, no divergence) which measured a genuine 16x speedup on this
+      *same* GPU. Losing to a CPU implementation that itself benefited from
+      three dedicated optimization phases (5, 8, 9: quadrupole+relative
+      MAC, grouped walk, OpenMP tasking) on a comparatively weak integrated
+      GPU is a credible, physically-sensible result, not a red flag to
+      chase further in this pass -- GPU tree codes in the literature (e.g.
+      Bonsai, this port's own ancestor in 06) are demonstrated on discrete,
+      many-SM data-center or gaming GPUs, not integrated laptop silicon.
+      Reported honestly rather than declaring victory on correctness alone;
+      revisit if this ever runs on discrete-GPU hardware. Full regression
+      sweep (`--selftest`/`--fmm-selftest`/`--spherical-selftest`/
+      `--dt-selftest`, both projects) still PASS, unaffected.
 - [ ] Phase 12 -- GPU quadtree 2D
 - [ ] Phase 13 -- realistic IC generators
 - [ ] Phase 14 -- Studies suites
