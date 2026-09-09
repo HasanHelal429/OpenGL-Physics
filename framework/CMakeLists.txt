@@ -38,3 +38,18 @@ target_link_libraries(physgl PUBLIC
 )
 
 target_compile_features(physgl PUBLIC cxx_std_20)
+
+# Headless OpenGL without a display server (EGL_PLATFORM_DEVICE_EXT).
+# GLContext's hidden-GLFW-window path needs X11/Wayland, which a batch node
+# does not have; with EGL, CreateHidden() gets a real GPU context anyway.
+# See framework/include/framework/GLContext.hpp.
+if(UNIX AND NOT APPLE)
+    find_package(OpenGL QUIET COMPONENTS EGL)
+    if(TARGET OpenGL::EGL)
+        target_link_libraries(physgl PUBLIC OpenGL::EGL)
+        target_compile_definitions(physgl PUBLIC PHYSGL_HAVE_EGL)
+        message(STATUS "physgl: EGL headless backend ENABLED")
+    else()
+        message(STATUS "physgl: EGL not found -- headless runs will require a display server")
+    endif()
+endif()

@@ -105,6 +105,43 @@ Both presets need `C:\msys64\mingw64\bin` on `PATH` (added to the user
 env var during setup) and `VCPKG_ROOT=C:\vcpkg` — a terminal opened before
 that env change won't see them until restarted.
 
+### Linux / HPC (headless)
+
+The `linux-debug` / `linux-release` presets build the same tree with system
+GCC and vcpkg's `x64-linux` triplet:
+
+```sh
+source scripts/linux-env.sh          # VCPKG_ROOT + a python >= 3.7 for meson
+cmake --preset linux-release
+cmake --build --preset linux-release
+./build/linux-release/projects/10_fdtd/10_fdtd --selftest
+```
+
+Note the binaries have no `.exe` suffix here.
+
+**Headless GL.** A batch node has no X11/Wayland, so `GLContext`'s original
+hidden-GLFW-window trick cannot make a context there. On Linux the framework
+also has an EGL backend (`EGL_PLATFORM_DEVICE_EXT`) that talks to the GPU with
+no display server at all, giving a full OpenGL 4.6 core context — so the
+compute-shader projects (`05`, `06`, `08`, `10`, `11`) run on a compute node
+unchanged. `CreateHidden()` picks EGL automatically when `DISPLAY` and
+`WAYLAND_DISPLAY` are both empty; override with:
+
+- `PHYSGL_GL_BACKEND=egl|glfw` — force a backend
+- `PHYSGL_EGL_DEVICE=<n>` — pick a GPU when several are visible
+
+The interactive paths (`fw::Application` / `fw::SimApp`, and projects `00`–`03`)
+still need a real display and will only run on a login node with X
+forwarding, not in a batch job.
+
+Verified on a NERSC Perlmutter login node (SUSE 15, GCC 14.3, CMake 3.28,
+NVIDIA A100, driver 580.159.04, GL 4.6.0) with no `DISPLAY` set: all 12
+targets build warning-free, the 18 `--*selftest` entry points of `04`–`11`
+all pass, and `10_fdtd --deck decks/pulse_box.toml` writes its `.npy`
+frames + `diagnostics.csv` as expected. The GPU-vs-CPU self-tests of `08`,
+`10` and `11` agree to ~1e-6, so the compute shaders really are running on
+the GPU through EGL.
+
 ## Adding a new project
 
 1. `projects/NN_name/src/` — either subclass `fw::Application` directly (like
