@@ -440,8 +440,12 @@ void ComputeAccelMutualFmm(const PosMassView<3>& pts, const StepParams& sp, SoA<
 
     // L2P: evaluate each leaf's finalized local expansion at its member
     // particle(s); degenerate multi-particle leaves also get an exact
-    // brute-force sum for their own mutual interactions.
+    // brute-force sum for their own mutual interactions. Safe to parallelize
+    // directly (Phase 9) with no per-thread buffer: every leaf owns a
+    // disjoint particle range, so different loop iterations never write the
+    // same out.a{x,y,z}[p] index.
     const double eps2 = sp.soft.eps2;
+#pragma omp parallel for schedule(dynamic, 64) if (numNodes > 512)
     for (int idx = 0; idx < numNodes; ++idx) {
         const std::size_t nd = static_cast<std::size_t>(idx);
         if (!tree.IsLeaf(idx) || tree.particleCount[nd] == 0) continue;
@@ -479,22 +483,74 @@ void ComputeAccelMutualFmm(const PosMassView<3>& pts, const StepParams& sp, SoA<
     // Near-field pairs: exact softened summation, Newton's-third-law
     // symmetric (this is where momentum conservation would break if it
     // weren't -- unlike the M2L path, this has always been symmetric, even
-    // in the old one-directional AdaptiveFmm).
-    for (const auto& [pi, pj] : nearPairs) {
-        const double dx = pts.x[static_cast<std::size_t>(pj)] - pts.x[static_cast<std::size_t>(pi)];
-        const double dy = pts.y[static_cast<std::size_t>(pj)] - pts.y[static_cast<std::size_t>(pi)];
-        const double dz = pts.z[static_cast<std::size_t>(pj)] - pts.z[static_cast<std::size_t>(pi)];
-        const double dist2 = dx * dx + dy * dy + dz * dz + eps2;
-        const double invDist = 1.0 / std::sqrt(dist2);
-        const double invDist3 = invDist * invDist * invDist;
-        const double gmi = G * pts.m[static_cast<std::size_t>(pi)];
-        const double gmj = G * pts.m[static_cast<std::size_t>(pj)];
-        out.ax[static_cast<std::size_t>(pi)] += gmj * invDist3 * dx;
-        out.ay[static_cast<std::size_t>(pi)] += gmj * invDist3 * dy;
-        out.az[static_cast<std::size_t>(pi)] += gmj * invDist3 * dz;
-        out.ax[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dx;
-        out.ay[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dy;
-        out.az[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dz;
+    // in the old one-directional AdaptiveFmm). Phase 9: this is the
+    // traversal's other big serial cost (millions of pairs at N~1e5) --
+    // unlike L2P above, a given particle can appear in many *different*
+    // pairs here (near neighbors across adjacent leaves aren't confined to
+    // one leaf's disjoint range), so parallelizing the raw loop would race
+    // on out.a{x,y,z}[pi/pj]. Each thread instead accumulates into its own
+    // full-length partial buffer; buffers are summed into `out` once, after
+    // the parallel region, rather than locking or using atomics per pair.
+    const int nPairs = static_cast<int>(nearPairs.size());
+    constexpr int kNearParallelThreshold = 20000; // below this, buffer alloc overhead isn't worth it
+    if (nPairs > kNearParallelThreshold) {
+        const int nThreadsNear = std::max(1, omp_get_max_threads());
+        std::vector<std::vector<double>> pax(static_cast<std::size_t>(nThreadsNear),
+                                             std::vector<double>(static_cast<std::size_t>(n), 0.0));
+        std::vector<std::vector<double>> pay(static_cast<std::size_t>(nThreadsNear),
+                                             std::vector<double>(static_cast<std::size_t>(n), 0.0));
+        std::vector<std::vector<double>> paz(static_cast<std::size_t>(nThreadsNear),
+                                             std::vector<double>(static_cast<std::size_t>(n), 0.0));
+#pragma omp parallel for schedule(static)
+        for (int k = 0; k < nPairs; ++k) {
+            const int tid = omp_get_thread_num();
+            const auto& [pi, pj] = nearPairs[static_cast<std::size_t>(k)];
+            const double dx = pts.x[static_cast<std::size_t>(pj)] - pts.x[static_cast<std::size_t>(pi)];
+            const double dy = pts.y[static_cast<std::size_t>(pj)] - pts.y[static_cast<std::size_t>(pi)];
+            const double dz = pts.z[static_cast<std::size_t>(pj)] - pts.z[static_cast<std::size_t>(pi)];
+            const double dist2 = dx * dx + dy * dy + dz * dz + eps2;
+            const double invDist = 1.0 / std::sqrt(dist2);
+            const double invDist3 = invDist * invDist * invDist;
+            const double gmi = G * pts.m[static_cast<std::size_t>(pi)];
+            const double gmj = G * pts.m[static_cast<std::size_t>(pj)];
+            std::vector<double>& tax = pax[static_cast<std::size_t>(tid)];
+            std::vector<double>& tay = pay[static_cast<std::size_t>(tid)];
+            std::vector<double>& taz = paz[static_cast<std::size_t>(tid)];
+            tax[static_cast<std::size_t>(pi)] += gmj * invDist3 * dx;
+            tay[static_cast<std::size_t>(pi)] += gmj * invDist3 * dy;
+            taz[static_cast<std::size_t>(pi)] += gmj * invDist3 * dz;
+            tax[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dx;
+            tay[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dy;
+            taz[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dz;
+        }
+        for (int t = 0; t < nThreadsNear; ++t) {
+            const std::vector<double>& tax = pax[static_cast<std::size_t>(t)];
+            const std::vector<double>& tay = pay[static_cast<std::size_t>(t)];
+            const std::vector<double>& taz = paz[static_cast<std::size_t>(t)];
+#pragma omp parallel for schedule(static) if (n > 4096)
+            for (int i = 0; i < n; ++i) {
+                out.ax[static_cast<std::size_t>(i)] += tax[static_cast<std::size_t>(i)];
+                out.ay[static_cast<std::size_t>(i)] += tay[static_cast<std::size_t>(i)];
+                out.az[static_cast<std::size_t>(i)] += taz[static_cast<std::size_t>(i)];
+            }
+        }
+    } else {
+        for (const auto& [pi, pj] : nearPairs) {
+            const double dx = pts.x[static_cast<std::size_t>(pj)] - pts.x[static_cast<std::size_t>(pi)];
+            const double dy = pts.y[static_cast<std::size_t>(pj)] - pts.y[static_cast<std::size_t>(pi)];
+            const double dz = pts.z[static_cast<std::size_t>(pj)] - pts.z[static_cast<std::size_t>(pi)];
+            const double dist2 = dx * dx + dy * dy + dz * dz + eps2;
+            const double invDist = 1.0 / std::sqrt(dist2);
+            const double invDist3 = invDist * invDist * invDist;
+            const double gmi = G * pts.m[static_cast<std::size_t>(pi)];
+            const double gmj = G * pts.m[static_cast<std::size_t>(pj)];
+            out.ax[static_cast<std::size_t>(pi)] += gmj * invDist3 * dx;
+            out.ay[static_cast<std::size_t>(pi)] += gmj * invDist3 * dy;
+            out.az[static_cast<std::size_t>(pi)] += gmj * invDist3 * dz;
+            out.ax[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dx;
+            out.ay[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dy;
+            out.az[static_cast<std::size_t>(pj)] -= gmi * invDist3 * dz;
+        }
     }
     const auto t4 = std::chrono::steady_clock::now();
 
