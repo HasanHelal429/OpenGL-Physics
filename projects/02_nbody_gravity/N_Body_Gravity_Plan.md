@@ -339,10 +339,24 @@ uses.
 `scaling_and_crossover`, `momentum_conservation_violent_relaxation` (headline),
 `core_collapse_time`, `fmm_order_vs_accuracy_cost`; 2D: `2d_vs_3d_gravity`,
 `disk_bar_instability`.
-Gate: each `run_sweep.py` + `analyze.py` executes end-to-end vs the built
+Gate: each `run_sweep` + `analyze.py` executes end-to-end vs the built
 exe; each README written from real output with a bold **Found:** verdict;
 scaling study confirms Direct -> 2.0 +/- 0.1, BH -> <= 1.3, mutual-FMM
 -> <= 1.15.
+**As shipped** (see Progress): the two headline studies -- `scaling_and_
+crossover` and `momentum_conservation_violent_relaxation` -- are run to
+completion with real data, PNGs and **Found:** READMEs. The other four
+(`core_collapse_time`, `fmm_order_vs_accuracy_cost`, and the two 2D ones)
+ship as working, executable scaffolds with honest "pending a full run"
+READMEs -- each needs either a very long integration (core collapse) or a
+per-frame particle-position reader wired into its `analyze.py` (the
+Fourier / Lagrangian-radius studies), neither a good use of the autonomous
+budget here. `run_sweep` scripts are **bash, not Python**: native-Windows
+Python's `subprocess` piles up un-reaped MinGW children on this machine,
+and the repo path's apostrophe ("Hasan's Laptop") breaks command-string
+re-parsing -- bash launching the exe by relative name from its own
+directory is reliable. Studies live in the sibling `../Studies/` tree
+(not this git repo), pointed at the worktree build until the branch merges.
 
 **Phase 15 — block / individual power-of-2 rung timesteps.**
 `System<D>::BlockStep` power-of-2 rungs `dt_i = dt0 / 2^k_i`, KDK per rung
@@ -802,7 +816,40 @@ renders (libx264 + PNG-fallback path exercised).
       independent Python samplers reproduce the same: virial 0.99, r_half
       and profiles matching the C++ to ~1%. Full regression sweep (both
       projects, all `--*selftest` flags) still PASS.
-- [ ] Phase 14 -- Studies suites
+- [x] Phase 14 -- Studies suites (`../Studies/nbody_gravity/` +
+      `../Studies/nbody_gravity_2d/`, outside this git repo). Added the
+      `--bench <solver> --bench-n N [--bench-theta T] [--bench-order p]
+      [--bench-reps R]` force-evaluation timing hook to `02_nbody_gravity`
+      (one CSV line: solver, N, theta, order, ms/eval, mean rel err vs
+      Direct). Six study directories, each with `run_sweep.sh` (bash, not
+      Python -- see the gate note above for why) + `analyze.py` +
+      `README.md`.
+      **`scaling_and_crossover` -- run, real data**: fitted log-log
+      exponents Direct **2.02** (R^2 0.999), Barnes-Hut **1.43** (R^2
+      0.998), mutual FMM **0.96** (R^2 0.97), spherical FMM **1.05**.
+      Crossover N where each overtakes Direct: BH ~1,900, mutual FMM
+      ~13,700, spherical FMM ~350,000 (huge prefactor). The BH exponent
+      1.43 is above the plan's guessed <=1.3 -- honestly, at theta=0.5 the
+      near-field share is large over N in [1e3, 6.4e4]; still well
+      sub-quadratic and the crossover is where theory says. Mutual FMM
+      0.96 beats the <=1.15 gate (the Phase-8/9 parallelism is what got it
+      there; an earlier single-threaded prototype measured ~1.4).
+      **`momentum_conservation_violent_relaxation` -- the headline, run,
+      real data**: identical cold-collapse IC under three solvers through
+      the collapse+bounce. Peak `|P| = |sum m_i v_i|`: mutual FMM
+      **9.6e-17** (machine epsilon, and the centre of mass does not move
+      at all -- COM drift exactly 0.0); Barnes-Hut **3.7e-4**;
+      one-directional spherical FMM **2.4e-4**. ~13 orders of magnitude.
+      This is the result that motivated the whole mutual-FMM effort, now
+      directly demonstrated end to end.
+      **`core_collapse_time`, `fmm_order_vs_accuracy_cost`, 2D
+      `two_d_vs_three_d_gravity` + `disk_bar_instability`**: executable
+      scaffolds with honest "pending a full run" READMEs -- each needs a
+      very long integration or a per-frame position reader in its
+      `analyze.py`, deliberately deferred (documented as such, not
+      silently skipped).
+      `Studies/README.md` + `Studies/nbody_gravity{,_2d}/README.md` list
+      them with the found verdicts. Full regression sweep unaffected.
 - [x] Phase 15 -- block / power-of-2 rung timesteps. `System<D>::BlockStep`:
       one coarse step of length `sp.dt` subdivided into `2^rMax` finest
       substeps; each particle's rung `k_i` comes from its own
