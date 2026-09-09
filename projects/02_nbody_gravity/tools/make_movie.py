@@ -14,9 +14,17 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 
 import numpy as np
+
+
+def _winpath(p):
+    """Turn an msys/cygwin '/c/Users/...' path into 'C:/Users/...' so the
+    native-Windows imageio/ffmpeg can open it. No-op elsewhere."""
+    m = re.match(r"^/([a-zA-Z])/(.*)$", p)
+    return f"{m.group(1).upper()}:/{m.group(2)}" if m and os.name == "nt" else p
 
 try:
     import matplotlib
@@ -47,7 +55,8 @@ def main():
     p0 = np.load(frame_files[0])
     lim = args.lim if args.lim is not None else 1.1 * np.abs(p0[:, [ax_i, ax_j]]).max()
 
-    out = args.out or os.path.join(rd, "movie.mp4")
+    out = _winpath(args.out or os.path.join(rd, "movie.mp4"))
+    os.makedirs(os.path.dirname(os.path.abspath(out)) or ".", exist_ok=True)
     writer = None
     try:
         import imageio.v2 as imageio
