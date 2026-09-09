@@ -1,8 +1,9 @@
 #pragma once
 
-#include "AdaptiveFmm.hpp"
 #include "Octree.hpp"
 #include "Scenarios.hpp"
+
+#include "ngrav/MutualFmm.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -12,7 +13,7 @@
 namespace nbody {
 
 // One particle count's result: average wall-clock cost of Direct (when
-// affordable), Barnes-Hut, and adaptive FMM at that N, plus each solver's
+// affordable), Barnes-Hut, and the mutual FMM at that N, plus each solver's
 // internal phase breakdown -- the raw data a scaling study needs to fit a
 // power-law exponent and see which phase actually drives it.
 struct ScalingSweepPoint {
@@ -21,7 +22,7 @@ struct ScalingSweepPoint {
     double bhMs = 0.0;
     double fmmMs = 0.0;
     BarnesHutStats bhStats;
-    FmmStats fmmStats;
+    ngrav::MutualFmmStats fmmStats;
 };
 
 // Runs a full N-sweep (see ScalingSweepWorker.cpp for the exact N list) on a

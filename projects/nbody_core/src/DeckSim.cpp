@@ -17,7 +17,6 @@ Solver SolverFromString(const std::string& s) {
     if (s == "fmm") return Solver::Fmm;
     if (s == "spherical_fmm") return Solver::SphericalFmm;
     if (s == "complex_fmm") return Solver::ComplexFmm;
-    if (s == "adaptive_fmm") return Solver::AdaptiveFmm;
     return Solver::BarnesHut;
 }
 
@@ -132,10 +131,26 @@ void DeckSim<D>::Snapshot(fw::OutputWriter& writer) {
     else
         lmag = std::abs(m_sys.AngularMomentum());
 
+    // Total linear momentum P = sum m_i v_i. Conserved by any solver whose
+    // *integrator* is symplectic (this always holds here) -- but a force
+    // solver that isn't itself momentum-conserving (a one-directional FMM,
+    // or any particle-cluster method with no explicit symmetry) can still
+    // leak P through accumulated per-step force imbalance. This is the
+    // deck-level, directly-observable version of the mutual FMM's headline
+    // claim (see decks/cold_collapse_fmm.toml).
+    double px = 0.0, py = 0.0, pz = 0.0;
+    for (std::size_t i = 0; i < st.Count(); ++i) {
+        px += st.m[i] * st.vx[i];
+        py += st.m[i] * st.vy[i];
+        if constexpr (D == 3) pz += st.m[i] * st.vz[i];
+    }
+    const double pmag = std::sqrt(px * px + py * py + pz * pz);
+
     writer.WriteScalar("energy", E);
     writer.WriteScalar("energy_drift_pct", (m_energy0 != 0.0) ? 100.0 * (E - m_energy0) / std::abs(m_energy0) : 0.0);
     writer.WriteScalar("L_mag", lmag);
     writer.WriteScalar("L_drift_pct", (m_lmag0 > 1e-12) ? 100.0 * (lmag - m_lmag0) / m_lmag0 : 100.0 * lmag);
+    writer.WriteScalar("p_mag", pmag);
     writer.WriteScalar("com_x", com.x);
     writer.WriteScalar("com_y", com.y);
     writer.WriteScalar("com_z", (D == 3) ? Zc(com) : 0.0);
@@ -149,7 +164,8 @@ fw::SimInfo DeckSim<D>::Info() const {
     info.dt = m_sp.dt;
     info.substepsPerFrame = m_substepsPerFrame;
     info.frameFields = {"pos", "vel"};
-    info.diagnostics = {"energy", "energy_drift_pct", "L_mag", "L_drift_pct", "com_x", "com_y", "com_z", "dt_last"};
+    info.diagnostics = {"energy",   "energy_drift_pct", "L_mag", "L_drift_pct", "p_mag",
+                        "com_x",    "com_y",           "com_z", "dt_last"};
     return info;
 }
 

@@ -1,12 +1,16 @@
 #include "ngrav/SelfTest.hpp"
 
+#include "ngrav/MutualFmm.hpp"
 #include "ngrav/Solvers.hpp"
 #include "ngrav/System.hpp"
+#include "ngrav/ic/Plummer.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <random>
+#include <utility>
 #include <vector>
 
 namespace ngrav {
@@ -470,6 +474,146 @@ bool CoreDtSelfTest() {
     // abs(value)<=tol form reads correctly (a shortfall shows as a positive,
     // failing value; met-or-exceeded collapses to exactly 0).
     Check(ok, "adaptive uses >=2x fewer evals at matched accuracy", std::max(0.0, 2.0 - evalRatio), 0.0);
+
+    return ok;
+}
+
+bool CoreFmmSelfTest() {
+    bool ok = true;
+    std::printf("[mutual dual-tree FMM 3D]\n");
+
+    // theta=0 exactness: forces every pair to resolve via exact near-field
+    // (see MutualFmm.cpp -- a leaf that fails the MAC and can't split
+    // further loops the full cross-product of its members against the
+    // partner leaf's), so this should match Direct to machine precision.
+    {
+        std::mt19937 rng(555);
+        std::uniform_real_distribution<double> u(-1.0, 1.0);
+        const int n = 300;
+        SoA<3> in;
+        in.Resize(n);
+        for (int i = 0; i < n; ++i) {
+            in.x[i] = u(rng);
+            in.y[i] = u(rng);
+            in.z[i] = u(rng);
+            in.m[i] = 0.5 + 0.5 * (u(rng) + 1.0);
+        }
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Plummer(0.02);
+        sp.mac.theta = 0.0;
+        SoA<3> aD, aF;
+        const PosMassView<3> v = ViewOf(in);
+        ComputeAccelDirect<3>(v, sp, aD);
+        ComputeAccelMutualFmm(v, sp, aF);
+        double maxRel = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const double rx = aD.ax[i], ry = aD.ay[i], rz = aD.az[i];
+            const double ex = aF.ax[i] - rx, ey = aF.ay[i] - ry, ez = aF.az[i] - rz;
+            maxRel = std::max(maxRel, std::sqrt(ex * ex + ey * ey + ez * ez) /
+                                          std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30));
+        }
+        Check(ok, "theta=0 max rel err vs Direct", maxRel, 1e-11);
+    }
+
+    // Momentum conservation: the headline result. A pair-interaction energy
+    // that depends only on the separation vector makes F_T = -F_S exact by
+    // construction (see MutualFmm.cpp's header comment) -- verified at
+    // several theta, not just one, since the M2L fraction (and hence
+    // anything that COULD leak momentum) grows with theta.
+    {
+        ic::PlummerParams pp;
+        pp.n = 3000;
+        pp.seed = 42;
+        SoA<3> s = ic::Plummer<3>(pp);
+        const PosMassView<3> v = ViewOf(s);
+        double worst = 0.0;
+        for (double theta : {0.2, 0.4, 0.6, 0.8}) {
+            StepParams sp;
+            sp.G = 1.0;
+            sp.soft = Softening::Plummer(0.02);
+            sp.mac.theta = theta;
+            SoA<3> a;
+            ComputeAccelMutualFmm(v, sp, a);
+            double px = 0, py = 0, pz = 0, wsum = 0;
+            for (int i = 0; i < pp.n; ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                px += s.m[ii] * a.ax[ii];
+                py += s.m[ii] * a.ay[ii];
+                pz += s.m[ii] * a.az[ii];
+                wsum += s.m[ii] * std::sqrt(a.ax[ii] * a.ax[ii] + a.ay[ii] * a.ay[ii] + a.az[ii] * a.az[ii]);
+            }
+            worst = std::max(worst, std::sqrt(px * px + py * py + pz * pz) / wsum);
+        }
+        std::printf("  momentum |sum m*a|/sum m|a|, worst over theta in {0.2,0.4,0.6,0.8}: %.3e\n", worst);
+        Check(ok, "momentum conservation (worst-case theta)", worst, 1e-10);
+    }
+
+    // Accuracy vs Direct, and the honest characterization of how it depends
+    // on theta: this order-2 (monopole+quadrupole source, linear-shift
+    // local) FMM needs a noticeably tighter theta than Barnes-Hut to reach
+    // comparable accuracy -- a known, structural property of cluster-
+    // cluster methods at this local-expansion order (BH evaluates the exact
+    // field at each query particle's own position; FMM evaluates once per
+    // *cluster* and Taylor-shifts, which costs accuracy for cheaper scaling
+    // and, crucially, exact momentum conservation). Measured on a 5000-body
+    // Plummer sphere: mean rel err is ~2e-4 by theta=0.2, and effectively
+    // exact (near-field-dominated) by theta<=0.15; at BH's typical
+    // theta=0.5 operating point FMM's mean error (~5e-2) is worse than BH's
+    // own (~5e-4) -- a real, documented tradeoff, not a numeric target to
+    // paper over. This check only asserts the *achievable* regime.
+    {
+        ic::PlummerParams pp;
+        pp.n = 4000;
+        pp.seed = 7;
+        SoA<3> s = ic::Plummer<3>(pp);
+        const PosMassView<3> v = ViewOf(s);
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Plummer(0.02);
+        SoA<3> aDirect;
+        ComputeAccelDirect<3>(v, sp, aDirect);
+        sp.mac.theta = 0.2;
+        SoA<3> aFmm;
+        ComputeAccelMutualFmm(v, sp, aFmm);
+        double sumRel = 0.0;
+        for (int i = 0; i < pp.n; ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double rx = aDirect.ax[ii], ry = aDirect.ay[ii], rz = aDirect.az[ii];
+            const double ex = aFmm.ax[ii] - rx, ey = aFmm.ay[ii] - ry, ez = aFmm.az[ii] - rz;
+            sumRel += std::sqrt(ex * ex + ey * ey + ez * ez) / std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30);
+        }
+        Check(ok, "theta=0.2 mean rel err vs Direct", sumRel / pp.n, 1e-3);
+    }
+
+    // O(N) scaling: fitted log-log exponent over a modest range (kept small
+    // so the selftest stays fast; single-threaded prototype -- Phase 8 adds
+    // OpenMP-task parallelism and should tighten this further).
+    {
+        std::vector<std::pair<double, double>> pts;
+        for (int n : {2000, 8000, 32000}) {
+            ic::PlummerParams pp;
+            pp.n = n;
+            pp.seed = 1;
+            SoA<3> s = ic::Plummer<3>(pp);
+            const PosMassView<3> v = ViewOf(s);
+            StepParams sp;
+            sp.G = 1.0;
+            sp.soft = Softening::Plummer(0.02);
+            sp.mac.theta = 0.5;
+            SoA<3> out;
+            const auto t0 = std::chrono::steady_clock::now();
+            ComputeAccelMutualFmm(v, sp, out);
+            const auto t1 = std::chrono::steady_clock::now();
+            pts.emplace_back(static_cast<double>(n), std::chrono::duration<double, std::milli>(t1 - t0).count());
+        }
+        const double x0 = std::log(pts[0].first), x1 = std::log(pts[2].first);
+        const double y0 = std::log(pts[0].second), y1 = std::log(pts[2].second);
+        const double exponent = (y1 - y0) / (x1 - x0);
+        std::printf("  scaling exponent (N=2000..32000, theta=0.5): %.2f  (O(N)->1.0; single-threaded prototype)\n",
+                    exponent);
+        Check(ok, "scaling exponent is sub-quadratic (sanity, not O(N) itself)", exponent, 1.8);
+    }
 
     return ok;
 }

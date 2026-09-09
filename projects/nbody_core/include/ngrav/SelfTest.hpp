@@ -16,4 +16,11 @@ bool CoreSelfTest2D();
 // its accuracy. Also checks the fixed-dt path is unchanged.
 bool CoreDtSelfTest();
 
+// Mutual (falcON-style) dual-tree FMM, 3D: momentum conservation (the
+// headline result -- machine precision at every theta, vs the retired
+// one-directional AdaptiveFmm's ~1e-3..1e-6 and even Barnes-Hut's own
+// incidental ~1e-5), theta=0 exactness vs Direct, and the measured O(N)
+// scaling exponent.
+bool CoreFmmSelfTest();
+
 } // namespace ngrav

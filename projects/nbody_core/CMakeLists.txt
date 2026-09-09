@@ -7,6 +7,7 @@ find_package(OpenMP REQUIRED)
 add_library(nbody_core STATIC
     src/Tree.cpp
     src/Solvers.cpp
+    src/MutualFmm.cpp
     src/Integrator.cpp
     src/Scenarios.cpp
     src/DeckSim.cpp

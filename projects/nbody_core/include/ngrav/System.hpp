@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Integrator.hpp"
+#include "MutualFmm.hpp"
 #include "Solvers.hpp"
 #include "State.hpp"
 #include "Vec.hpp"
@@ -40,6 +41,12 @@ public:
     void ComputeAccel(Solver solver, const SoA<D>& in, const StepParams& sp, SoA<D>& out) const {
         ++m_forceEvals;
         const PosMassView<D> v = ViewOf(in);
+        if constexpr (D == 3) {
+            if (solver == Solver::Fmm) {
+                ComputeAccelMutualFmm(v, sp, out);
+                return;
+            }
+        }
         switch (solver) {
             case Solver::Direct:
                 ComputeAccelDirect<D>(v, sp, out);

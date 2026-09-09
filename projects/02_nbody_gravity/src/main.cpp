@@ -27,6 +27,7 @@ struct Args {
     bool interactive = false;
     bool selftest = false;
     bool dtSelftest = false;
+    bool fmmSelftest = false;
     std::string renderCheck;
 };
 
@@ -42,6 +43,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--dt-selftest") a.dtSelftest = true;
+        else if (s == "--fmm-selftest") a.fmmSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -65,6 +67,11 @@ int main(int argc, char** argv) {
     if (a.dtSelftest) {
         const bool ok = ngrav::CoreDtSelfTest();
         std::printf("\ndt-selftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (a.fmmSelftest) {
+        const bool ok = ngrav::CoreFmmSelfTest();
+        std::printf("\nfmm-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 

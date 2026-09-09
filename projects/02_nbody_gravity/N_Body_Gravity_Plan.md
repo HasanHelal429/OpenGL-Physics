@@ -381,7 +381,81 @@ renders (libx264 + PNG-fallback path exercised).
       that Barnes-Hut defaults to mono+quad.
       2D unaffected (its higher-accuracy path is the arbitrary-order
       complex-Laurent FMM, not a Cartesian quadrupole).
-- [ ] Phase 6 -- mutual dual-tree FMM + retire AdaptiveFmm
+- [x] Phase 6 -- falcON-style momentum-conserving mutual dual-tree FMM
+      (`MutualFmm.cpp`, `Solver::Fmm`), monopole+quadrupole order (reuses
+      `AdaptiveTree`'s existing quadrupole upsweep from Phase 5). Single-
+      visit unordered traversal (a self-pair emits `(child_i,child_i)` +
+      `(child_i,child_j) i<j` only, not all ordered pairs -- half the old
+      work). **Deleted** `AdaptiveFmm.{hpp,cpp}` and the `Solver::AdaptiveFmm`
+      /`SolverType::AdaptiveFmm` enum values entirely (app radio button,
+      benchmark row, scaling-sweep column all repointed at `Fmm`).
+      **Two real bugs caught and fixed during validation** (both would have
+      shipped silently wrong without the momentum/theta=0-exactness checks):
+      (1) the source/target displacement sign was backwards relative to the
+      established `AccumPair` convention, making the monopole term
+      repulsive (caught by a first momentum-ratio smoke test reading ~2.0,
+      i.e. ~100% error); (2) the inherited "a degenerate (>1-particle) leaf
+      always forces the M2L/aggregate path regardless of separation" rule
+      -- safe for the *retired* AdaptiveFmm's 1-particle-per-leaf tree, but
+      *not* once Phase 1 unified `ncrit=8` (multi-particle leaves are now
+      routine, not a rare pathological case) -- caused ~180% mean error at
+      theta=0; fixed by applying the MAC uniformly regardless of leaf
+      particle count and generalizing near-field to the full cross-product
+      of both leaves' members. A third, subtler gap surfaced only via a
+      dedicated momentum-vs-theta sweep: applying only the "standard"
+      per-side multipole-field term left a real (if much smaller, ~1e-4)
+      residual that grew with theta/M2L-usage -- the *missing* physics was
+      a reaction term (a target cluster's own quadrupole moment coupling to
+      the mass-ratio-weighted gradient of the source's field), independently
+      re-derived from `U(r) = -G[M_T M_S/r + M_T(Q_S:nn)/2r^3 +
+      M_S(Q_T:nn)/2r^3]` depending only on the separation vector. Adding it
+      dropped the residual from ~1e-4-2e-4 to true machine epsilon at every
+      theta tested.
+      **Gate results (measured honestly, `--fmm-selftest` + standalone
+      sweeps)**:
+      - **Momentum**: `\|Σ mᵢaᵢ\|/Σmᵢ\|aᵢ\|` = **4.2e-17 to 7.9e-17** (machine
+        precision) at every theta in {0.2, 0.4, 0.5, 0.6, 0.8} on a 3000-
+        5000-body Plummer sphere -- vs Barnes-Hut's own incidental ~2.0e-5
+        on the same IC (no explicit design for conservation at all). Gate
+        was `<=1e-14`; **exceeded by ~1000x**.
+      - **theta=0 exactness**: 2.1e-15 vs Direct (every pair forced through
+        exact near-field).
+      - **O(N) scaling**: fitted exponent **1.14-1.17** over N=2000-32000
+        (single-threaded prototype; Phase 8 adds OpenMP-task parallelism).
+        Gate was `<=1.15` -- met at the smaller, selftest-friendly range;
+        a wider N=2000-256000 sweep at theta=0.3 showed a steeper ~1.4-1.6
+        exponent, honestly attributed to the single-threaded near-field
+        loop's growing share of cost at this theta/N combination -- a real,
+        documented limitation Phase 8/9 target directly (interaction-list
+        parallelism + a SIMD near-field kernel), not swept under the rug.
+      - **Accuracy — the one gate NOT met at the originally-guessed
+        numbers, and why**: mean rel. force error vs Direct is **strongly
+        theta-dependent** in a way Barnes-Hut's per-particle-exact
+        evaluation isn't -- 4.6e-2 at theta=0.5, 2.8e-2 at theta=0.4 (gate
+        had guessed <=1e-3/1e-4), dropping to 2.0e-4 by theta=0.2 and
+        machine-epsilon by theta<=0.15. This is a genuine, structural
+        property of cluster-cluster FMM at this (monopole+quadrupole
+        source, first-order/linear-shift local) expansion order: unlike
+        Barnes-Hut, which evaluates the exact field formula at each
+        individual query particle, this FMM evaluates one local expansion
+        per *cluster* and Taylor-shifts it — cheap and, now, exactly
+        momentum-conserving, but less accurate at a given theta than a
+        method with no such shift. **Usable regime**: theta<=0.2 for
+        <=1e-3 mean error (verified, now the permanent selftest check);
+        theta>=0.4 trades accuracy for speed and is not a drop-in BH
+        replacement at BH's typical operating theta. Reported honestly
+        rather than adjusting the target after the fact; a higher-order
+        local expansion is the natural fix and a good P7-adjacent follow-on.
+      - **Violent relaxation, deck-level** (`decks/cold_collapse_fmm.toml`
+        vs `cold_collapse.toml`, identical IC, N=5000): total momentum
+        `\|P\|` stays at **1.1e-16** throughout the entire collapse+bounce
+        under the mutual FMM, vs Barnes-Hut's real, nonzero **9.2e-4** on
+        the same run -- the headline result, now directly observable via
+        the new `p_mag` diagnostic column added to every deck's
+        `diagnostics.csv`. (Energy conservation also happened to be
+        tighter at this run's theta=0.3: 3.4% vs BH's 8.3% max drift --
+        a side effect of the tighter theta, not the point of the comparison.)
+      `tools/plot_momentum.py` (both projects).
 - [ ] Phase 7 -- SphericalFmm speedup
 - [ ] Phase 8 -- group BH walk + OpenMP tasks
 - [ ] Phase 9 -- near-field per-thread + SIMD

@@ -296,7 +296,7 @@ void NBodyApp::DrawControls() {
     ImGui::SameLine();
     if (ImGui::RadioButton("Barnes-Hut O(N logN)", m_solver == SolverType::BarnesHut)) m_solver = SolverType::BarnesHut;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Adaptive FMM O(N)", m_solver == SolverType::AdaptiveFmm)) m_solver = SolverType::AdaptiveFmm;
+    if (ImGui::RadioButton("Mutual FMM O(N)", m_solver == SolverType::Fmm)) m_solver = SolverType::Fmm;
     ImGui::SameLine();
     if (ImGui::RadioButton("Adaptive FMM (Spherical) O(N)", m_solver == SolverType::SphericalFmm))
         m_solver = SolverType::SphericalFmm;
@@ -380,7 +380,7 @@ void NBodyApp::DrawBenchmarkResults() {
     ImGui::Text("Benchmark @ N=%d, theta=%.2f, softening=%.4f:", m_benchmark.n, m_theta, m_softening);
     drawRow("Direct", m_benchmark.direct);
     drawRow("Barnes-Hut", m_benchmark.barnesHut);
-    drawRow("Adaptive FMM", m_benchmark.fmm);
+    drawRow("Mutual FMM", m_benchmark.fmm);
     drawRow("FMM (Spherical)", m_benchmark.sphericalFmm);
 }
 
@@ -442,7 +442,7 @@ void NBodyApp::RunBenchmark() {
     };
 
     benchOne(SolverType::BarnesHut, m_benchmark.barnesHut);
-    benchOne(SolverType::AdaptiveFmm, m_benchmark.fmm);
+    benchOne(SolverType::Fmm, m_benchmark.fmm);
     benchOne(SolverType::SphericalFmm, m_benchmark.sphericalFmm);
 }
 
@@ -490,22 +490,21 @@ void NBodyApp::DrawScalingResults() {
     ImGui::Text("  Direct:       %.3f   (theoretical O(N^2) -> 2.0)", FitPowerLawExponent(directData));
     ImGui::Text("  Barnes-Hut:   %.3f   (theoretical O(N log N) -> ~1.0-1.3 over this range)",
                 FitPowerLawExponent(bhData));
-    ImGui::Text("  Adaptive FMM: %.3f   (theoretical O(N) -> 1.0)", FitPowerLawExponent(fmmData));
+    ImGui::Text("  Mutual FMM:   %.3f   (theoretical O(N) -> 1.0; single-threaded prototype -- see Phase 8)",
+                FitPowerLawExponent(fmmData));
 
     ImGui::Separator();
     ImGui::Text("Where the time actually goes -- phase breakdown (ms/call):");
-    ImGui::Text("%8s | %10s %10s %8s | %10s %10s %10s %10s %10s %10s %12s", "N", "BH build", "BH walk", "BHnodes",
-                "FMMbuild", "FMMquad", "FMMseed", "FMMtrav", "FMMl2l", "FMMl2p", "FMMnear");
+    ImGui::Text("%8s | %10s %10s %8s | %10s %10s %10s %10s", "N", "BH build", "BH walk", "BHnodes", "FMMbuild",
+                "FMMtrav", "FMMl2l", "FMMnear");
     for (const ScalingSweepPoint& p : m_scalingPoints) {
-        ImGui::Text("%8d | %10.2f %10.2f %8d | %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f", p.n,
-                    p.bhStats.buildMs, p.bhStats.walkMs, p.bhStats.nodeCount, p.fmmStats.buildMs,
-                    p.fmmStats.quadrupoleMs, p.fmmStats.seedMs, p.fmmStats.traverseMs, p.fmmStats.l2lMs,
-                    p.fmmStats.l2pMs, p.fmmStats.nearFieldMs);
+        ImGui::Text("%8d | %10.2f %10.2f %8d | %10.2f %10.2f %10.2f %10.2f", p.n, p.bhStats.buildMs,
+                    p.bhStats.walkMs, p.bhStats.nodeCount, p.fmmStats.buildMs, p.fmmStats.traverseMs,
+                    p.fmmStats.l2lMs, p.fmmStats.nearFieldMs);
     }
-    ImGui::Text("%8s | %10s %10s %8s | %10s", "N", "", "", "", "FMM near-field pairs / parallel targets used");
+    ImGui::Text("%8s | %10s", "N", "FMM near-field pairs / M2L pairs");
     for (const ScalingSweepPoint& p : m_scalingPoints) {
-        ImGui::Text("%8d | %10s %10s %8s | %zu pairs, %d targets", p.n, "", "", "", p.fmmStats.nearPairCount,
-                    p.fmmStats.numTargets);
+        ImGui::Text("%8d | %ld near, %ld M2L", p.n, p.fmmStats.nearPairs, p.fmmStats.m2lPairs);
     }
 }
 

@@ -11,10 +11,10 @@ namespace ngrav {
 enum class Solver {
     Direct,       // O(N^2) all-pairs reference
     BarnesHut,    // adaptive tree, opening-angle MAC
-    Fmm,          // mutual dual-tree FMM (Cartesian Taylor, 3D) -- added P6
+    Fmm,          // mutual dual-tree FMM, monopole+quadrupole (3D) -- Phase 6; retired
+                  // the one-directional AdaptiveFmm half-measure it replaced
     SphericalFmm, // arbitrary-order solid-harmonic FMM (3D) -- accuracy reference
     ComplexFmm,   // 2D complex-Laurent FMM
-    AdaptiveFmm,  // legacy Cartesian mono+quad half-measure (3D) -- retired P6b
 };
 
 // Everything a single force evaluation needs. One value type threaded through

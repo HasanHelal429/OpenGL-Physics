@@ -64,4 +64,12 @@ records what is genuinely 2D-specific.
       quadrupole term (`AddQuadrupole` in `Solvers.cpp` is a no-op for
       D==2). No 2D-specific gate beyond the shared selftest's own Barnes-Hut
       θ=0 exactness (unaffected, still 2e-14).
-- [ ] Phases 6-16 -- in parity with 02 (see that plan's Progress).
+- [ ] Phase 6c -- make `ComplexFmm` mutual (momentum-conserving), matching
+      02's Phase 6 for the 2D solver. **Not yet done** -- 02's Phase 6
+      (the 3D Cartesian-Taylor mutual FMM + retiring AdaptiveFmm) is
+      complete and validated; 2D's own `ComplexFmm` is untouched by this
+      phase (it's already a proper order-p FMM, just not yet mutual). `--dt-
+      selftest` here still exercises 02's shared 3D eccentric-orbit check
+      (see Phase 5's note -- the integrator code is dimension-generic, but
+      2D has no analogous closed-form orbit to validate against directly).
+- [ ] Phases 7-16 -- in parity with 02 (see that plan's Progress).

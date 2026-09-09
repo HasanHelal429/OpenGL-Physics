@@ -1,8 +1,9 @@
 #include "NBodySystem.hpp"
 
-#include "AdaptiveFmm.hpp"
 #include "Octree.hpp"
 #include "SphericalFmm.hpp"
+
+#include "ngrav/MutualFmm.hpp"
 
 #include <cmath>
 
@@ -14,15 +15,15 @@ ngrav::Solver ToCore(SolverType s) {
     switch (s) {
         case SolverType::Direct: return ngrav::Solver::Direct;
         case SolverType::BarnesHut: return ngrav::Solver::BarnesHut;
-        case SolverType::AdaptiveFmm: return ngrav::Solver::AdaptiveFmm;
+        case SolverType::Fmm: return ngrav::Solver::Fmm;
         case SolverType::SphericalFmm: return ngrav::Solver::SphericalFmm;
     }
     return ngrav::Solver::BarnesHut;
 }
 
-// Build an AoS position array from an ngrav SoA view -- the two FMM solvers
-// still take std::vector<glm::dvec3>. One alloc per FMM force eval; these are
-// O(N log N)+ so it's noise. Removed in P6/P7 when they move into nbody_core.
+// Build an AoS position array from an ngrav SoA view -- SphericalFmm still
+// takes std::vector<glm::dvec3>. One alloc per force eval; it's O(N log N)+
+// so this is noise. Removed when P7 moves it into nbody_core.
 std::vector<glm::dvec3> AoSPositions(const ngrav::SoA<3>& s) {
     std::vector<glm::dvec3> p(s.Count());
     for (std::size_t i = 0; i < s.Count(); ++i) p[i] = glm::dvec3(s.x[i], s.y[i], s.z[i]);
@@ -43,15 +44,11 @@ void WriteAccel(const std::vector<glm::dvec3>& a, ngrav::SoA<3>& out) {
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec3>& accelOut) {
     const std::size_t n = pos.size();
-    if (solver == SolverType::AdaptiveFmm) {
-        ComputeAccelAdaptiveFmm(pos, mass, G, softening, theta, accelOut);
-        return;
-    }
     if (solver == SolverType::SphericalFmm) {
         ComputeAccelSphericalFmm(pos, mass, G, softening, theta, accelOut);
         return;
     }
-    // Direct / Barnes-Hut via nbody_core.
+    // Direct / Barnes-Hut / Fmm via nbody_core.
     ngrav::SoA<3> in;
     in.Resize(n);
     for (std::size_t i = 0; i < n; ++i) {
@@ -68,6 +65,8 @@ void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const s
     const ngrav::PosMassView<3> v = ngrav::ViewOf(in);
     if (solver == SolverType::Direct)
         ngrav::ComputeAccelDirect<3>(v, sp, out);
+    else if (solver == SolverType::Fmm)
+        ngrav::ComputeAccelMutualFmm(v, sp, out);
     else
         ngrav::ComputeAccelBarnesHut<3>(v, sp, out);
     accelOut.resize(n);
@@ -75,13 +74,6 @@ void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const s
 }
 
 void RegisterFmmAdaptersOn(ngrav::System<3>& sys) {
-    sys.SetAuxSolver(ngrav::Solver::AdaptiveFmm,
-                     [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
-                         const std::vector<glm::dvec3> pos = AoSPositions(in);
-                         std::vector<glm::dvec3> a;
-                         ComputeAccelAdaptiveFmm(pos, in.m, sp.G, sp.soft.eps, sp.mac.theta, a);
-                         WriteAccel(a, out);
-                     });
     sys.SetAuxSolver(ngrav::Solver::SphericalFmm,
                      [](const ngrav::SoA<3>& in, const ngrav::StepParams& sp, ngrav::SoA<3>& out) {
                          const std::vector<glm::dvec3> pos = AoSPositions(in);

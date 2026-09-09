@@ -9,18 +9,20 @@ namespace nbody {
 
 // SolverType is kept as this project's public vocabulary (the ImGui radio
 // buttons, the benchmark, the scaling sweep). It maps 1:1 onto ngrav::Solver
-// inside NBodySystem.
-enum class SolverType { Direct, BarnesHut, AdaptiveFmm, SphericalFmm };
+// inside NBodySystem. Fmm is the momentum-conserving mutual dual-tree FMM
+// (Phase 6, lives natively in nbody_core -- no adapter needed); it replaced
+// the retired one-directional AdaptiveFmm.
+enum class SolverType { Direct, BarnesHut, Fmm, SphericalFmm };
 
 // Free-function accel dispatch, unchanged signature -- still used by the
 // benchmark panel and ScalingSweepWorker to run any solver against an
-// arbitrary AoS snapshot. Direct / Barnes-Hut route through nbody_core
-// (ngrav); the two FMM variants still use this project's own tree code.
+// arbitrary AoS snapshot. Direct / Barnes-Hut / Fmm route through
+// nbody_core (ngrav); SphericalFmm still uses this project's own code.
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec3>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec3>& accelOut);
 
-// Wire this project's still-in-project FMM solvers (AdaptiveFmm / SphericalFmm)
-// onto an ngrav::System<3> as aux adapters. Used by NBodySystem and by the
+// Wire this project's still-in-project SphericalFmm solver onto an
+// ngrav::System<3> as an aux adapter. Used by NBodySystem and by the
 // deck-driven NBodySim path in main.cpp.
 void RegisterFmmAdaptersOn(ngrav::System<3>& sys);
 

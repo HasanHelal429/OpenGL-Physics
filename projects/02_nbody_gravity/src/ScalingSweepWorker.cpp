@@ -75,11 +75,22 @@ void ScalingSweepWorker::Start(ScenarioType scenarioType, double diskRotationFra
             }
 
             {
-                FmmStats stats;
+                ngrav::SoA<3> in;
+                in.Resize(scenario.pos.size());
+                for (std::size_t i = 0; i < scenario.pos.size(); ++i) {
+                    in.SetPos(i, scenario.pos[i]);
+                    in.m[i] = scenario.mass[i];
+                }
+                ngrav::StepParams sp;
+                sp.G = scenario.G;
+                sp.soft = ngrav::Softening::Plummer(scenario.softening);
+                sp.mac.theta = scenario.suggestedTheta;
+                ngrav::SoA<3> out;
+                ngrav::MutualFmmStats stats;
+                const ngrav::PosMassView<3> v = ngrav::ViewOf(in);
                 const auto t0 = std::chrono::steady_clock::now();
                 for (int r = 0; r < kReps; ++r) {
-                    ComputeAccelAdaptiveFmm(scenario.pos, scenario.mass, scenario.G, scenario.softening,
-                                            scenario.suggestedTheta, accel, &stats);
+                    ngrav::ComputeAccelMutualFmm(v, sp, out, &stats);
                 }
                 const auto t1 = std::chrono::steady_clock::now();
                 point.fmmMs = std::chrono::duration<double, std::milli>(t1 - t0).count() / kReps;
