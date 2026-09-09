@@ -94,3 +94,7 @@ single-polarisation validation, so it is optional.
 | `cylinder_scatter.toml` | TFSF plane wave onto a PEC cylinder (Mie check) |
 | `dipole_antenna.toml` | centre-fed half-wave PEC dipole |
 | `playground.toml` | CW source + dielectric lens + PEC strip (`--interactive`) |
+| `double_slit.toml` | TFSF plane wave through 2 slits in a PEC wall -- qualitative double-slit interference |
+| `diffraction_grating.toml` | same, 5 slits instead of 2 -- distinct diffraction orders instead of one fringe pattern |
+| `waveguide.toml` | point source in a narrow parallel-plate channel -- single guided mode vs. free radiation outside it |
+| `pulse_cpml.toml` | pulse_mur.toml with CPML instead of Mur -- visual pairing for -81dB CPML vs. few-percent Mur reflection |

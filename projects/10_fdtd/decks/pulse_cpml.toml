@@ -1,0 +1,33 @@
+title = "Gaussian pulse, CPML boundary (compare to pulse_mur.toml)"
+
+# Identical deck to pulse_mur.toml (same source, same grid), only the
+# boundary swapped from first-order Mur to CPML -- a direct, same-source
+# visual pairing for the two ABCs already quantified in docs/SIMULATION.md
+# (Mur: a few-percent residual reflection; CPML: -81dB, --cpml-selftest).
+# By this deck's step 900 the pulse has crossed the domain and come back:
+# with Mur the reflection is large enough to see as a distinct, dramatic
+# interference pattern; with CPML the domain stays visually quiet.
+
+[grid]
+nx = 300
+ny = 300
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[time]
+steps = 900
+substeps_per_frame = 6
+
+[[source]]
+kind = "gaussian"
+x = 150.0
+y = 150.0
+f0 = 0.06
+amplitude = 1.0
+
+[probe]
+points = [150.0, 150.0, 220.0, 150.0, 285.0, 150.0]

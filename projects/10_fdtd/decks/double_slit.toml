@@ -1,0 +1,57 @@
+title = "Double-slit interference (TFSF plane wave through 2 slits in a PEC wall)"
+
+# A normal-incidence TFSF plane wave (wavelength 20 cells, f0=0.05, the same
+# source as cylinder_scatter.toml/dipole_antenna.toml) hits a PEC wall built
+# from 3 [[pec]] box segments, leaving two 20-cell gaps (slits) centred at
+# y=160 and y=200 (3-wavelength separation). Each open slit re-radiates a
+# cylindrical wavelet (Huygens); downstream the two wavelets interfere,
+# producing the classic double-slit fringe pattern -- a qualitative
+# demonstration of the same validated TFSF/PEC machinery already checked
+# quantitatively against Mie scattering (cylinder_scatter.toml) and the
+# dipole pattern (dipole_antenna.toml), not a new numerical check itself.
+
+[grid]
+nx = 360
+ny = 360
+dx = 1.0
+courant = 0.5
+
+[boundary]
+type = "cpml"
+pml_cells = 14
+
+[tfsf]
+margin = 10
+
+[time]
+steps = 2400
+substeps_per_frame = 6
+
+[[source]]
+kind = "tfsf"
+waveform = "sine"
+f0 = 0.05
+amplitude = 1.0
+angle_deg = 0.0
+ramp_cycles = 4
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 70.0
+half_x = 1.5
+half_y = 70.0
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 180.0
+half_x = 1.5
+half_y = 20.0
+
+[[pec]]
+shape = "box"
+x = 150.0
+y = 290.0
+half_x = 1.5
+half_y = 70.0
