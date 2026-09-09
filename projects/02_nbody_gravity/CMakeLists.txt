@@ -4,7 +4,6 @@ add_executable(02_nbody_gravity
     src/main.cpp
     src/NBodySystem.cpp
     src/Octree.cpp
-    src/AdaptiveFmm.cpp
     src/SphericalHarmonics.cpp
     src/SphericalFmm.cpp
     src/Scenarios.cpp
@@ -16,5 +15,6 @@ add_executable(02_nbody_gravity
 
 target_link_libraries(02_nbody_gravity PRIVATE
     physgl
+    nbody_core
     OpenMP::OpenMP_CXX
 )

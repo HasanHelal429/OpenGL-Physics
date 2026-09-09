@@ -1,0 +1,21 @@
+title = "Eccentric two-body orbit (e=0.9, adaptive global dt)"
+# Same orbit as eccentric_orbit_fixed.toml, but dt = eta * min sqrt(eps/|a|)
+# instead of a fixed step: watch dt_last in diagnostics.csv shrink sharply
+# through each periapsis passage and relax back out near apoapsis. See the
+# nbody_core --selftest ("adaptive global dt" section) for the quantitative
+# claim: at matched energy-conservation accuracy, adaptive uses ~9x fewer
+# force evaluations than the fixed dt that would be needed to resolve
+# periapsis globally.
+
+[solver]
+kind = "direct"
+
+[time]
+frames = 400
+substeps_per_frame = 20
+adaptive = true
+eta = 0.015
+
+[scenario]
+type = "kepler"
+eccentricity = 0.9

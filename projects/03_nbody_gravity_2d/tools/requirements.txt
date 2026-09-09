@@ -1,0 +1,4 @@
+numpy>=1.23
+matplotlib>=3.6
+imageio>=2.31
+imageio-ffmpeg>=0.4

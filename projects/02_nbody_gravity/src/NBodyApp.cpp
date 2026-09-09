@@ -22,6 +22,13 @@ const char* kFontPath = "C:\\Windows\\Fonts\\consola.ttf";
 // paying the full O(N^2) cost every tick at large N.
 constexpr int kDiagnosticsEveryNTicks = 6;
 
+// The interactive app keeps its four quick-look scenarios (still on the
+// project-local nbody::Scenarios). The full realistic-IC set added in
+// Phase 13 -- Plummer / Hernquist / King equilibria and the disk+bulge+NFW
+// galaxy -- lives in ngrav::Scenarios and is reached through decks
+// (decks/{hernquist,king,disk_galaxy}_*.toml) or a generated ic_file, the
+// same split 08_compressible_fluid uses between its demo scenes and its
+// deck-driven runs.
 constexpr ScenarioType kScenarios[] = {ScenarioType::TwoBodyKepler, ScenarioType::LagrangeTriangle,
                                         ScenarioType::Cluster, ScenarioType::RotatingDisk};
 
@@ -147,8 +154,8 @@ void NBodyApp::OnFixedUpdate(double fixedDt) {
     const auto t0 = std::chrono::steady_clock::now();
     int steps = 0;
     for (; steps < maxSteps; ++steps) {
-        m_system.Step(m_dt, m_G, m_softening, m_solver, m_theta);
-        m_simTime += m_dt;
+        m_lastDtTaken = m_system.Step(m_dt, m_G, m_softening, m_solver, m_theta, m_adaptiveDt, m_eta);
+        m_simTime += m_lastDtTaken;
         ++m_stepCount;
 
         const double elapsedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -296,7 +303,7 @@ void NBodyApp::DrawControls() {
     ImGui::SameLine();
     if (ImGui::RadioButton("Barnes-Hut O(N logN)", m_solver == SolverType::BarnesHut)) m_solver = SolverType::BarnesHut;
     ImGui::SameLine();
-    if (ImGui::RadioButton("Adaptive FMM O(N)", m_solver == SolverType::AdaptiveFmm)) m_solver = SolverType::AdaptiveFmm;
+    if (ImGui::RadioButton("Mutual FMM O(N)", m_solver == SolverType::Fmm)) m_solver = SolverType::Fmm;
     ImGui::SameLine();
     if (ImGui::RadioButton("Adaptive FMM (Spherical) O(N)", m_solver == SolverType::SphericalFmm))
         m_solver = SolverType::SphericalFmm;
@@ -330,7 +337,16 @@ void NBodyApp::DrawControls() {
         m_softening = static_cast<double>(softening);
 
     float dt = static_cast<float>(m_dt);
-    if (ImGui::SliderFloat("dt", &dt, 1e-5f, 0.05f, "%.5f", ImGuiSliderFlags_Logarithmic)) m_dt = static_cast<double>(dt);
+    if (ImGui::SliderFloat(m_adaptiveDt ? "dt (ceiling)" : "dt", &dt, 1e-5f, 0.05f, "%.5f", ImGuiSliderFlags_Logarithmic))
+        m_dt = static_cast<double>(dt);
+
+    ImGui::Checkbox("Adaptive dt (eta*min sqrt(eps/|a|))", &m_adaptiveDt);
+    ImGui::BeginDisabled(!m_adaptiveDt);
+    float eta = static_cast<float>(m_eta);
+    if (ImGui::SliderFloat("eta", &eta, 0.005f, 0.1f, "%.3f", ImGuiSliderFlags_Logarithmic)) m_eta = static_cast<double>(eta);
+    ImGui::SameLine();
+    ImGui::Text("dt taken: %.3e", m_lastDtTaken);
+    ImGui::EndDisabled();
 
     ImGui::SliderInt("Substeps / frame", &m_substeps, 1, 30);
 
@@ -371,7 +387,7 @@ void NBodyApp::DrawBenchmarkResults() {
     ImGui::Text("Benchmark @ N=%d, theta=%.2f, softening=%.4f:", m_benchmark.n, m_theta, m_softening);
     drawRow("Direct", m_benchmark.direct);
     drawRow("Barnes-Hut", m_benchmark.barnesHut);
-    drawRow("Adaptive FMM", m_benchmark.fmm);
+    drawRow("Mutual FMM", m_benchmark.fmm);
     drawRow("FMM (Spherical)", m_benchmark.sphericalFmm);
 }
 
@@ -433,7 +449,7 @@ void NBodyApp::RunBenchmark() {
     };
 
     benchOne(SolverType::BarnesHut, m_benchmark.barnesHut);
-    benchOne(SolverType::AdaptiveFmm, m_benchmark.fmm);
+    benchOne(SolverType::Fmm, m_benchmark.fmm);
     benchOne(SolverType::SphericalFmm, m_benchmark.sphericalFmm);
 }
 
@@ -481,22 +497,21 @@ void NBodyApp::DrawScalingResults() {
     ImGui::Text("  Direct:       %.3f   (theoretical O(N^2) -> 2.0)", FitPowerLawExponent(directData));
     ImGui::Text("  Barnes-Hut:   %.3f   (theoretical O(N log N) -> ~1.0-1.3 over this range)",
                 FitPowerLawExponent(bhData));
-    ImGui::Text("  Adaptive FMM: %.3f   (theoretical O(N) -> 1.0)", FitPowerLawExponent(fmmData));
+    ImGui::Text("  Mutual FMM:   %.3f   (theoretical O(N) -> 1.0; single-threaded prototype -- see Phase 8)",
+                FitPowerLawExponent(fmmData));
 
     ImGui::Separator();
     ImGui::Text("Where the time actually goes -- phase breakdown (ms/call):");
-    ImGui::Text("%8s | %10s %10s %8s | %10s %10s %10s %10s %10s %10s %12s", "N", "BH build", "BH walk", "BHnodes",
-                "FMMbuild", "FMMquad", "FMMseed", "FMMtrav", "FMMl2l", "FMMl2p", "FMMnear");
+    ImGui::Text("%8s | %10s %10s %8s | %10s %10s %10s %10s", "N", "BH build", "BH walk", "BHnodes", "FMMbuild",
+                "FMMtrav", "FMMl2l", "FMMnear");
     for (const ScalingSweepPoint& p : m_scalingPoints) {
-        ImGui::Text("%8d | %10.2f %10.2f %8d | %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f %10.2f", p.n,
-                    p.bhStats.buildMs, p.bhStats.walkMs, p.bhStats.nodeCount, p.fmmStats.buildMs,
-                    p.fmmStats.quadrupoleMs, p.fmmStats.seedMs, p.fmmStats.traverseMs, p.fmmStats.l2lMs,
-                    p.fmmStats.l2pMs, p.fmmStats.nearFieldMs);
+        ImGui::Text("%8d | %10.2f %10.2f %8d | %10.2f %10.2f %10.2f %10.2f", p.n, p.bhStats.buildMs,
+                    p.bhStats.walkMs, p.bhStats.nodeCount, p.fmmStats.buildMs, p.fmmStats.traverseMs,
+                    p.fmmStats.l2lMs, p.fmmStats.nearFieldMs);
     }
-    ImGui::Text("%8s | %10s %10s %8s | %10s", "N", "", "", "", "FMM near-field pairs / parallel targets used");
+    ImGui::Text("%8s | %10s", "N", "FMM near-field pairs / M2L pairs");
     for (const ScalingSweepPoint& p : m_scalingPoints) {
-        ImGui::Text("%8d | %10s %10s %8s | %zu pairs, %d targets", p.n, "", "", "", p.fmmStats.nearPairCount,
-                    p.fmmStats.numTargets);
+        ImGui::Text("%8d | %ld near, %ld M2L", p.n, p.fmmStats.nearPairs, p.fmmStats.m2lPairs);
     }
 }
 

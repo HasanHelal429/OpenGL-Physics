@@ -3,39 +3,41 @@
 #include <glm/glm.hpp>
 #include <vector>
 
+#include "ngrav/System.hpp"
+
 namespace nbody2d {
 
 enum class SolverType { Direct, BarnesHut, ComplexFmm };
 
-// Dispatches to whichever solver's ComputeAccel* function matches `solver`.
-// Exposed standalone (not just through NBodySystem) so the benchmark panel
-// can run any solver against an arbitrary snapshot without needing a full
-// NBodySystem instance.
+// Free-function accel dispatch, unchanged signature -- used by the benchmark
+// panel. Direct / Barnes-Hut route through nbody_core (ngrav); ComplexFmm
+// still uses this project's own quadtree code.
 void ComputeAccel(SolverType solver, const std::vector<glm::dvec2>& pos, const std::vector<double>& mass, double G,
                    double softening, double theta, std::vector<glm::dvec2>& accelOut);
 
-// Softened-gravity 2D N-body system: SoA position/velocity/mass state plus
-// a kick-drift-kick (leapfrog) symplectic integrator. Force evaluation is
-// swappable per step (Direct O(N^2), Barnes-Hut O(N log N), or the complex
-// FMM O(N) -- see Quadtree.hpp/ComplexFmmTree.hpp).
+// Wire this project's still-in-project ComplexFmm solver onto an
+// ngrav::System<2> as an aux adapter.
+void RegisterFmmAdaptersOn(ngrav::System<2>& sys);
+
+// Softened-gravity 2D N-body system. Thin wrapper over ngrav::System<2>: it
+// owns the SoA state and the leapfrog integrator; NBodySystem keeps an AoS
+// mirror so the render / diagnostics call sites that expect
+// std::vector<glm::dvec2> stay untouched.
 class NBodySystem {
 public:
+    NBodySystem();
+
     void SetParticles(std::vector<glm::dvec2> positions, std::vector<glm::dvec2> velocities,
                        std::vector<double> masses);
 
-    // Must be called once after SetParticles (and again if G/softening/
-    // solver change while paused) so the first leapfrog half-kick has a
-    // valid acceleration to use.
     void PrimeAccelerations(double G, double softening, SolverType solver, double theta);
+    // `adaptive` replaces the fixed `dt` with eta*min sqrt(softening/|a|),
+    // clamped to at most `dt`. Returns the dt actually taken.
+    double Step(double dt, double G, double softening, SolverType solver, double theta, bool adaptive = false,
+                double eta = 0.03);
 
-    void Step(double dt, double G, double softening, SolverType solver, double theta);
-
-    // O(N^2) diagnostics -- not cheap at large N; call sparingly.
     double TotalEnergy(double G, double softening) const;
-    // Angular momentum in 2D is a scalar (the z-component of r x v out of
-    // the plane), not a vector -- the one physics-API difference from the
-    // 3D project's NBodySystem.
-    double AngularMomentum() const; // about the system's center of mass
+    double AngularMomentum() const; // 2D: the scalar z-component
     glm::dvec2 CenterOfMass() const;
 
     size_t Count() const { return m_pos.size(); }
@@ -44,9 +46,12 @@ public:
     const std::vector<double>& Masses() const { return m_mass; }
 
 private:
-    void RecomputeAccel(double G, double softening, SolverType solver, double theta);
+    void RegisterFmmAdapters();
+    void SyncMirrorFromCore();
+    ngrav::StepParams MakeParams(double G, double softening, SolverType solver, double theta) const;
 
-    std::vector<glm::dvec2> m_pos, m_vel, m_accel;
+    ngrav::System<2> m_core;
+    std::vector<glm::dvec2> m_pos, m_vel; // AoS mirror
     std::vector<double> m_mass;
 };
 

@@ -1,0 +1,8 @@
+title = "2D two-body orbit (precessing)"
+[solver]
+kind = "direct"
+[time]
+frames = 400
+substeps_per_frame = 20
+[scenario]
+type = "kepler"

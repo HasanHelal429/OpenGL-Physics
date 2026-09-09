@@ -1,0 +1,27 @@
+title = "King sphere (W0=6, N=5000, equilibrium)"
+# A King (1966) lowered-isothermal sphere, W0 = 6 (concentration ~1.25,
+# tidal radius ~18 core radii). Unlike Plummer/Hernquist this profile has
+# compact support -- the density and DF vanish at a finite tidal radius.
+# The ODE for the dimensionless potential W(x) is solved by RK4 at IC-build
+# time (see ngrav/ic/King.hpp). Velocities: isotropic Jeans dispersion.
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "spline"
+eps = 0.06
+
+[time]
+frames = 200
+substeps_per_frame = 5
+
+[solver]
+kind = "barnes_hut"
+theta = 0.5
+
+[scenario]
+type = "king"
+n = 5000
+seed = 1
+king_w0 = 6.0

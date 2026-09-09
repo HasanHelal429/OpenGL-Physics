@@ -1,0 +1,29 @@
+title = "Disk galaxy (exp disk + Hernquist bulge + NFW halo, N=10000)"
+# A three-component disk galaxy: 40% exponential stellar disk, 10% Hernquist
+# bulge, 50% NFW dark-matter halo. NOT a self-consistent equilibrium (that
+# needs an iterative DF solver) -- disk stars are put on near-circular orbits
+# in the total analytic midplane potential with epicyclic dispersion +
+# asymmetric drift, bulge/halo use isotropic Jeans. Good enough to run and
+# watch the disk settle. Mutual FMM so the disk isn't spuriously heated by a
+# momentum-violating far field.
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "spline"
+eps = 0.15
+
+[time]
+frames = 300
+substeps_per_frame = 8
+
+[solver]
+kind = "fmm"
+theta = 0.3
+
+[scenario]
+type = "disk_galaxy"
+n = 10000
+seed = 1
+disk_rotation_fraction = 1.0

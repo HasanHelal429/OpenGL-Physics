@@ -1,0 +1,10 @@
+title = "2D Plummer cluster (N=2000)"
+[time]
+frames = 200
+substeps_per_frame = 5
+[solver]
+kind = "barnes_hut"
+theta = 0.5
+[scenario]
+type = "plummer"
+n = 2000

@@ -1,0 +1,29 @@
+title = "Cold collapse (N=5000, mutual FMM)"
+# Same IC as cold_collapse.toml, run with the momentum-conserving mutual
+# dual-tree FMM (Phase 6) instead of Barnes-Hut. Through a violent-
+# relaxation collapse+bounce -- exactly the regime where a one-directional
+# force evaluation (the retired AdaptiveFmm, or any particle-cluster method
+# with no explicit symmetry) can quietly leak net momentum -- this solver's
+# total momentum stays at machine precision by construction. Compare its
+# diagnostics.csv against cold_collapse.toml's (Barnes-Hut) run: measured
+# |P| range [0, 1.1e-16] here vs Barnes-Hut's [0, 9.2e-4] on the identical
+# IC -- see p_mag in each run's diagnostics.csv.
+#
+# NOTE: the mutual-FMM traversal is single-threaded (Phase 8 adds OpenMP-
+# task parallelism); this deck's 2560 substeps take several minutes.
+
+[sim]
+G = 1.0
+
+[time]
+frames = 320
+substeps_per_frame = 8
+
+[solver]
+kind = "fmm"
+theta = 0.3
+
+[scenario]
+type = "cold_collapse"
+n = 5000
+seed = 1
