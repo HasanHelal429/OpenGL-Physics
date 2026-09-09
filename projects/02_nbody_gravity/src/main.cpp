@@ -243,6 +243,17 @@ int RunBench(const Args& a) {
     sp.soft = ngrav::Softening::Plummer(0.02);
     sp.mac.theta = a.benchTheta;
 
+    // The GPU solvers are standalone entry points that need a live GL context
+    // (see GpuDirect.hpp). Create one only when a GPU solver was asked for, so
+    // a CPU bench point still runs on a node with no GPU at all. On a batch
+    // node with no display this takes GLContext's EGL path.
+    const bool wantGpu = (a.bench == "gpu_direct" || a.bench == "gpu_bh" || a.bench == "gpu_barnes_hut");
+    fw::GLContext glctx;
+    if (wantGpu) {
+        glctx = fw::GLContext::CreateHidden(4, 6);
+        std::fprintf(stderr, "# bench: GL context via %s backend\n", glctx.BackendName());
+    }
+
     // Exact reference (skip for very large N -- O(N^2) gets slow; then the
     // error column is reported as -1).
     ngrav::SoA<3> aRef;
@@ -295,8 +306,30 @@ int RunBench(const Args& a) {
                 out.az[ii] = acc[ii].z;
             }
         });
+    } else if (a.bench == "gpu_direct") {
+        // fp32 on the GPU against the same fp64 CPU Direct reference, so the
+        // error column reports the fp32 floor rather than an algorithmic error.
+        ngrav::gpu::GpuDirectStats gs;
+        result = timeIt([&](ngrav::SoA<3>& out) {
+            ngrav::gpu::ComputeAccelGpuDirect(v, sp.G, sp.soft.eps2, out, &gs);
+        });
+        std::fprintf(stderr, "# gpu_direct stages ms: upload=%.3f dispatch=%.3f readback=%.3f\n", gs.uploadMs,
+                     gs.dispatchMs, gs.readbackMs);
+    } else if (a.bench == "gpu_bh" || a.bench == "gpu_barnes_hut") {
+        ngrav::gpu::GpuBarnesHutStats gs;
+        result = timeIt([&](ngrav::SoA<3>& out) {
+            ngrav::gpu::ComputeAccelGpuBarnesHut(v, sp.G, sp.soft.eps2, sp.mac.theta, out, &gs);
+        });
+        std::fprintf(stderr,
+                     "# gpu_bh stages ms: sort=%.3f build=%.3f upsweep=%.3f forces=%.3f readback=%.3f "
+                     "(cells=%d levels=%d)\n",
+                     gs.sortMs, gs.treeBuildMs, gs.massUpsweepMs, gs.forcesMs, gs.readbackMs, gs.cellCount,
+                     gs.levelsUsed);
     } else {
-        std::fprintf(stderr, "bench: unknown solver '%s' (direct|barnes_hut|fmm|spherical_fmm)\n", a.bench.c_str());
+        std::fprintf(stderr,
+                     "bench: unknown solver '%s' "
+                     "(direct|barnes_hut|fmm|spherical_fmm|gpu_direct|gpu_bh)\n",
+                     a.bench.c_str());
         return 2;
     }
 
