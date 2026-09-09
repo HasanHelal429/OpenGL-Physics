@@ -3,6 +3,8 @@
 
 #include "ngrav/DeckSim.hpp"
 #include "ngrav/SelfTest.hpp"
+#include "ngrav/Solvers.hpp"
+#include "ngrav/gpu/GpuQuadtree.hpp"
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -11,9 +13,13 @@
 #include <glad/glad.h>
 #include <stb_image_write.h>
 
+#include <glm/glm.hpp>
+
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -27,6 +33,7 @@ struct Args {
     bool interactive = false;
     bool selftest = false;
     bool dtSelftest = false;
+    bool gpuSelftest = false;
     std::string renderCheck;
 };
 
@@ -42,6 +49,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--interactive") a.interactive = true;
         else if (s == "--selftest") a.selftest = true;
         else if (s == "--dt-selftest") a.dtSelftest = true;
+        else if (s == "--gpu-selftest") a.gpuSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -50,6 +58,60 @@ Args ParseArgs(int argc, char** argv) {
 
 ngrav::DeckSim<2> MakeSim() {
     return ngrav::DeckSim<2>([](ngrav::System<2>& sys) { nbody2d::RegisterFmmAdaptersOn(sys); });
+}
+
+// Phase 12: GPU quadtree (ported from 06_tidal_disruption via GpuBarnesHut's
+// 3D port, rewritten for a 4-child quadtree + 2D force law -- see
+// GpuQuadtree.hpp's own header comment) vs CPU Barnes-Hut, at theta=0 (walk
+// forced down to exact leaf-vs-leaf near field everywhere) and theta=0.5
+// (06's own selftest idiom's usual operating point).
+bool GpuSelftest() {
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    const int n = 2000;
+    ngrav::SoA<2> in;
+    in.Resize(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const std::size_t ii = static_cast<std::size_t>(i);
+        in.x[ii] = u(rng);
+        in.y[ii] = u(rng);
+        in.m[ii] = 0.5 + 0.5 * (u(rng) + 1.0);
+    }
+    const ngrav::PosMassView<2> v = ngrav::ViewOf(in);
+
+    const double G = 1.0, eps = 0.02, eps2 = eps * eps;
+    bool ok = true;
+
+    for (const double theta : {0.0, 0.5}) {
+        ngrav::StepParams sp;
+        sp.G = G;
+        sp.soft = ngrav::Softening::Plummer(eps);
+        sp.mac.theta = theta;
+        ngrav::SoA<2> aCpu;
+        ngrav::ComputeAccelBarnesHut<2>(v, sp, aCpu);
+
+        ngrav::gpu::GpuQuadtreeStats stats;
+        ngrav::SoA<2> aGpu;
+        ngrav::gpu::ComputeAccelGpuQuadtree(v, G, eps2, theta, aGpu, &stats);
+
+        double maxRel = 0.0;
+        for (int i = 0; i < n; ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double rx = aCpu.ax[ii], ry = aCpu.ay[ii];
+            const double ex = aGpu.ax[ii] - rx, ey = aGpu.ay[ii] - ry;
+            const double rel = std::sqrt(ex * ex + ey * ey) / std::max(std::sqrt(rx * rx + ry * ry), 1e-30);
+            maxRel = std::max(maxRel, rel);
+        }
+        const double tol = (theta == 0.0) ? 1e-4 : 0.2;
+        const bool thisOk = maxRel < tol;
+        std::printf("  GPU quadtree vs CPU Barnes-Hut, theta=%.1f, max rel err (N=%d): %.3e  (tol %.1e)  %s\n", theta,
+                    n, maxRel, tol, thisOk ? "ok" : "WRONG");
+        std::printf("  GPU cells=%d levels=%d  stage ms: sort=%.2f build=%.2f mass=%.2f forces=%.2f readback=%.2f\n",
+                    stats.cellCount, stats.levelsUsed, stats.sortMs, stats.treeBuildMs, stats.massUpsweepMs,
+                    stats.forcesMs, stats.readbackMs);
+        ok = ok && thisOk;
+    }
+    return ok;
 }
 
 } // namespace
@@ -68,6 +130,12 @@ int main(int argc, char** argv) {
         // force law has no closed-form vis-viva orbit to check against).
         const bool ok = ngrav::CoreDtSelfTest();
         std::printf("\ndt-selftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (a.gpuSelftest) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        const bool ok = GpuSelftest();
+        std::printf("\ngpu-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 
@@ -126,7 +194,7 @@ int main(int argc, char** argv) {
                      "  03_nbody_gravity_2d                       (interactive comparison tool)\n"
                      "  03_nbody_gravity_2d --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  03_nbody_gravity_2d --deck <f.toml> --render-check <out.png>\n"
-                     "  03_nbody_gravity_2d --selftest\n");
+                     "  03_nbody_gravity_2d --selftest | --dt-selftest | --gpu-selftest\n");
         return 2;
     }
 

@@ -311,6 +311,12 @@ appropriate here since it wouldn't currently be a win to wire in anyway).
 Rewrite ~5 kernels for 2D (4-child quadrant, 2-axis Morton, `treeChild[4*N]`,
 2D bbox, 2D `1/r` group MAC); reuse `BitonicSortStep` verbatim.
 Gate: same thresholds, D=2; >= 5x faster than CPU 2D BH at N=1e5.
+**As measured** (full writeup in `03_nbody_gravity_2d/N_Body_Gravity_2D_Plan.md`):
+correctness gates both met; the speed gate is not met on this dev box, for
+the identical root cause as Phase 11 (a divergent, barrier-heavy GPU walk
+losing to a CPU implementation this project already spent three phases
+optimizing, on an integrated rather than discrete GPU) -- re-confirmed
+independently in 2D rather than assumed to transfer from 3D.
 
 **Phase 13 — realistic IC generators.**
 `ngrav/ic/{King,Hernquist,DiskBulgeHalo}`; `tools/make_ic.py` (raw-f32
@@ -721,7 +727,17 @@ renders (libx264 + PNG-fallback path exercised).
       revisit if this ever runs on discrete-GPU hardware. Full regression
       sweep (`--selftest`/`--fmm-selftest`/`--spherical-selftest`/
       `--dt-selftest`, both projects) still PASS, unaffected.
-- [ ] Phase 12 -- GPU quadtree 2D
+- [x] Phase 12 -- GPU quadtree 2D. Full writeup lives in
+      `03_nbody_gravity_2d/N_Body_Gravity_2D_Plan.md` (this is the 2D
+      project's own phase, tracked there in detail); summary: correctness
+      gates both met (theta=0: 1.32e-5 vs <=1e-4; theta=0.5: 1.18e-2/7.1e-2
+      vs <=0.2), speed gate not met (0.19x at N=1e5, same root cause as
+      Phase 11 -- the divergent shared-stack walk on an integrated GPU
+      losing to an already-optimized CPU competitor), re-confirmed
+      independently in 2D rather than assumed. One real 2D-specific
+      porting gotcha (kNcrit must equal the quadtree's branching factor,
+      4, not the octree's coincidental 8) caught by inspection before ever
+      running. Full regression sweep still PASS.
 - [ ] Phase 13 -- realistic IC generators
 - [ ] Phase 14 -- Studies suites
 - [ ] Phase 15 -- block timesteps

@@ -23,10 +23,20 @@ records what is genuinely 2D-specific.
   Phase 6c makes it mutual (momentum-conserving) rather than adding a separate
   Cartesian-Taylor 2D solver. It doubles as both the production O(N) and the
   accuracy-reference solver for 2D.
-- **GPU** (Phase 12): a 2D quadtree variant of 06's octree -- ~5 kernels
-  rewritten (4-child quadrant test, 2-axis Morton with 15 bits/axis,
-  `treeChild[4*cell]`, 2D bounding box, group MAC with the 2D 1/r accel). The
-  bitonic sort and the grouped-walk host loop port unchanged.
+- **GPU** (Phase 12, done -- see Progress): a 2D quadtree variant of 06's
+  octree -- 4-child quadrant test, 2-axis Morton with 15 bits/axis,
+  `treeChild[4*cell]`, 2D bounding box, group MAC with the 2D 1/r accel. The
+  bitonic sort and the grouped-walk host loop port unchanged. One real
+  structural gotcha the 3D port's code didn't have to deal with: 06's 3D
+  `ResolveSlots` reuses `treeChild`'s own per-cell array (8 slots) to *also*
+  double as a small leaf-particle list when a cell resolves directly,
+  which only works because its `kNcrit` (leaf cap) happens to equal its
+  branching factor (8 octants) -- in 2D the quadtree only has 4 slots per
+  cell, so `kNcrit` had to become 4 (not the CPU tree's `ncrit=8`, an
+  independent GPU-only implementation detail) or the same trick would
+  silently overrun into the *next* cell's slots. Caught during porting
+  (by inspection, comparing against the 3D source line-for-line) before it
+  ever ran, not via a failing test.
 - **Studies**: `Studies/nbody_gravity_2d/` -- `2d_vs_3d_gravity` (how `ln r`
   reshapes collapse: no `1/r^2` focusing, solid-body rotation in a uniform
   disk) and `disk_bar_instability` (m=2 bar growth rate vs rotational-support
@@ -72,4 +82,38 @@ records what is genuinely 2D-specific.
       selftest` here still exercises 02's shared 3D eccentric-orbit check
       (see Phase 5's note -- the integrator code is dimension-generic, but
       2D has no analogous closed-form orbit to validate against directly).
+- [x] Phase 12 -- GPU quadtree, ported from `ngrav::gpu::GpuBarnesHut`'s own
+      3D port of 06_tidal_disruption (not from 06 directly a second time --
+      the 3D port had already stripped SPH/TDE specifics and validated the
+      buffer/dispatch pattern, so this is a D-adaptation of already-ported
+      code, not a second from-scratch trace). New `ngrav::gpu::
+      ComputeAccelGpuQuadtree` (`include/ngrav/gpu/GpuQuadtree.hpp` +
+      `src/gpu/GpuQuadtree.cpp`), same standalone-entry-point style as the
+      3D GPU solvers. `--gpu-selftest` (new here, matching 02's): GPU
+      quadtree vs CPU 2D Barnes-Hut at theta=0 and theta=0.5.
+      **Correctness gates, both met, first try after fixing the kNcrit
+      gotcha** (see the note above): theta=0 max rel err **1.32e-5**
+      (N=2000; gate <=1e-4); theta=0.5 max rel err **1.18e-2** (N=2000) /
+      **7.1e-2** (N=100000), both under the <=0.2 gate -- consistent with
+      02's own 3D numbers (same order of magnitude, same theta-dependence
+      shape).
+      **Speed gate NOT met, same root cause as 02's Phase 11, honestly
+      re-confirmed rather than assumed to transfer**: at N=100000,
+      theta=0.5, GPU quadtree took **192ms** vs the CPU 2D grouped walk's
+      **36.5ms** -- **0.19x**, i.e. ~5.3x *slower*, against a >=5x-faster
+      gate. Per-stage profiling (same `glFinish()`-gated-behind-`stats`
+      technique as 02) attributes essentially all of it to the forces
+      kernel itself (167ms of 192ms) -- the divergent, barrier-heavy
+      shared-stack walk, not a readback artifact, exactly like the 3D
+      case. If anything the 2D comparison is *less* favorable to the GPU
+      than 3D's was: the CPU 2D grouped walk is itself faster in absolute
+      terms (36.5ms vs 3D's 159ms at the same N -- fewer near-field pairs
+      per node in 2D generally), raising the bar the GPU path would need
+      to clear. Reported honestly; the underlying cause (an integrated,
+      not discrete, GPU competing against a workload this project has
+      spent three dedicated CPU phases optimizing) is a property of this
+      dev machine's hardware, not of the 2D port specifically -- see 02's
+      own Phase 11 Progress entry for the full explanation. Full
+      regression sweep (`--selftest`, `--dt-selftest`, both projects, plus
+      `nbody_core_selftest`) still PASS, unaffected.
 - [ ] Phases 7-16 -- in parity with 02 (see that plan's Progress).
