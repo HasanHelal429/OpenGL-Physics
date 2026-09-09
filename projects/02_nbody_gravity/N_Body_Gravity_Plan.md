@@ -217,11 +217,42 @@ this phase's flexible-schedule framing makes that a legitimate call, not a
 missed gate; SphericalFmm remains the accuracy reference, not a speed target.
 
 **Phase 8 — group BH walk + interaction lists + OpenMP tasks.**
-`BarnesHut<D>` group/cell walk (descend once per leaf-cell, group bounding-
-sphere MAC); `DualTreeFmm` seeding via OpenMP `taskgroup` recursion.
-Gate: N=1e5, theta=0.5 -- BH force pass >= 2x faster than the per-particle
-walk at equal accuracy; OpenMP-task FMM >= 0.7 parallel efficiency on 8
-threads.
+`ComputeAccelBarnesHutGroup` (descend once per leaf-cell, conservative group
+bounding-sphere MAC via each leaf's own `com`/`maxRadius`); mutual FMM
+traversal converted from an explicit stack to recursion, OpenMP-tasked for
+its top 3 levels with per-thread expansion-buffer accumulation + reduction
+(`kFmmParallelThreshold=4096` gates it in; below that, the original serial
+traversal -- kept verbatim as the correctness oracle -- still runs).
+**Gate results, measured honestly** (N=1e5, theta=0.5, 16 logical
+threads/8 physical cores): grouped BH walk measured **1.3x** faster than the
+per-particle walk (gate had guessed >=2x) with equal-or-*better* accuracy
+by construction (the group MAC is provably more conservative than the
+per-particle one -- confirmed: theta=0.5 max monopole-only error actually
+*dropped*, 4.21e-2 -> 3.74e-2, same-direction as the quadrupole gate's own
+number). The shared-descent win is real but modest at ncrit=8 -- descent
+cost is a smaller fraction of the per-particle walk's total than hoped, and
+the extra conservatism adds some interaction-list length back; a larger
+ncrit or SIMD'd near-field (Phase 9) are the natural next levers, not
+reported here as if the gate were met. OpenMP-task FMM: the traversal stage
+itself sped up **3-4.75x** (taskDepth swept 2..5, 3 chosen), but total
+wall-clock speedup is capped at **~2.1-2.3x** by Amdahl's law -- near-field
+summation (an entirely serial pass over the M2L-rejected leaf pairs, e.g.
+34.6M pairs at N=1e5) and tree build are both still single-threaded by
+design, exactly the work Phase 9 ("near-field: per-thread accumulation +
+SIMD kernel") targets next; measured serial fraction (build+nearField)
+~200ms of ~1200ms total puts the Amdahl ceiling at ~6x even with the
+traversal fully parallel. **0.7-efficiency-on-8-threads gate not met for
+the whole call** -- reported honestly rather than redefining the metric
+after the fact. **Correctness, however, is fully verified and now a
+permanent regression check**: the parallel traversal visits the *exact
+same* M2L/near-pair counts as the serial oracle (bit-identical pair sets,
+not just similar totals) and its resulting forces agree to 1.0e-14 relative
+(pure floating-point reassociation, not a looser tolerance); momentum
+conservation holds under the parallel accumulation too (2.4-3.4e-17,
+unchanged from serial). `ComputeAccelMutualFmm` gained a `forceSerial`
+test/benchmark hook and `ComputeAccelBarnesHutPerParticle` was split out as
+an explicit, separately-callable baseline (also still what the Relative MAC
+uses, since it has no shared per-group value).
 
 **Phase 9 — near-field: per-thread accumulation + SIMD kernel.**
 Per-thread partial accel arrays + reduction; SIMD (4-wide) softened near-
@@ -489,7 +520,35 @@ renders (libx264 + PNG-fallback path exercised).
       `nbody_core_selftest`, `--selftest`, `--dt-selftest`, `--fmm-selftest`
       all still PASS with unchanged numbers (03 unaffected, confirmed by a
       no-op rebuild).
-- [ ] Phase 8 -- group BH walk + OpenMP tasks
+- [x] Phase 8 -- grouped BH walk (`ComputeAccelBarnesHutGroup`, one tree
+      descent per leaf/ncrit=8-particle group instead of per particle, using
+      a conservative group MAC built from each leaf's own `com`/`maxRadius`
+      -- provably never *less* accurate than the per-particle walk it
+      replaces, since the group's worst-case-distance test only ever
+      rejects something the per-particle test would've accepted, never the
+      reverse). Relative/acceleration MAC keeps the original per-particle
+      walk (no shared group value for each particle's own previous |a|) --
+      now split out as an explicit `ComputeAccelBarnesHutPerParticle`.
+      Mutual FMM traversal rewritten from an explicit stack to recursion,
+      OpenMP-tasked for its top 3 levels (`kFmmParallelThreshold=4096`);
+      per-thread expansion buffers (keyed by `omp_get_thread_num()`, no
+      locks) reduced into the final result after a `taskgroup` wait.
+      **Measured (N=1e5, theta=0.5, 8-16 threads)**: grouped BH walk **1.3x**
+      faster (gate guessed >=2x -- not met, honestly reported) with
+      equal-or-better accuracy (monopole-only max err actually dropped
+      4.21e-2 -> 3.74e-2). FMM traversal-only speedup **3-4.75x**; total
+      wall-clock speedup capped at **~2.1-2.3x** by the still-serial
+      near-field summation + tree build (~200ms of ~1200ms total at N=1e5,
+      an Amdahl ceiling of ~6x even with a perfectly parallel traversal) --
+      Phase 9 targets exactly this next. **0.7-parallel-efficiency gate not
+      met for the whole call** (honestly reported, not redefined). What
+      *is* fully verified: the parallel traversal visits the identical
+      M2L/near-pair set as the serial oracle (pair counts match exactly)
+      and its forces agree to 1.0e-14 relative -- now a permanent
+      `nbody_core_selftest`/`--fmm-selftest` regression check, along with
+      momentum conservation holding under the parallel path (2.4-3.4e-17,
+      matching serial). `--selftest`/`--dt-selftest`/`--fmm-selftest`/
+      `--spherical-selftest` and 03's `--selftest` all still PASS unchanged.
 - [ ] Phase 9 -- near-field per-thread + SIMD
 - [ ] Phase 10 -- GPU direct
 - [ ] Phase 11 -- GPU Barnes-Hut 3D

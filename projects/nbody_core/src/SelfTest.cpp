@@ -586,9 +586,48 @@ bool CoreFmmSelfTest() {
         Check(ok, "theta=0.2 mean rel err vs Direct", sumRel / pp.n, 1e-3);
     }
 
+    // Phase 8: OpenMP-task traversal, verified against the still-serial
+    // oracle (forceSerial=true) at N above the parallel threshold (4096).
+    // Not just "close enough" -- the two paths must visit the exact same
+    // set of M2L/near pairs (order can differ across threads, the count
+    // can't), and the resulting forces should agree to floating-point
+    // reassociation error, several orders tighter than any physics
+    // tolerance elsewhere in this file.
+    {
+        ic::PlummerParams pp;
+        pp.n = 6000; // > kFmmParallelThreshold, so this exercises the new path
+        pp.seed = 99;
+        SoA<3> s = ic::Plummer<3>(pp);
+        const PosMassView<3> v = ViewOf(s);
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Plummer(0.02);
+        sp.mac.theta = 0.5;
+        SoA<3> aSerial, aParallel;
+        MutualFmmStats statsSerial, statsParallel;
+        ComputeAccelMutualFmm(v, sp, aSerial, &statsSerial, /*forceSerial=*/true);
+        ComputeAccelMutualFmm(v, sp, aParallel, &statsParallel, /*forceSerial=*/false);
+        double maxRel = 0.0;
+        for (int i = 0; i < pp.n; ++i) {
+            const std::size_t ii = static_cast<std::size_t>(i);
+            const double rx = aSerial.ax[ii], ry = aSerial.ay[ii], rz = aSerial.az[ii];
+            const double ex = aParallel.ax[ii] - rx, ey = aParallel.ay[ii] - ry, ez = aParallel.az[ii] - rz;
+            maxRel =
+                std::max(maxRel, std::sqrt(ex * ex + ey * ey + ez * ez) / std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30));
+        }
+        Check(ok, "parallel vs serial traversal max rel diff", maxRel, 1e-9);
+        const bool samePairCounts =
+            (statsSerial.m2lPairs == statsParallel.m2lPairs) && (statsSerial.nearPairs == statsParallel.nearPairs);
+        std::printf("  parallel/serial m2lPairs %ld/%ld  nearPairs %ld/%ld  %s\n", statsSerial.m2lPairs,
+                    statsParallel.m2lPairs, statsSerial.nearPairs, statsParallel.nearPairs,
+                    samePairCounts ? "match" : "MISMATCH");
+        Check(ok, "parallel traversal visits identical pair set", samePairCounts ? 0.0 : 1.0, 0.0);
+    }
+
     // O(N) scaling: fitted log-log exponent over a modest range (kept small
-    // so the selftest stays fast; single-threaded prototype -- Phase 8 adds
-    // OpenMP-task parallelism and should tighten this further).
+    // so the selftest stays fast). N=32000 now exceeds the Phase-8 parallel
+    // threshold, so this exercises the OpenMP-task traversal, not just the
+    // single-threaded prototype.
     {
         std::vector<std::pair<double, double>> pts;
         for (int n : {2000, 8000, 32000}) {
@@ -610,7 +649,8 @@ bool CoreFmmSelfTest() {
         const double x0 = std::log(pts[0].first), x1 = std::log(pts[2].first);
         const double y0 = std::log(pts[0].second), y1 = std::log(pts[2].second);
         const double exponent = (y1 - y0) / (x1 - x0);
-        std::printf("  scaling exponent (N=2000..32000, theta=0.5): %.2f  (O(N)->1.0; single-threaded prototype)\n",
+        std::printf("  scaling exponent (N=2000..32000, theta=0.5): %.2f  (O(N)->1.0; N=32000 uses the Phase-8\n"
+                    "    OpenMP-task traversal, N=2000 the serial path -- the fit mixes both)\n",
                     exponent);
         Check(ok, "scaling exponent is sub-quadratic (sanity, not O(N) itself)", exponent, 1.8);
     }

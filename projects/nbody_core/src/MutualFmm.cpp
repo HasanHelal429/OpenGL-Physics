@@ -1,7 +1,9 @@
 #include "ngrav/MutualFmm.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <omp.h>
 #include <utility>
 #include <vector>
 
@@ -140,9 +142,115 @@ std::vector<int> ChildrenOrSelf(const AdaptiveTree<3>& tree, int x) {
     return out;
 }
 
+// Below: the Phase-8 recursive/task-parallel traversal. Same branches as the
+// serial stack loop in ComputeAccelMutualFmm (kept there, unchanged, as the
+// correctness oracle for N below the parallel threshold) -- just phrased as
+// direct recursion instead of an explicit stack, and forked into an
+// OpenMP-task version for the top couple of levels.
+
+void TraverseMutualRec(const AdaptiveTree<3>& tree, int t, int s, int depth, int taskDepth, double theta2,
+                       double minSep2, double G, std::vector<std::vector<LocalExpansion>>& partialLocal,
+                       std::vector<std::vector<std::pair<int, int>>>& partialNear, std::vector<long>& partialM2l);
+
+// Spawns a task for (t,s) if it's shallow enough to be worth the fan-out,
+// else just calls straight through. A task, once started, keeps running on
+// the same thread for its entire (untasked, from here on down once past
+// taskDepth) execution -- so grabbing omp_get_thread_num() fresh at the top
+// of TraverseMutualRec always names the right buffer, with no need to
+// thread a tid parameter down through the recursion.
+void DispatchMutual(const AdaptiveTree<3>& tree, int t, int s, int depth, int taskDepth, double theta2, double minSep2,
+                    double G, std::vector<std::vector<LocalExpansion>>& partialLocal,
+                    std::vector<std::vector<std::pair<int, int>>>& partialNear, std::vector<long>& partialM2l) {
+    if (depth < taskDepth) {
+#pragma omp task firstprivate(t, s, depth) shared(tree, partialLocal, partialNear, partialM2l)
+        TraverseMutualRec(tree, t, s, depth, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    } else {
+        TraverseMutualRec(tree, t, s, depth, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    }
+}
+
+void TraverseMutualRec(const AdaptiveTree<3>& tree, int t, int s, int depth, int taskDepth, double theta2,
+                       double minSep2, double G, std::vector<std::vector<LocalExpansion>>& partialLocal,
+                       std::vector<std::vector<std::pair<int, int>>>& partialNear, std::vector<long>& partialM2l) {
+    const int tid = omp_get_thread_num();
+    std::vector<LocalExpansion>& local = partialLocal[static_cast<std::size_t>(tid)];
+    std::vector<std::pair<int, int>>& nearPairs = partialNear[static_cast<std::size_t>(tid)];
+    long& m2lCount = partialM2l[static_cast<std::size_t>(tid)];
+
+    const std::size_t td = static_cast<std::size_t>(t), sd = static_cast<std::size_t>(s);
+    if (tree.mass[td] <= 0.0 || tree.mass[sd] <= 0.0) return;
+
+    if (t == s) {
+        if (tree.IsLeaf(t)) return;
+        const std::vector<int> children = ChildrenOrSelf(tree, t);
+        for (std::size_t i = 0; i < children.size(); ++i) {
+            DispatchMutual(tree, children[i], children[i], depth + 1, taskDepth, theta2, minSep2, G, partialLocal,
+                           partialNear, partialM2l);
+            for (std::size_t j = i + 1; j < children.size(); ++j)
+                DispatchMutual(tree, children[i], children[j], depth + 1, taskDepth, theta2, minSep2, G, partialLocal,
+                               partialNear, partialM2l);
+        }
+        return;
+    }
+
+    const bool wellSep = WellSeparated(tree, td, sd, theta2, minSep2);
+    if (wellSep) {
+        // Identical math to the serial path (see its own comment above) --
+        // just writing into this thread's own local/m2lCount instead of the
+        // single shared one.
+        const glm::dvec3 d = tree.com[sd] - tree.com[td];
+        const SymMat3 Qs = NodeQuad(tree, sd), Qt = NodeQuad(tree, td);
+        const double Mt = tree.mass[td], Ms = tree.mass[sd];
+        local[td].a0 += FieldAt(Ms, Qs, d, G) + (Ms / Mt) * QuadOnlyTerm(Qt, d, G);
+        local[td].H += MonopoleHessian(Ms, d, G);
+        local[sd].a0 += FieldAt(Mt, Qt, -d, G) + (Mt / Ms) * QuadOnlyTerm(Qs, -d, G);
+        local[sd].H += MonopoleHessian(Mt, -d, G);
+        ++m2lCount;
+        return;
+    }
+
+    if (tree.IsLeaf(t) && tree.IsLeaf(s)) {
+        const int loT = tree.firstParticle[td], hiT = loT + tree.particleCount[td];
+        const int loS = tree.firstParticle[sd], hiS = loS + tree.particleCount[sd];
+        for (int a = loT; a < hiT; ++a) {
+            const int pt = tree.order[static_cast<std::size_t>(a)];
+            for (int b = loS; b < hiS; ++b) {
+                const int ps = tree.order[static_cast<std::size_t>(b)];
+                if (pt < ps)
+                    nearPairs.emplace_back(pt, ps);
+                else
+                    nearPairs.emplace_back(ps, pt);
+            }
+        }
+        return;
+    }
+
+    if (tree.IsLeaf(t)) {
+        for (int c : ChildrenOrSelf(tree, s))
+            DispatchMutual(tree, t, c, depth + 1, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    } else if (tree.IsLeaf(s)) {
+        for (int c : ChildrenOrSelf(tree, t))
+            DispatchMutual(tree, c, s, depth + 1, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    } else if (tree.halfSize[td] >= tree.halfSize[sd]) {
+        for (int c : ChildrenOrSelf(tree, t))
+            DispatchMutual(tree, c, s, depth + 1, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    } else {
+        for (int c : ChildrenOrSelf(tree, s))
+            DispatchMutual(tree, t, c, depth + 1, taskDepth, theta2, minSep2, G, partialLocal, partialNear, partialM2l);
+    }
+}
+
+// Particle count above which the OpenMP-task traversal replaces the serial
+// one. Below it, tasking's own overhead (spawn cost, per-task heap-backed
+// buffers) isn't worth it -- and every existing momentum/accuracy selftest
+// runs at N well under this, so they keep exercising the original,
+// long-validated serial path completely unchanged.
+constexpr int kFmmParallelThreshold = 4096;
+
 } // namespace
 
-void ComputeAccelMutualFmm(const PosMassView<3>& pts, const StepParams& sp, SoA<3>& out, MutualFmmStats* stats) {
+void ComputeAccelMutualFmm(const PosMassView<3>& pts, const StepParams& sp, SoA<3>& out, MutualFmmStats* stats,
+                          bool forceSerial) {
     const int n = static_cast<int>(pts.Count());
     out.ResizeAccel(static_cast<std::size_t>(n));
     if (n == 0) return;
@@ -162,110 +270,156 @@ void ComputeAccelMutualFmm(const PosMassView<3>& pts, const StepParams& sp, SoA<
     std::vector<std::pair<int, int>> nearPairs;
     long m2lCount = 0;
 
-    // Single-visit unordered dual-tree traversal: a self-pair (t,t) only
-    // emits (child_i,child_i) [recurse] and (child_i,child_j) i<j [distinct
-    // cross-pairs, visited exactly once] -- half the work of the old
-    // "emit all ordered child pairs" traversal, and each distinct pair below
-    // gets ONE mutual M2L/near-field decision instead of two one-directional
-    // ones. t and s are always in disjoint subtrees once split off a
-    // self-pair's cross-children (an invariant preserved by always splitting
-    // the larger side, since s -- disjoint from all of t's ancestor -- stays
-    // disjoint from each of t's own children too).
-    std::vector<std::pair<int, int>> stack;
-    stack.emplace_back(0, 0);
-    while (!stack.empty()) {
-        const auto [t, s] = stack.back();
-        stack.pop_back();
-        const std::size_t td = static_cast<std::size_t>(t), sd = static_cast<std::size_t>(s);
-        if (tree.mass[td] <= 0.0 || tree.mass[sd] <= 0.0) continue;
+    if (!forceSerial && n > kFmmParallelThreshold) {
+        // Phase 8: OpenMP-task traversal, per-thread expansion buffers
+        // reduced into `local`/`nearPairs`/`m2lCount` after every task
+        // completes (see TraverseMutualRec/DispatchMutual above for why a
+        // mutual M2L, which writes both sides of a pair, needs this instead
+        // of the old "partition by disjoint target subtree" scheme).
+        const int nThreads = std::max(1, omp_get_max_threads());
+        std::vector<std::vector<LocalExpansion>> partialLocal(
+            static_cast<std::size_t>(nThreads), std::vector<LocalExpansion>(static_cast<std::size_t>(numNodes)));
+        std::vector<std::vector<std::pair<int, int>>> partialNear(static_cast<std::size_t>(nThreads));
+        std::vector<long> partialM2l(static_cast<std::size_t>(nThreads), 0);
+        // 2 gave a valid but under-fanned-out task tree (only the root
+        // self-pair's own ~36 children); 3 measured consistently best in a
+        // depth-2..5 sweep (deeper adds scheduling overhead without more
+        // usable parallelism at this N) -- see Plan.md's Phase 8 entry for
+        // the numbers.
+        constexpr int kTaskDepth = 3;
 
-        if (t == s) {
-            if (tree.IsLeaf(t)) continue;
-            const std::vector<int> children = ChildrenOrSelf(tree, t);
-            for (std::size_t i = 0; i < children.size(); ++i) {
-                stack.emplace_back(children[i], children[i]); // self-pair, recurse
-                for (std::size_t j = i + 1; j < children.size(); ++j)
-                    stack.emplace_back(children[i], children[j]); // distinct cross-pair, once
-            }
-            continue;
-        }
-
-        // NOTE: unlike the old one-directional AdaptiveFmm (tuned for a
-        // 1-particle-per-leaf tree, where a >1-particle "degenerate" leaf
-        // only ever occurred for pathologically near-duplicate positions
-        // hitting the depth cap, and was safe to always aggregate), this
-        // tree's leaves normally hold up to ncrit=8 particles as routine
-        // behavior -- two adjacent 8-particle leaf boxes are NOT
-        // automatically far enough apart to treat as point masses. So the
-        // MAC applies uniformly regardless of how many particles a leaf
-        // holds; a leaf that fails it and can't be split further (it's
-        // already a leaf) falls through to the generalized near-field
-        // branch below, which loops over each leaf's *actual* particle
-        // range rather than assuming exactly one particle per side.
-        const bool wellSep = WellSeparated(tree, td, sd, theta2, minSep2);
-
-        if (wellSep) {
-            // d = source - target, matching AccumPair's convention (attractive
-            // acceleration points along +d): for T's own expansion the source
-            // is S, so d_TS = comS - comT.
-            const glm::dvec3 d = tree.com[sd] - tree.com[td];
-            const SymMat3 Qs = NodeQuad(tree, sd), Qt = NodeQuad(tree, td);
-            const double Mt = tree.mass[td], Ms = tree.mass[sd];
-            // Momentum conservation to quadrupole order needs TWO terms per
-            // side, not one: (i) the standard "cluster's mass responds to
-            // the other's monopole+quadrupole field" (FieldAt), and (ii) a
-            // reaction term -- T's OWN quadrupole moment couples to the
-            // *gradient* of S's field across T's extent, exerting an extra
-            // force on T that scales with (M_S/M_T). Dropping (ii) (as a
-            // naive port of AddQuadrupole's one-directional formula would)
-            // leaves a residual net force of exactly
-            //   M_T*QuadOnlyTerm(Q_S,d) - M_S*QuadOnlyTerm(Q_T,d)
-            // which is what a standalone momentum check first caught here
-            // (residual ~1e-4, growing with theta/M2L usage, vs exact
-            // machine-epsilon cancellation at theta=0 where only near-field
-            // -- already exactly symmetric -- was exercised). Term (ii)
-            // exactly cancels it: re-derived independently from
-            // U(r) = -G[M_T M_S/r + M_T(Q_S:nn)/2r^3 + M_S(Q_T:nn)/2r^3]
-            // (depends only on r = c_T-c_S, so F_T=-dU/dc_T is manifestly
-            // antisymmetric with F_S=-dU/dc_S once *all* of U's
-            // r-dependence -- including S's mass sitting in T's own
-            // quadrupole field -- is accounted for, not just the "standard"
-            // half).
-            local[td].a0 += FieldAt(Ms, Qs, d, G) + (Ms / Mt) * QuadOnlyTerm(Qt, d, G);
-            local[td].H += MonopoleHessian(Ms, d, G);
-            local[sd].a0 += FieldAt(Mt, Qt, -d, G) + (Mt / Ms) * QuadOnlyTerm(Qs, -d, G);
-            local[sd].H += MonopoleHessian(Mt, -d, G);
-            ++m2lCount;
-            continue;
-        }
-
-        if (tree.IsLeaf(t) && tree.IsLeaf(s)) {
-            // Neither side can split further and they're not well-separated
-            // -- exact near-field over every cross-pair between the two
-            // leaves' member particles (each leaf may hold up to ncrit).
-            const int loT = tree.firstParticle[td], hiT = loT + tree.particleCount[td];
-            const int loS = tree.firstParticle[sd], hiS = loS + tree.particleCount[sd];
-            for (int a = loT; a < hiT; ++a) {
-                const int pt = tree.order[static_cast<std::size_t>(a)];
-                for (int b = loS; b < hiS; ++b) {
-                    const int ps = tree.order[static_cast<std::size_t>(b)];
-                    if (pt < ps)
-                        nearPairs.emplace_back(pt, ps);
-                    else
-                        nearPairs.emplace_back(ps, pt);
+#pragma omp parallel
+        {
+#pragma omp single
+            {
+#pragma omp taskgroup
+                {
+                    DispatchMutual(tree, 0, 0, 0, kTaskDepth, theta2, minSep2, G, partialLocal, partialNear,
+                                   partialM2l);
                 }
             }
-            continue;
         }
 
-        if (tree.IsLeaf(t)) {
-            for (int c : ChildrenOrSelf(tree, s)) stack.emplace_back(t, c);
-        } else if (tree.IsLeaf(s)) {
-            for (int c : ChildrenOrSelf(tree, t)) stack.emplace_back(c, s);
-        } else if (tree.halfSize[td] >= tree.halfSize[sd]) {
-            for (int c : ChildrenOrSelf(tree, t)) stack.emplace_back(c, s);
-        } else {
-            for (int c : ChildrenOrSelf(tree, s)) stack.emplace_back(t, c);
+        for (int k = 0; k < nThreads; ++k) {
+            const std::vector<LocalExpansion>& pl = partialLocal[static_cast<std::size_t>(k)];
+            for (int idx = 0; idx < numNodes; ++idx) {
+                local[static_cast<std::size_t>(idx)].a0 += pl[static_cast<std::size_t>(idx)].a0;
+                local[static_cast<std::size_t>(idx)].H += pl[static_cast<std::size_t>(idx)].H;
+            }
+            const std::vector<std::pair<int, int>>& pn = partialNear[static_cast<std::size_t>(k)];
+            nearPairs.insert(nearPairs.end(), pn.begin(), pn.end());
+            m2lCount += partialM2l[static_cast<std::size_t>(k)];
+        }
+    } else {
+        // Single-visit unordered dual-tree traversal: a self-pair (t,t) only
+        // emits (child_i,child_i) [recurse] and (child_i,child_j) i<j [distinct
+        // cross-pairs, visited exactly once] -- half the work of the old
+        // "emit all ordered child pairs" traversal, and each distinct pair below
+        // gets ONE mutual M2L/near-field decision instead of two one-directional
+        // ones. t and s are always in disjoint subtrees once split off a
+        // self-pair's cross-children (an invariant preserved by always splitting
+        // the larger side, since s -- disjoint from all of t's ancestor -- stays
+        // disjoint from each of t's own children too).
+        //
+        // Unchanged since Phase 6 -- the correctness oracle the parallel path
+        // above is validated against (see CoreFmmSelfTest's parallel-vs-serial
+        // agreement check).
+        std::vector<std::pair<int, int>> stack;
+        stack.emplace_back(0, 0);
+        while (!stack.empty()) {
+            const auto [t, s] = stack.back();
+            stack.pop_back();
+            const std::size_t td = static_cast<std::size_t>(t), sd = static_cast<std::size_t>(s);
+            if (tree.mass[td] <= 0.0 || tree.mass[sd] <= 0.0) continue;
+
+            if (t == s) {
+                if (tree.IsLeaf(t)) continue;
+                const std::vector<int> children = ChildrenOrSelf(tree, t);
+                for (std::size_t i = 0; i < children.size(); ++i) {
+                    stack.emplace_back(children[i], children[i]); // self-pair, recurse
+                    for (std::size_t j = i + 1; j < children.size(); ++j)
+                        stack.emplace_back(children[i], children[j]); // distinct cross-pair, once
+                }
+                continue;
+            }
+
+            // NOTE: unlike the old one-directional AdaptiveFmm (tuned for a
+            // 1-particle-per-leaf tree, where a >1-particle "degenerate" leaf
+            // only ever occurred for pathologically near-duplicate positions
+            // hitting the depth cap, and was safe to always aggregate), this
+            // tree's leaves normally hold up to ncrit=8 particles as routine
+            // behavior -- two adjacent 8-particle leaf boxes are NOT
+            // automatically far enough apart to treat as point masses. So the
+            // MAC applies uniformly regardless of how many particles a leaf
+            // holds; a leaf that fails it and can't be split further (it's
+            // already a leaf) falls through to the generalized near-field
+            // branch below, which loops over each leaf's *actual* particle
+            // range rather than assuming exactly one particle per side.
+            const bool wellSep = WellSeparated(tree, td, sd, theta2, minSep2);
+
+            if (wellSep) {
+                // d = source - target, matching AccumPair's convention (attractive
+                // acceleration points along +d): for T's own expansion the source
+                // is S, so d_TS = comS - comT.
+                const glm::dvec3 d = tree.com[sd] - tree.com[td];
+                const SymMat3 Qs = NodeQuad(tree, sd), Qt = NodeQuad(tree, td);
+                const double Mt = tree.mass[td], Ms = tree.mass[sd];
+                // Momentum conservation to quadrupole order needs TWO terms per
+                // side, not one: (i) the standard "cluster's mass responds to
+                // the other's monopole+quadrupole field" (FieldAt), and (ii) a
+                // reaction term -- T's OWN quadrupole moment couples to the
+                // *gradient* of S's field across T's extent, exerting an extra
+                // force on T that scales with (M_S/M_T). Dropping (ii) (as a
+                // naive port of AddQuadrupole's one-directional formula would)
+                // leaves a residual net force of exactly
+                //   M_T*QuadOnlyTerm(Q_S,d) - M_S*QuadOnlyTerm(Q_T,d)
+                // which is what a standalone momentum check first caught here
+                // (residual ~1e-4, growing with theta/M2L usage, vs exact
+                // machine-epsilon cancellation at theta=0 where only near-field
+                // -- already exactly symmetric -- was exercised). Term (ii)
+                // exactly cancels it: re-derived independently from
+                // U(r) = -G[M_T M_S/r + M_T(Q_S:nn)/2r^3 + M_S(Q_T:nn)/2r^3]
+                // (depends only on r = c_T-c_S, so F_T=-dU/dc_T is manifestly
+                // antisymmetric with F_S=-dU/dc_S once *all* of U's
+                // r-dependence -- including S's mass sitting in T's own
+                // quadrupole field -- is accounted for, not just the "standard"
+                // half).
+                local[td].a0 += FieldAt(Ms, Qs, d, G) + (Ms / Mt) * QuadOnlyTerm(Qt, d, G);
+                local[td].H += MonopoleHessian(Ms, d, G);
+                local[sd].a0 += FieldAt(Mt, Qt, -d, G) + (Mt / Ms) * QuadOnlyTerm(Qs, -d, G);
+                local[sd].H += MonopoleHessian(Mt, -d, G);
+                ++m2lCount;
+                continue;
+            }
+
+            if (tree.IsLeaf(t) && tree.IsLeaf(s)) {
+                // Neither side can split further and they're not well-separated
+                // -- exact near-field over every cross-pair between the two
+                // leaves' member particles (each leaf may hold up to ncrit).
+                const int loT = tree.firstParticle[td], hiT = loT + tree.particleCount[td];
+                const int loS = tree.firstParticle[sd], hiS = loS + tree.particleCount[sd];
+                for (int a = loT; a < hiT; ++a) {
+                    const int pt = tree.order[static_cast<std::size_t>(a)];
+                    for (int b = loS; b < hiS; ++b) {
+                        const int ps = tree.order[static_cast<std::size_t>(b)];
+                        if (pt < ps)
+                            nearPairs.emplace_back(pt, ps);
+                        else
+                            nearPairs.emplace_back(ps, pt);
+                    }
+                }
+                continue;
+            }
+
+            if (tree.IsLeaf(t)) {
+                for (int c : ChildrenOrSelf(tree, s)) stack.emplace_back(t, c);
+            } else if (tree.IsLeaf(s)) {
+                for (int c : ChildrenOrSelf(tree, t)) stack.emplace_back(c, s);
+            } else if (tree.halfSize[td] >= tree.halfSize[sd]) {
+                for (int c : ChildrenOrSelf(tree, t)) stack.emplace_back(c, s);
+            } else {
+                for (int c : ChildrenOrSelf(tree, s)) stack.emplace_back(t, c);
+            }
         }
     }
     const auto t2 = std::chrono::steady_clock::now();

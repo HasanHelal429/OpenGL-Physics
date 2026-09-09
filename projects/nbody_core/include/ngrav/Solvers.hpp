@@ -50,4 +50,13 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, cons
 template <int D>
 void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, SoA<D>& out);
 
+// The pre-Phase-8 per-particle walk (one tree descent per particle), kept
+// as an explicit, separately-callable entry point: it's what `Relative` MAC
+// still uses internally (needs each particle's own previous |a|, which has
+// no shared group value), and it's the correctness/speed baseline the
+// Phase-8 selftest measures the new grouped walk against.
+template <int D>
+void ComputeAccelBarnesHutPerParticle(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                                      std::span<const double> aOld, SoA<D>& out);
+
 } // namespace ngrav

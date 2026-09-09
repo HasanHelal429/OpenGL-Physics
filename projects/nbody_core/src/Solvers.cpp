@@ -198,11 +198,139 @@ void WalkBH(const AdaptiveTree<D>& tree, const PosMassView<D>& pts, int node, in
     }
 }
 
+// Phase 8: grouped/cell walk for the (default, no-per-particle-state)
+// Geometric MAC -- one tree descent per *leaf* (ncrit particles share it)
+// instead of one descent per particle, using a conservative group MAC so
+// accuracy can only be equal-or-better than the per-particle walk it
+// replaces (never worse): a leaf's `com`/`maxRadius` bound every member's
+// possible offset from the leaf's own center, so testing the *worst-case*
+// distance (dist(groupCenter,nodeCom) - groupRadius, by the triangle
+// inequality a lower bound on every member's true distance to that node)
+// against `theta` accepts a node only when EVERY member would also accept
+// it individually -- the group test can reject something the exact
+// per-particle test would accept (forcing an extra split there), but can
+// never accept something the per-particle test would reject.
+//
+// The Relative/acceleration MAC (Springel-2005-style) needs each particle's
+// own previous-step |a|, which has no shared group value -- it keeps using
+// the per-particle `WalkBH` below rather than a second, more speculative
+// group-MAC formulation for it (a deliberate Phase-8 scope decision, same
+// spirit as Phase 7's descopes: the Geometric MAC is the common case and
+// the one this phase's gate targets).
+template <int D>
+void CollectGroupInteractions(const AdaptiveTree<D>& tree, int node, int group, const Vec<D>& groupCenter,
+                              double groupRadius, double theta2, std::vector<int>& farNodes,
+                              std::vector<int>& nearLeaves) {
+    const std::size_t nd = static_cast<std::size_t>(node);
+    if (node == group) return; // the group's own members are handled separately (exact, once)
+    if (tree.mass[nd] <= 0.0) return;
+
+    if (tree.IsLeaf(node)) {
+        nearLeaves.push_back(node); // matches WalkBH: leaves are always exact, never a MAC monopole
+        return;
+    }
+
+    const Vec<D> comN = tree.com[nd];
+    const double dx = comN.x - groupCenter.x;
+    const double dy = comN.y - groupCenter.y;
+    const double dz = (D == 3) ? (Zc(comN) - Zc(groupCenter)) : 0.0;
+    const double dist2 = dx * dx + dy * dy + dz * dz;
+    const double size = 2.0 * tree.halfSize[nd];
+    const double worst = std::sqrt(dist2) - groupRadius; // conservative lower bound on any member's true distance
+
+    if (worst > 0.0 && size * size < theta2 * worst * worst) {
+        farNodes.push_back(node);
+        return;
+    }
+    for (int c = 0; c < AdaptiveTree<D>::kNC; ++c) {
+        const int ch = tree.children[nd][static_cast<std::size_t>(c)];
+        if (ch != -1) CollectGroupInteractions<D>(tree, ch, group, groupCenter, groupRadius, theta2, farNodes, nearLeaves);
+    }
+}
+
+template <int D>
+void ComputeAccelBarnesHutGroup(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                                SoA<D>& out) {
+    const int n = static_cast<int>(pts.Count());
+    out.ResizeAccel(static_cast<std::size_t>(n));
+    const Softening soft = sp.soft;
+    const double G = sp.G;
+    const double theta2 = sp.mac.theta * sp.mac.theta;
+
+    std::vector<int> leaves;
+    leaves.reserve(static_cast<std::size_t>(tree.NumNodes()) / 4 + 1);
+    for (int idx = 0; idx < tree.NumNodes(); ++idx) {
+        if (tree.IsLeaf(idx) && tree.particleCount[static_cast<std::size_t>(idx)] > 0) leaves.push_back(idx);
+    }
+    const int numLeaves = static_cast<int>(leaves.size());
+
+#pragma omp parallel for schedule(dynamic, 32) if (n > 256)
+    for (int li = 0; li < numLeaves; ++li) {
+        const int g = leaves[static_cast<std::size_t>(li)];
+        const std::size_t gd = static_cast<std::size_t>(g);
+
+        // thread_local: capacity is reused call-to-call on the same OS
+        // thread instead of a fresh heap alloc per leaf (there are N/ncrit
+        // of these, ~1.25e4 at N=1e5) -- cleared, not reallocated, below.
+        static thread_local std::vector<int> farNodes, nearLeaves;
+        farNodes.clear();
+        nearLeaves.clear();
+        CollectGroupInteractions<D>(tree, tree.Root(), g, tree.com[gd], tree.maxRadius[gd], theta2, farNodes,
+                                    nearLeaves);
+
+        const int lo = tree.firstParticle[gd];
+        const int hi = lo + tree.particleCount[gd];
+        for (int k = lo; k < hi; ++k) {
+            const int i = tree.order[static_cast<std::size_t>(k)];
+            const double xi = pts.x[static_cast<std::size_t>(i)];
+            const double yi = pts.y[static_cast<std::size_t>(i)];
+            const double zi = (D == 3) ? pts.z[static_cast<std::size_t>(i)] : 0.0;
+            double axi = 0.0, ayi = 0.0, azi = 0.0;
+
+            for (int nd : farNodes) {
+                const std::size_t ndd = static_cast<std::size_t>(nd);
+                const Vec<D> comN = tree.com[ndd];
+                const double dx = comN.x - xi;
+                const double dy = comN.y - yi;
+                const double dz = (D == 3) ? (Zc(comN) - zi) : 0.0;
+                const double dist2 = dx * dx + dy * dy + dz * dz;
+                AccumPair<D>(dx, dy, dz, G * tree.mass[ndd], soft, axi, ayi, azi);
+                AddQuadrupole<D>(tree, ndd, dx, dy, dz, dist2, G, axi, ayi, azi);
+            }
+            for (int leaf : nearLeaves) {
+                const std::size_t ld = static_cast<std::size_t>(leaf);
+                const int lo2 = tree.firstParticle[ld];
+                const int hi2 = lo2 + tree.particleCount[ld];
+                for (int k2 = lo2; k2 < hi2; ++k2) {
+                    const int p = tree.order[static_cast<std::size_t>(k2)];
+                    const double dx = pts.x[static_cast<std::size_t>(p)] - xi;
+                    const double dy = pts.y[static_cast<std::size_t>(p)] - yi;
+                    const double dz = (D == 3) ? (pts.z[static_cast<std::size_t>(p)] - zi) : 0.0;
+                    AccumPair<D>(dx, dy, dz, G * pts.m[static_cast<std::size_t>(p)], soft, axi, ayi, azi);
+                }
+            }
+            // The group's own members (excluding self) -- exact, once per pair.
+            for (int k2 = lo; k2 < hi; ++k2) {
+                if (k2 == k) continue;
+                const int p = tree.order[static_cast<std::size_t>(k2)];
+                const double dx = pts.x[static_cast<std::size_t>(p)] - xi;
+                const double dy = pts.y[static_cast<std::size_t>(p)] - yi;
+                const double dz = (D == 3) ? (pts.z[static_cast<std::size_t>(p)] - zi) : 0.0;
+                AccumPair<D>(dx, dy, dz, G * pts.m[static_cast<std::size_t>(p)], soft, axi, ayi, azi);
+            }
+
+            out.ax[static_cast<std::size_t>(i)] = axi;
+            out.ay[static_cast<std::size_t>(i)] = ayi;
+            if constexpr (D == 3) out.az[static_cast<std::size_t>(i)] = azi;
+        }
+    }
+}
+
 } // namespace
 
 template <int D>
-void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
-                           std::span<const double> aOld, SoA<D>& out) {
+void ComputeAccelBarnesHutPerParticle(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                                      std::span<const double> aOld, SoA<D>& out) {
     const int n = static_cast<int>(pts.Count());
     out.ResizeAccel(static_cast<std::size_t>(n));
     const Softening soft = sp.soft;
@@ -226,6 +354,16 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, cons
 }
 
 template <int D>
+void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, const AdaptiveTree<D>& tree,
+                           std::span<const double> aOld, SoA<D>& out) {
+    if (sp.mac.kind == MacKind::Geometric) {
+        ComputeAccelBarnesHutGroup<D>(pts, sp, tree, out);
+    } else {
+        ComputeAccelBarnesHutPerParticle<D>(pts, sp, tree, aOld, out);
+    }
+}
+
+template <int D>
 void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, SoA<D>& out) {
     AdaptiveTree<D> tree(pts);
     if constexpr (D == 3) tree.ComputeQuadrupoles(pts);
@@ -234,6 +372,10 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, SoA<
 
 template void ComputeAccelDirect<2>(const PosMassView<2>&, const StepParams&, SoA<2>&);
 template void ComputeAccelDirect<3>(const PosMassView<3>&, const StepParams&, SoA<3>&);
+template void ComputeAccelBarnesHutPerParticle<2>(const PosMassView<2>&, const StepParams&, const AdaptiveTree<2>&,
+                                                  std::span<const double>, SoA<2>&);
+template void ComputeAccelBarnesHutPerParticle<3>(const PosMassView<3>&, const StepParams&, const AdaptiveTree<3>&,
+                                                  std::span<const double>, SoA<3>&);
 template void ComputeAccelBarnesHut<2>(const PosMassView<2>&, const StepParams&, const AdaptiveTree<2>&,
                                        std::span<const double>, SoA<2>&);
 template void ComputeAccelBarnesHut<3>(const PosMassView<3>&, const StepParams&, const AdaptiveTree<3>&,
