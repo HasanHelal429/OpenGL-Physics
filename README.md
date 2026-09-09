@@ -142,6 +142,39 @@ frames + `diagnostics.csv` as expected. The GPU-vs-CPU self-tests of `08`,
 `10` and `11` agree to ~1e-6, so the compute shaders really are running on
 the GPU through EGL.
 
+## Scaling benchmarks (N-body)
+
+`02_nbody_scaling` / `03_nbody_scaling_2d` time one force evaluation per solver
+across a range of N. They link the solver translation units plus glm and OpenMP
+and nothing else -- no `physgl`, no GL context -- so they run in a batch job:
+
+```sh
+cmake --build --preset linux-release --target 02_nbody_scaling 03_nbody_scaling_2d
+./build/linux-release/projects/02_nbody_gravity/02_nbody_scaling \
+    --ns 1000,4000,16000,64000 --solvers direct,bh,fmm,sfmm --csv scaling.csv
+```
+
+Each point gets an untimed warm-up, a repetition count sized to the measured
+cost, and min/median/mean/stddev rather than a single number; `--accuracy-max-n`
+adds a relative-L2 column against a Direct reference, so speed can be read
+against the approximation error paying for it. A solver whose single call
+exceeds `--budget-ms` is retired from larger N.
+
+For the full study on a dedicated node (a shared login node's load average is
+larger than the effects being measured):
+
+```sh
+sbatch scripts/perlmutter_nbody_scaling.sbatch                  # ~14 min, 1 CPU node
+module load python                                              # numpy + matplotlib
+python3 scripts/plot_nbody_scaling.py --dir $SCRATCH/nbody-scaling/<jobid>
+```
+
+The plot script fits a power-law exponent per solver over the asymptotic tail
+and writes `nbody_scaling.png`. Measured on 2x EPYC 7763: Direct
+N^2.001 +/- 0.001, Barnes-Hut N^1.20, both FMMs N^1.03-1.06 -- and because the
+direct sum parallelises ~7x better than the tree codes, the Direct/Barnes-Hut
+crossover moves from N ~ 2,000 on one thread to N ~ 24,000 on 128.
+
 ## Adding a new project
 
 1. `projects/NN_name/src/` — either subclass `fw::Application` directly (like

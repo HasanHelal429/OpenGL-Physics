@@ -32,3 +32,6 @@ Thumbs.db
 
 # Claude Code local state
 /.claude/
+
+# Slurm job logs (sbatch writes slurm-<name>-<jobid>.out into the submit dir)
+slurm-*.out
