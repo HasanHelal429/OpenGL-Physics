@@ -1,10 +1,16 @@
 #include "ngrav/Scenarios.hpp"
 
+#include "ngrav/ic/DiskBulgeHalo.hpp"
+#include "ngrav/ic/Hernquist.hpp"
+#include "ngrav/ic/King.hpp"
 #include "ngrav/ic/Plummer.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <random>
+#include <stdexcept>
+#include <vector>
 
 namespace ngrav {
 
@@ -208,6 +214,120 @@ Scenario<D> ColdUniform(const ScenarioParams& pp) {
     return r;
 }
 
+// --- Hernquist sphere (P13) -------------------------------------------
+template <int D>
+Scenario<D> HernquistScenario(const ScenarioParams& pp) {
+    if constexpr (D == 2) {
+        return PlummerEquilibrium<2>(pp); // no 2D Hernquist -- fall back, documented in Scenarios.hpp
+    } else {
+        Scenario<3> r;
+        ic::HernquistParams hp;
+        hp.n = std::max(pp.n, 1);
+        hp.seed = pp.seed;
+        r.state = ic::Hernquist<3>(hp);
+        r.G = 1.0;
+        const double meanSpacing = 1.0 / std::cbrt((double)hp.n);
+        r.soft = Softening::Plummer(std::max(0.01, 1.5 * meanSpacing));
+        r.suggestedDt = (2.0 * M_PI) / 800.0;
+        r.suggestedTheta = 0.5;
+        r.cameraScale = 8.0;
+        return r;
+    }
+}
+
+// --- King sphere (P13) ------------------------------------------------
+template <int D>
+Scenario<D> KingScenario(const ScenarioParams& pp) {
+    if constexpr (D == 2) {
+        return PlummerEquilibrium<2>(pp);
+    } else {
+        Scenario<3> r;
+        ic::KingParams kp;
+        kp.n = std::max(pp.n, 1);
+        kp.seed = pp.seed;
+        kp.w0 = pp.w0;
+        r.state = ic::King<3>(kp);
+        r.G = 1.0;
+        const double meanSpacing = 1.0 / std::cbrt((double)kp.n);
+        r.soft = Softening::Plummer(std::max(0.01, 1.2 * meanSpacing));
+        r.suggestedDt = (2.0 * M_PI) / 800.0;
+        r.suggestedTheta = 0.5;
+        r.cameraScale = 6.0;
+        return r;
+    }
+}
+
+// --- disk galaxy: exp disk + Hernquist bulge + NFW halo (P13) --------
+template <int D>
+Scenario<D> DiskGalaxyScenario(const ScenarioParams& pp) {
+    if constexpr (D == 2) {
+        return RotatingDisk<2>(pp); // no 3-component 2D galaxy -- fall back to the flat rotating disk
+    } else {
+        Scenario<3> r;
+        ic::DiskBulgeHaloParams dp;
+        // Split the requested N across components in a fixed 40/10/50 ratio.
+        const int n = std::max(pp.n, 100);
+        dp.nDisk = std::max(1, static_cast<int>(0.40 * n));
+        dp.nBulge = std::max(1, static_cast<int>(0.10 * n));
+        dp.nHalo = std::max(1, n - dp.nDisk - dp.nBulge);
+        dp.seed = pp.seed;
+        dp.diskRotationFraction = (pp.diskRotationFraction > 0.0) ? pp.diskRotationFraction : 1.0;
+        r.state = ic::DiskBulgeHalo<3>(dp);
+        r.G = 1.0;
+        r.soft = Softening::Plummer(0.15);
+        // Disk dynamical time at ~1 scale length.
+        const double vc = std::sqrt(1.0 * (dp.bulgeMass + dp.diskMass * 0.25) / dp.diskScaleLength);
+        r.suggestedDt = (2.0 * M_PI * dp.diskScaleLength / std::max(vc, 1e-3)) / 400.0;
+        r.suggestedTheta = 0.5;
+        r.cameraScale = 25.0;
+        return r;
+    }
+}
+
+// --- raw float32 particle dump (P13) ---------------------------------
+// 06_tidal_disruption's format: N records of 7 float32, x,y,z,mass,vx,vy,vz
+// (see that project's tools/make_star_ic.py / src/TdeSim.cpp). For D==2 the
+// z and vz columns are read and discarded. Written by this project's own
+// tools/make_ic.py.
+template <int D>
+Scenario<D> IcFileScenario(const ScenarioParams& pp) {
+    Scenario<D> r;
+    std::ifstream f(pp.icFile, std::ios::binary | std::ios::ate);
+    if (!f) throw std::runtime_error("ic_file: cannot open '" + pp.icFile + "'");
+    const std::streamsize bytes = f.tellg();
+    f.seekg(0);
+    constexpr int kFloatsPerParticle = 7; // always 7 on disk, even for 2D (z/vz discarded)
+    const int n = static_cast<int>(bytes / (kFloatsPerParticle * static_cast<std::streamsize>(sizeof(float))));
+    if (n <= 0) throw std::runtime_error("ic_file: '" + pp.icFile + "' has no particles");
+    std::vector<float> raw(static_cast<std::size_t>(n) * kFloatsPerParticle);
+    f.read(reinterpret_cast<char*>(raw.data()), bytes);
+
+    Fill<D>(r.state, n);
+    for (int i = 0; i < n; ++i) {
+        const float* p = &raw[static_cast<std::size_t>(i) * kFloatsPerParticle];
+        Vec<D> pos(0.0), vel(0.0);
+        pos.x = p[0];
+        pos.y = p[1];
+        vel.x = p[4];
+        vel.y = p[5];
+        if constexpr (D == 3) {
+            pos.z = p[2];
+            vel.z = p[6];
+        }
+        r.state.SetPos(static_cast<std::size_t>(i), pos);
+        r.state.SetVel(static_cast<std::size_t>(i), vel);
+        r.state.m[static_cast<std::size_t>(i)] = p[3];
+    }
+    r.G = 1.0;
+    // No embedded tuning in the file -- pick middle-of-the-road defaults the
+    // deck is expected to override (tools/make_ic.py prints suggestions).
+    r.soft = Softening::Plummer(0.05);
+    r.suggestedDt = 1e-3;
+    r.suggestedTheta = 0.5;
+    r.cameraScale = (D == 3) ? 6.0 : 3.0;
+    return r;
+}
+
 } // namespace
 
 const char* ScenarioName(ScenarioType t) {
@@ -218,13 +338,18 @@ const char* ScenarioName(ScenarioType t) {
         case ScenarioType::RotatingDisk: return "Rotating disk / collapse";
         case ScenarioType::PlummerSphere: return "Plummer sphere (equilibrium)";
         case ScenarioType::ColdCollapse: return "Cold collapse";
+        case ScenarioType::HernquistSphere: return "Hernquist sphere (equilibrium)";
+        case ScenarioType::KingSphere: return "King sphere (equilibrium)";
+        case ScenarioType::DiskGalaxy: return "Disk galaxy (disk + bulge + NFW halo)";
+        case ScenarioType::IcFile: return "IC file (raw float32 dump)";
     }
     return "?";
 }
 
 bool ScenarioNeedsN(ScenarioType t) {
     return t == ScenarioType::Cluster || t == ScenarioType::RotatingDisk || t == ScenarioType::PlummerSphere ||
-           t == ScenarioType::ColdCollapse;
+           t == ScenarioType::ColdCollapse || t == ScenarioType::HernquistSphere || t == ScenarioType::KingSphere ||
+           t == ScenarioType::DiskGalaxy;
 }
 
 ScenarioType ScenarioFromString(const std::string& s, ScenarioType fallback) {
@@ -234,6 +359,10 @@ ScenarioType ScenarioFromString(const std::string& s, ScenarioType fallback) {
     if (s == "rotating_disk") return ScenarioType::RotatingDisk;
     if (s == "plummer" || s == "plummer_sphere") return ScenarioType::PlummerSphere;
     if (s == "cold_collapse") return ScenarioType::ColdCollapse;
+    if (s == "hernquist" || s == "hernquist_sphere") return ScenarioType::HernquistSphere;
+    if (s == "king" || s == "king_sphere") return ScenarioType::KingSphere;
+    if (s == "disk_galaxy" || s == "galaxy") return ScenarioType::DiskGalaxy;
+    if (s == "ic_file") return ScenarioType::IcFile;
     return fallback;
 }
 
@@ -246,6 +375,10 @@ Scenario<D> BuildScenario(ScenarioType type, const ScenarioParams& params) {
         case ScenarioType::RotatingDisk: return RotatingDisk<D>(params);
         case ScenarioType::PlummerSphere: return PlummerEquilibrium<D>(params);
         case ScenarioType::ColdCollapse: return ColdUniform<D>(params);
+        case ScenarioType::HernquistSphere: return HernquistScenario<D>(params);
+        case ScenarioType::KingSphere: return KingScenario<D>(params);
+        case ScenarioType::DiskGalaxy: return DiskGalaxyScenario<D>(params);
+        case ScenarioType::IcFile: return IcFileScenario<D>(params);
     }
     return Kepler<D>(params);
 }

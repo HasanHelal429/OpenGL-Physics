@@ -1,0 +1,26 @@
+title = "Hernquist sphere (N=5000, equilibrium)"
+# A Hernquist (1990) sphere in units G = M = a = 1. rho ~ 1/(r (r+a)^3),
+# half-mass radius ~2.414 a. Velocities from the isotropic Jeans equation
+# (not Hernquist's exact DF -- see ngrav/ic/Hernquist.hpp) -- close enough
+# to hold the profile for many crossing times. Mutual FMM so momentum is
+# conserved through the (mild) initial relaxation.
+
+[sim]
+G = 1.0
+
+[softening]
+kind = "spline"
+eps = 0.05
+
+[time]
+frames = 200
+substeps_per_frame = 5
+
+[solver]
+kind = "fmm"
+theta = 0.3
+
+[scenario]
+type = "hernquist"
+n = 5000
+seed = 1

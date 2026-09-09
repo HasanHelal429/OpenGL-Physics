@@ -212,7 +212,9 @@ int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
 
     if (a.selftest) {
-        const bool ok = ngrav::CoreSelfTest3D();
+        const bool okCore = ngrav::CoreSelfTest3D();
+        const bool okIc = ngrav::CoreIcSelfTest(); // P13 -- realistic IC generators (3D)
+        const bool ok = okCore && okIc;
         std::printf("\nselftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }

@@ -22,6 +22,13 @@ const char* kFontPath = "C:\\Windows\\Fonts\\consola.ttf";
 // paying the full O(N^2) cost every tick at large N.
 constexpr int kDiagnosticsEveryNTicks = 6;
 
+// The interactive app keeps its four quick-look scenarios (still on the
+// project-local nbody::Scenarios). The full realistic-IC set added in
+// Phase 13 -- Plummer / Hernquist / King equilibria and the disk+bulge+NFW
+// galaxy -- lives in ngrav::Scenarios and is reached through decks
+// (decks/{hernquist,king,disk_galaxy}_*.toml) or a generated ic_file, the
+// same split 08_compressible_fluid uses between its demo scenes and its
+// deck-driven runs.
 constexpr ScenarioType kScenarios[] = {ScenarioType::TwoBodyKepler, ScenarioType::LagrangeTriangle,
                                         ScenarioType::Cluster, ScenarioType::RotatingDisk};
 

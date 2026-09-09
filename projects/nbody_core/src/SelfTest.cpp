@@ -1,8 +1,11 @@
 #include "ngrav/SelfTest.hpp"
 
+#include "ngrav/Integrator.hpp"
 #include "ngrav/MutualFmm.hpp"
 #include "ngrav/Solvers.hpp"
 #include "ngrav/System.hpp"
+#include "ngrav/ic/Hernquist.hpp"
+#include "ngrav/ic/King.hpp"
 #include "ngrav/ic/Plummer.hpp"
 
 #include <algorithm>
@@ -653,6 +656,163 @@ bool CoreFmmSelfTest() {
                     "    OpenMP-task traversal, N=2000 the serial path -- the fit mixes both)\n",
                     exponent);
         Check(ok, "scaling exponent is sub-quadratic (sanity, not O(N) itself)", exponent, 1.8);
+    }
+
+    return ok;
+}
+
+namespace {
+
+// median of a copy (small helper -- these vectors are a few thousand long)
+double Median(std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+
+// 2T/|W| for a system, computed exactly (O(N^2)) -- only used on the
+// modest-N IC-validation clouds here.
+double VirialRatio(const SoA<3>& s, double G, double eps2) {
+    const std::size_t n = s.Count();
+    double T = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+        T += 0.5 * s.m[i] * (s.vx[i] * s.vx[i] + s.vy[i] * s.vy[i] + s.vz[i] * s.vz[i]);
+    double W = 0.0;
+    for (std::size_t i = 0; i < n; ++i)
+        for (std::size_t j = i + 1; j < n; ++j) {
+            const double dx = s.x[j] - s.x[i], dy = s.y[j] - s.y[i], dz = s.z[j] - s.z[i];
+            W -= G * s.m[i] * s.m[j] / std::sqrt(dx * dx + dy * dy + dz * dz + eps2);
+        }
+    return (W != 0.0) ? (2.0 * T / std::abs(W)) : 0.0;
+}
+
+double HalfMassRadius(const SoA<3>& s) {
+    std::vector<double> r(s.Count());
+    for (std::size_t i = 0; i < s.Count(); ++i)
+        r[i] = std::sqrt(s.x[i] * s.x[i] + s.y[i] * s.y[i] + s.z[i] * s.z[i]);
+    std::sort(r.begin(), r.end());
+    return r[r.size() / 2]; // equal-mass particles -> half-mass == median radius
+}
+
+// median fractional error of a binned rho(r) vs an analytic rho, over
+// [0.1, 2] r_half. `analyticRho` takes r and returns the model density.
+template <class F>
+double DensityProfileMedianError(const SoA<3>& s, double rHalf, F analyticRho) {
+    const int nBins = 12;
+    const double rLo = 0.1 * rHalf, rHi = 2.0 * rHalf;
+    std::vector<double> lo(nBins), hi(nBins), massInBin(nBins, 0.0);
+    for (int b = 0; b < nBins; ++b) {
+        lo[static_cast<std::size_t>(b)] = rLo * std::pow(rHi / rLo, double(b) / nBins);
+        hi[static_cast<std::size_t>(b)] = rLo * std::pow(rHi / rLo, double(b + 1) / nBins);
+    }
+    for (std::size_t i = 0; i < s.Count(); ++i) {
+        const double rr = std::sqrt(s.x[i] * s.x[i] + s.y[i] * s.y[i] + s.z[i] * s.z[i]);
+        for (int b = 0; b < nBins; ++b)
+            if (rr >= lo[static_cast<std::size_t>(b)] && rr < hi[static_cast<std::size_t>(b)]) {
+                massInBin[static_cast<std::size_t>(b)] += s.m[i];
+                break;
+            }
+    }
+    std::vector<double> relErr;
+    for (int b = 0; b < nBins; ++b) {
+        const double rb0 = lo[static_cast<std::size_t>(b)], rb1 = hi[static_cast<std::size_t>(b)];
+        const double shellVol = (4.0 / 3.0) * M_PI * (rb1 * rb1 * rb1 - rb0 * rb0 * rb0);
+        const double rhoMeasured = massInBin[static_cast<std::size_t>(b)] / shellVol;
+        const double rhoAnalytic = analyticRho(0.5 * (rb0 + rb1));
+        if (rhoAnalytic > 0.0) relErr.push_back(std::abs(rhoMeasured - rhoAnalytic) / rhoAnalytic);
+    }
+    return Median(relErr);
+}
+
+} // namespace
+
+bool CoreIcSelfTest() {
+    bool ok = true;
+    std::printf("[realistic IC generators]\n");
+
+    const double G = 1.0;
+    const int n = 20000;
+
+    // --- Plummer: density profile + virial ratio + dynamical hold ---------
+    {
+        ic::PlummerParams pp;
+        pp.n = n;
+        pp.seed = 3;
+        SoA<3> s = ic::Plummer<3>(pp);
+        const double rHalf = HalfMassRadius(s);
+        // Plummer rho(r) = (3/4pi) (1+r^2)^-5/2 in G=M=a=1 units.
+        const double err = DensityProfileMedianError(s, rHalf, [](double r) {
+            return (3.0 / (4.0 * M_PI)) * std::pow(1.0 + r * r, -2.5);
+        });
+        std::printf("  Plummer  r_half=%.3f (analytic ~1.305)  rho(r) median rel err=%.3f\n", rHalf, err);
+        Check(ok, "Plummer density profile median rel err", err, 0.10);
+
+        const double vr = VirialRatio(s, G, 0.0025);
+        std::printf("  Plummer  2T/|W| = %.3f\n", vr);
+        Check(ok, "Plummer virial ratio |2T/|W| - 1|", vr - 1.0, 0.12);
+
+        // Dynamical hold: integrate a smaller cloud a few crossing times with
+        // Direct, check the half-mass radius doesn't run away. t_cross ~ 2pi.
+        ic::PlummerParams pp2;
+        pp2.n = 2000;
+        pp2.seed = 5;
+        SoA<3> sd = ic::Plummer<3>(pp2);
+        System<3> sys;
+        sys.SetParticles(SoA<3>(sd));
+        StepParams sp;
+        sp.G = G;
+        sp.soft = Softening::Plummer(0.05);
+        sp.dt = (2.0 * M_PI) / 400.0;
+        sp.solver = Solver::BarnesHut;
+        sp.mac.theta = 0.5;
+        const double rHalf0 = HalfMassRadius(sys.State());
+        sys.Prime(sp);
+        const int steps = static_cast<int>(6.0 * (2.0 * M_PI) / sp.dt); // ~6 crossing times
+        for (int i = 0; i < steps; ++i) sys.Step(sp);
+        const double rHalf1 = HalfMassRadius(sys.State());
+        const double drift = std::abs(rHalf1 - rHalf0) / rHalf0;
+        std::printf("  Plummer  half-mass radius: %.4f -> %.4f over ~6 t_cross (drift %.1f%%)\n", rHalf0, rHalf1,
+                    100.0 * drift);
+        Check(ok, "Plummer half-mass radius drift over ~6 t_cross", drift, 0.15);
+    }
+
+    // --- Hernquist: density profile + virial ratio -----------------------
+    {
+        ic::HernquistParams hp;
+        hp.n = n;
+        hp.seed = 7;
+        SoA<3> s = ic::Hernquist<3>(hp);
+        const double rHalf = HalfMassRadius(s);
+        // Hernquist rho(r) = 1/(2pi) 1/(r (1+r)^3) in G=M=a=1.
+        const double err = DensityProfileMedianError(
+            s, rHalf, [](double r) { return (1.0 / (2.0 * M_PI)) / (r * std::pow(1.0 + r, 3.0)); });
+        std::printf("  Hernquist  r_half=%.3f (analytic ~2.414)  rho(r) median rel err=%.3f\n", rHalf, err);
+        Check(ok, "Hernquist density profile median rel err", err, 0.10);
+
+        const double vr = VirialRatio(s, G, 0.0025);
+        std::printf("  Hernquist  2T/|W| = %.3f\n", vr);
+        Check(ok, "Hernquist virial ratio |2T/|W| - 1|", vr - 1.0, 0.20);
+    }
+
+    // --- King: W0 round-trips, compact support, virial ratio -------------
+    {
+        ic::KingParams kp;
+        kp.n = n;
+        kp.seed = 11;
+        kp.w0 = 6.0;
+        SoA<3> s = ic::King<3>(kp);
+        const double rHalf = HalfMassRadius(s);
+        double rMax = 0.0;
+        for (std::size_t i = 0; i < s.Count(); ++i)
+            rMax = std::max(rMax, std::sqrt(s.x[i] * s.x[i] + s.y[i] * s.y[i] + s.z[i] * s.z[i]));
+        // King has compact support: the outermost particle sits at the tidal
+        // radius, which for W0=6, r0=1 is ~ 8-9 core radii.
+        std::printf("  King(W0=6)  r_half=%.3f  r_max=%.3f (tidal radius, finite -- compact support)\n", rHalf, rMax);
+        Check(ok, "King has finite tidal radius (r_max < 20 r0)", rMax - 10.0, 10.0);
+
+        const double vr = VirialRatio(s, G, 0.0025);
+        std::printf("  King(W0=6)  2T/|W| = %.3f\n", vr);
+        Check(ok, "King virial ratio |2T/|W| - 1|", vr - 1.0, 0.25);
     }
 
     return ok;

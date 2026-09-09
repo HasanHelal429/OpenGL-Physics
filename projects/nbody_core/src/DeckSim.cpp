@@ -43,6 +43,8 @@ void DeckSim<D>::Configure(const fw::Deck& deck) {
     m_scenarioParams.seed = static_cast<std::uint32_t>(deck.GetInt("scenario.seed", 1));
     m_scenarioParams.diskRotationFraction = deck.GetDouble("scenario.disk_rotation_fraction", 0.7);
     m_scenarioParams.eccentricity = deck.GetDouble("scenario.eccentricity", 0.36);
+    m_scenarioParams.w0 = deck.GetDouble("scenario.king_w0", 6.0);
+    m_scenarioParams.icFile = deck.GetString("scenario.ic_file", "");
 
     // A scenario carries tuned G / softening / dt; the deck overrides each
     // only when it explicitly sets the key.

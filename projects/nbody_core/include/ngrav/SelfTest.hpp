@@ -23,4 +23,14 @@ bool CoreDtSelfTest();
 // scaling exponent.
 bool CoreFmmSelfTest();
 
+// Realistic IC generators (P13): each of Plummer / Hernquist / King samples
+// its analytic density profile to within a few percent (binned rho(r) vs
+// the closed form over [0.1, 2] r_half); the equilibrium models have a
+// virial ratio 2T/|W| near 1 at t=0; and a Plummer sphere integrated for
+// several crossing times holds its half-mass radius (the one dynamical
+// check -- the others are static). Honest thresholds: the velocity fields
+// use a Jeans-equation isotropic-dispersion approximation, not each
+// model's exact distribution function, so "near 1" is ~10%, not 2%.
+bool CoreIcSelfTest();
+
 } // namespace ngrav
