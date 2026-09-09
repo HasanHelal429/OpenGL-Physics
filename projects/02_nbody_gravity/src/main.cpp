@@ -311,6 +311,13 @@ int RunBench(const Args& a) {
 int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
 
+    // The interactive comparison tool opens a GLFW window and blocks. That
+    // must happen ONLY for a bare invocation (no args at all) or an explicit
+    // --interactive -- never as an implicit fallback, so that a batch/bench
+    // run whose args somehow don't match a mode fails loudly instead of
+    // silently popping a window on someone's desktop mid-sweep.
+    const bool wantInteractive = (argc == 1) || a.interactive;
+
     if (a.selftest) {
         const bool okCore = ngrav::CoreSelfTest3D();
         const bool okIc = ngrav::CoreIcSelfTest(); // P13 -- realistic IC generators (3D)
@@ -346,27 +353,23 @@ int main(int argc, char** argv) {
     }
     if (!a.bench.empty()) return RunBench(a);
 
-    // No deck / no explicit mode -> the rich interactive comparison tool.
-    if (a.deck.empty() && !a.interactive) {
+    // Interactive comparison tool: bare invocation or explicit --interactive
+    // only (see wantInteractive above). The deck, if any, currently just
+    // picks the starting scenario via NBodyApp's own hook.
+    if (wantInteractive) {
         nbody::NBodyApp app;
         app.Run();
         return 0;
     }
-    if (a.interactive && a.deck.empty()) {
-        nbody::NBodyApp app;
-        app.Run();
-        return 0;
+
+    if (a.deck.empty()) {
+        std::fprintf(stderr, "02_nbody_gravity: no mode selected. Pass --deck <f.toml> (with --out or\n"
+                             "  --render-check), a --*-selftest flag, --bench, or --interactive\n"
+                             "  (a bare invocation with no args launches the interactive tool).\n");
+        return 2;
     }
 
     fw::Deck deck = fw::Deck::FromFile(a.deck);
-
-    if (a.interactive) {
-        // Deck-driven interactive still uses the rich NBodyApp; the deck sets
-        // the starting scenario/solver via NBodyApp's own future hook (P2+).
-        nbody::NBodyApp app;
-        app.Run();
-        return 0;
-    }
 
     if (!a.renderCheck.empty()) {
         fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);

@@ -119,6 +119,11 @@ bool GpuSelftest() {
 int main(int argc, char** argv) {
     const Args a = ParseArgs(argc, argv);
 
+    // The interactive window opens ONLY for a bare invocation or explicit
+    // --interactive -- never as an implicit fallback, so a batch/render run
+    // whose args don't match a mode fails loudly instead of popping a window.
+    const bool wantInteractive = (argc == 1) || a.interactive;
+
     if (a.selftest) {
         const bool ok = ngrav::CoreSelfTest2D();
         std::printf("\nselftest: %s\n", ok ? "PASS" : "FAIL");
@@ -139,10 +144,17 @@ int main(int argc, char** argv) {
         return ok ? 0 : 1;
     }
 
-    if (a.deck.empty() || a.interactive) {
+    if (wantInteractive) {
         nbody2d::NBodyApp app;
         app.Run();
         return 0;
+    }
+
+    if (a.deck.empty()) {
+        std::fprintf(stderr, "03_nbody_gravity_2d: no mode selected. Pass --deck <f.toml> (with --out or\n"
+                             "  --render-check), --selftest / --dt-selftest / --gpu-selftest, or --interactive\n"
+                             "  (a bare invocation with no args launches the interactive tool).\n");
+        return 2;
     }
 
     fw::Deck deck = fw::Deck::FromFile(a.deck);
