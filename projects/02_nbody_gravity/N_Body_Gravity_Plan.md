@@ -270,10 +270,26 @@ added maintenance surface for this pass; revisit if profiling later shows
 the scalar path itself (not the parallelism around it) is the bottleneck.
 
 **Phase 10 — GPU direct sum + --gpu-selftest.**
-`ngrav/gpu/Kernels.hpp` (tiled shared-memory direct); `GpuDirect`; `--gpu`
-backend; `--gpu-selftest` (opens `fw::GLContext::CreateHidden`).
+`ngrav/gpu/GpuDirect.{hpp,cpp}` (one thread per target, plain loop over
+every source -- no shared-memory tiling, see below); `--gpu-selftest`
+(opens `fw::GLContext::CreateHidden`).
 Gate: GPU fp32 vs CPU fp64 -- max rel err <= 1e-4; >= 10x faster than OpenMP
-direct at N=3e4.
+direct at N=3e4. **Both met** (see Progress: 5.5e-6-1.0e-5 measured error;
+16.45x measured speedup at N=3e4).
+**Scope notes**: no shared-memory *tiling* (the classic "cache a block of
+source positions in `shared`, inner loop over the tile" GPU-gems pattern) --
+the plain one-thread-per-target loop already clears the gate by 1.6x, and
+tiling is real, correctness-sensitive complexity (barrier-uniformity
+discipline, tile-boundary bookkeeping) that isn't needed to pass it; revisit
+if a later phase's profiling shows this kernel itself, not the pipeline
+around it, is the bottleneck. Not wired into `ngrav::Solver`/`System<D>`'s
+generic dispatch or a deck `--gpu` backend -- that integration (NBodyApp
+radio button, `ScalingSweepWorker` column, deck schema) needs every consumer
+to handle a GL-context-dependent backend, real scope better taken on once
+Phase 11's GPU Barnes-Hut makes a GPU path actually useful *interactively*
+rather than only for `--gpu-selftest`'s own small-N verification. Plummer
+softening only (see `GpuDirect.hpp`'s own header comment for why spline
+isn't ported here).
 
 **Phase 11 — GPU Barnes-Hut 3D.**
 Port 06's `ComputeBoundingBox / InitTreeRoot / ClaimSlots / ResolveSlots /
@@ -599,7 +615,44 @@ renders (libx264 + PNG-fallback path exercised).
       -- forces agree to 3.1-3.7e-14 relative (floating-point reassociation
       from the changed summation order, not a correctness regression) and
       momentum conservation is unaffected (4.2-4.3e-17).
-- [ ] Phase 10 -- GPU direct
+- [x] Phase 10 -- GPU direct O(N^2) sum. New `ngrav::gpu::ComputeAccelGpuDirect`
+      (`include/ngrav/gpu/GpuDirect.hpp` + `src/gpu/GpuDirect.cpp`): one
+      compute shader, `layout(local_size_x=256)`, one thread per target
+      particle, plain loop over every source (Plummer softening,
+      `a = -G*m*rij/(r^2+eps^2)^1.5` -- same formula as `ComputeAccelDirect`,
+      term for term, so any mismatch can only come from the GPU pipeline or
+      the fp32-vs-fp64 gap). Uses `fw::ComputeShader::FromSource` +
+      `glCreateBuffers`/`glNamedBufferData`/`glGetNamedBufferSubData`
+      (06_tidal_disruption's own buffer idiom); shader is compiled lazily on
+      first call and cached (compiling needs an active GL context, which
+      this otherwise-plain CPU library has no guarantee of at static-init
+      time). `--gpu-selftest` (`main.cpp`): opens
+      `fw::GLContext::CreateHidden(4,6)`, compares against
+      `ComputeAccelDirect` on a 2000-body random cloud.
+      **Gate results, both met**: GPU fp32 vs CPU fp64 max rel err
+      **5.5e-6** (N=2000, in `--gpu-selftest`) / **1.0e-5** (N=30000,
+      standalone benchmark) -- gate was <=1e-4, met with margin to spare.
+      Speedup at N=3e4: **16.45x** over the (already Phase-1-optimized,
+      `-O3 -march=native`, OpenMP-parallel) CPU direct sum -- gate was
+      >=10x. Readback (a synchronous `glGetNamedBufferSubData` stall)
+      dominates GPU wall time at this N (31.7ms of 32.6ms total; dispatch
+      itself is ~0.01ms, i.e. the GPU is nowhere near saturated at N=3e4) --
+      the margin over the 10x gate would only grow at larger N, where the
+      O(N^2) compute cost -- not the fixed readback overhead -- dominates.
+      **Deliberately not implemented**: shared-memory tiling (the classic
+      GPU-gems "cache a block of positions in `shared`, inner loop over the
+      tile" pattern) -- the plain per-thread loop already clears the gate
+      comfortably, and tiling adds real correctness-sensitive complexity
+      (barrier-uniformity, tile-boundary handling) not needed to meet it.
+      Also not wired into `ngrav::Solver`/`System<D>`'s dispatch, the
+      NBodyApp UI, `ScalingSweepWorker`, or a deck `--gpu` backend -- a
+      standalone, directly-callable entry point instead, since integrating
+      a GL-context-dependent solver into every generic-dispatch consumer is
+      real scope better taken on once Phase 11's GPU Barnes-Hut gives the
+      GPU path something an interactive user would actually reach for (a
+      GPU *direct* sum alone has no advantage over CPU BH/FMM at the N an
+      interactive session runs). Full regression sweep (`--selftest`/
+      `--fmm-selftest`/`--dt-selftest`/`--spherical-selftest`) still PASS.
 - [ ] Phase 11 -- GPU Barnes-Hut 3D
 - [ ] Phase 12 -- GPU quadtree 2D
 - [ ] Phase 13 -- realistic IC generators

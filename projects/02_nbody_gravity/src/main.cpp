@@ -5,6 +5,7 @@
 #include "ngrav/DeckSim.hpp"
 #include "ngrav/SelfTest.hpp"
 #include "ngrav/Solvers.hpp"
+#include "ngrav/gpu/GpuDirect.hpp"
 
 #include "framework/Deck.hpp"
 #include "framework/GLContext.hpp"
@@ -35,6 +36,7 @@ struct Args {
     bool dtSelftest = false;
     bool fmmSelftest = false;
     bool sphericalSelftest = false;
+    bool gpuSelftest = false;
     std::string renderCheck;
 };
 
@@ -52,6 +54,7 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--dt-selftest") a.dtSelftest = true;
         else if (s == "--fmm-selftest") a.fmmSelftest = true;
         else if (s == "--spherical-selftest") a.sphericalSelftest = true;
+        else if (s == "--gpu-selftest") a.gpuSelftest = true;
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -116,6 +119,55 @@ bool SphericalSelfTest() {
     return ok;
 }
 
+// Phase 10: GPU direct O(N^2) sum vs the CPU fp64 reference (ComputeAccelDirect
+// -- the exact same formula, term for term, so a mismatch can only come from
+// the GPU pipeline or the fp32-vs-fp64 gap, not a second derivation of the
+// physics). Requires an active GL context (created by the caller before this
+// runs, same as --render-check).
+bool GpuSelftest() {
+    std::mt19937 rng(123);
+    std::uniform_real_distribution<double> u(-1.0, 1.0);
+    const int n = 2000;
+    ngrav::SoA<3> in;
+    in.Resize(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const std::size_t ii = static_cast<std::size_t>(i);
+        in.x[ii] = u(rng);
+        in.y[ii] = u(rng);
+        in.z[ii] = u(rng);
+        in.m[ii] = 0.5 + 0.5 * (u(rng) + 1.0);
+    }
+    const ngrav::PosMassView<3> v = ngrav::ViewOf(in);
+
+    const double G = 1.0, eps = 0.02, eps2 = eps * eps;
+
+    ngrav::StepParams sp;
+    sp.G = G;
+    sp.soft = ngrav::Softening::Plummer(eps);
+    ngrav::SoA<3> aCpu;
+    ngrav::ComputeAccelDirect<3>(v, sp, aCpu);
+
+    ngrav::gpu::GpuDirectStats stats;
+    ngrav::SoA<3> aGpu;
+    ngrav::gpu::ComputeAccelGpuDirect(v, G, eps2, aGpu, &stats);
+
+    double maxRel = 0.0;
+    for (int i = 0; i < n; ++i) {
+        const std::size_t ii = static_cast<std::size_t>(i);
+        const double rx = aCpu.ax[ii], ry = aCpu.ay[ii], rz = aCpu.az[ii];
+        const double ex = aGpu.ax[ii] - rx, ey = aGpu.ay[ii] - ry, ez = aGpu.az[ii] - rz;
+        const double rel =
+            std::sqrt(ex * ex + ey * ey + ez * ez) / std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30);
+        maxRel = std::max(maxRel, rel);
+    }
+    const bool ok = maxRel < 1e-4;
+    std::printf("  GPU fp32 vs CPU fp64 direct, max rel err (N=%d): %.3e  (tol 1.0e-04)  %s\n", n, maxRel,
+                ok ? "ok" : "WRONG");
+    std::printf("  GPU stage ms: upload=%.2f dispatch=%.2f readback=%.2f\n", stats.uploadMs, stats.dispatchMs,
+                stats.readbackMs);
+    return ok;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -139,6 +191,12 @@ int main(int argc, char** argv) {
     if (a.sphericalSelftest) {
         const bool ok = SphericalSelfTest();
         std::printf("\nspherical-selftest: %s\n", ok ? "PASS" : "FAIL");
+        return ok ? 0 : 1;
+    }
+    if (a.gpuSelftest) {
+        fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+        const bool ok = GpuSelftest();
+        std::printf("\ngpu-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
 
@@ -211,7 +269,8 @@ int main(int argc, char** argv) {
                      "  02_nbody_gravity                        (interactive comparison tool)\n"
                      "  02_nbody_gravity --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  02_nbody_gravity --deck <f.toml> --render-check <out.png>\n"
-                     "  02_nbody_gravity --selftest | --dt-selftest | --fmm-selftest | --spherical-selftest\n");
+                     "  02_nbody_gravity --selftest | --dt-selftest | --fmm-selftest | --spherical-selftest |\n"
+                     "                   --gpu-selftest\n");
         return 2;
     }
 

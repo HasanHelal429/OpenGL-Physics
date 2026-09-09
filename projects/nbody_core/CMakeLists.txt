@@ -12,6 +12,7 @@ add_library(nbody_core STATIC
     src/Scenarios.cpp
     src/DeckSim.cpp
     src/SelfTest.cpp
+    src/gpu/GpuDirect.cpp
 )
 
 target_include_directories(nbody_core PUBLIC
