@@ -888,4 +888,27 @@ renders (libx264 + PNG-fallback path exercised).
       core collapses). Full regression sweep (`--selftest`/`--fmm-selftest`/
       `--dt-selftest`/`--spherical-selftest`/`--gpu-selftest`, both
       projects) still PASS.
-- [ ] Phase 16 -- docs + Progress + movie
+- [x] Phase 16 -- `docs/SIMULATION.md` for both projects (numbered sections
+      tagged `(Phase N)`, each with a **Validation** block carrying the
+      measured gate numbers), this Progress checklist finalized to all
+      `- [x]`, and a movie of the cold-collapse deck
+      (`tools/make_movie.py`). Also in this phase: the interactive GLFW
+      window is now guarded to open ONLY on a bare invocation or explicit
+      `--interactive` (never as an implicit fallback), after a mis-parsed
+      batch invocation popped stray windows during the Phase-14 sweep
+      work. Branch `feat-nbody-unification` pushed; draft PR opened (no
+      Claude attribution in the commits or PR body, per repo convention).
+
+## Solver comparison (measured)
+
+| solver | scaling exponent | momentum `\|P\|` (collapse) | notes |
+|---|---|---|---|
+| Direct | 2.02 | 0 (exact) | reference; O(N^2) |
+| Barnes-Hut | 1.43 | 3.7e-4 | fastest past N~2e3; no conservation guarantee |
+| mutual FMM | 0.96 | **9.6e-17** | O(N); the momentum-conserving production solver |
+| spherical FMM | 1.05 | 2.4e-4 | arbitrary-order accuracy reference; huge prefactor |
+
+GPU: direct sum **16x** faster than CPU at N=3e4 on this dev box's
+integrated GPU; the GPU tree walk (3D and 2D) is *slower* than the
+optimized CPU walk here (divergent barrier-heavy kernel on integrated
+silicon -- expected to invert on discrete hardware).
