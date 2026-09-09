@@ -107,6 +107,49 @@ void ComputeAccelDirect(const PosMassView<D>& pts, const StepParams& sp, SoA<D>&
 
 namespace {
 
+// Traceless-quadrupole correction to a well-separated node's monopole field,
+// evaluated at displacement d = node.com - target (our AccumPair convention:
+// attractive acceleration points along +d). Independently re-derived from
+// phi(x) = -G[M/r + Q_ij x_i x_j / (2r^5)] with x = target - source = -d
+// (standard multipole expansion, e.g. Binney & Tremaine eq. 2.132): with
+// Qd = Q.d and Qd2 = d.Qd,
+//   a_quad = -G*Qd/r^5 + 2.5*G*Qd2*d/r^7
+// 3D only (2D's higher-accuracy path is the complex-Laurent FMM, which
+// already carries arbitrary order -- see Scenarios/ComplexFmm).
+template <int D>
+inline void AddQuadrupole(const AdaptiveTree<D>& tree, std::size_t nd, double dx, double dy, double dz, double dist2,
+                         double G, double& axi, double& ayi, double& azi) {
+    if constexpr (D == 3) {
+        if (!tree.HasQuadrupoles()) return;
+        const double Qxx = tree.Qxx[nd], Qyy = tree.Qyy[nd], Qzz = -(Qxx + Qyy);
+        const double Qxy = tree.Qxy[nd], Qxz = tree.Qxz[nd], Qyz = tree.Qyz[nd];
+        const double Qdx = Qxx * dx + Qxy * dy + Qxz * dz;
+        const double Qdy = Qxy * dx + Qyy * dy + Qyz * dz;
+        const double Qdz = Qxz * dx + Qyz * dy + Qzz * dz;
+        const double Qd2 = dx * Qdx + dy * Qdy + dz * Qdz;
+        const double invR2 = 1.0 / dist2;
+        const double invR = std::sqrt(invR2);
+        const double invR5 = invR2 * invR2 * invR;
+        const double invR7 = invR5 * invR2;
+        const double c1 = -G * invR5;
+        const double c2 = 2.5 * G * Qd2 * invR7;
+        axi += c1 * Qdx + c2 * dx;
+        ayi += c1 * Qdy + c2 * dy;
+        azi += c1 * Qdz + c2 * dz;
+    } else {
+        (void)tree;
+        (void)nd;
+        (void)dx;
+        (void)dy;
+        (void)dz;
+        (void)dist2;
+        (void)G;
+        (void)axi;
+        (void)ayi;
+        (void)azi;
+    }
+}
+
 template <int D>
 void WalkBH(const AdaptiveTree<D>& tree, const PosMassView<D>& pts, int node, int i, double xi, double yi, double zi,
            double G, double theta2, const Softening& soft, MacKind macKind, double alpha, double aOldI, double& axi,
@@ -144,6 +187,7 @@ void WalkBH(const AdaptiveTree<D>& tree, const PosMassView<D>& pts, int node, in
 
     if (accept) {
         AccumPair<D>(dx, dy, dz, G * tree.mass[nd], soft, axi, ayi, azi);
+        AddQuadrupole<D>(tree, nd, dx, dy, dz, dist2, G, axi, ayi, azi);
         return;
     }
 
@@ -183,7 +227,8 @@ void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, cons
 
 template <int D>
 void ComputeAccelBarnesHut(const PosMassView<D>& pts, const StepParams& sp, SoA<D>& out) {
-    const AdaptiveTree<D> tree(pts);
+    AdaptiveTree<D> tree(pts);
+    if constexpr (D == 3) tree.ComputeQuadrupoles(pts);
     ComputeAccelBarnesHut<D>(pts, sp, tree, {}, out);
 }
 

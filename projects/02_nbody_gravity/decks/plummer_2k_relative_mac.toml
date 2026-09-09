@@ -1,0 +1,24 @@
+title = "Plummer sphere (N=2000, relative/acceleration MAC)"
+# Same IC as plummer_2k.toml, but the opening-angle test is replaced by the
+# GADGET-2-style relative/acceleration criterion (Springel 2005 eq. 18):
+# open a node unless G*M*size^2/dist^4 < alpha*|a_prev| -- targets a
+# fractional force-error budget directly rather than a fixed geometric ratio.
+# At matched mean force accuracy this visits ~1.3x fewer node interactions
+# than the geometric MAC (see nbody_core --selftest).
+
+[sim]
+G = 1.0
+
+[time]
+frames = 200
+substeps_per_frame = 5
+
+[solver]
+kind = "barnes_hut"
+mac = "relative"
+alpha = 0.004
+
+[scenario]
+type = "plummer"
+n = 2000
+seed = 1

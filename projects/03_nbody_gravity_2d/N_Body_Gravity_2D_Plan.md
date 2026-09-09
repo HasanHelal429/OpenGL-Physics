@@ -57,4 +57,11 @@ records what is genuinely 2D-specific.
       outer branch has no elementary closed form -- see 02's Progress entry
       for the bug this caught). `--selftest` PASS: force == Newtonian to
       2.2e-16 for r>=2h; spline-softened 2D orbit energy drift 2.4e-6.
-- [ ] Phases 5-16 -- in parity with 02 (see that plan's Progress).
+- [x] Phase 5 -- relative/acceleration MAC (shared `ngrav::Mac`) is available
+      here too (deck `[solver].mac = "relative"`), but the **quadrupole**
+      correction is 3D-only by design: 2D's higher-accuracy path is the
+      arbitrary-order complex-Laurent `ComplexFmm`, not a Cartesian
+      quadrupole term (`AddQuadrupole` in `Solvers.cpp` is a no-op for
+      D==2). No 2D-specific gate beyond the shared selftest's own Barnes-Hut
+      θ=0 exactness (unaffected, still 2e-14).
+- [ ] Phases 6-16 -- in parity with 02 (see that plan's Progress).

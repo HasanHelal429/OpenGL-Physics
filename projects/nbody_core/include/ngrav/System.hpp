@@ -45,7 +45,8 @@ public:
                 ComputeAccelDirect<D>(v, sp, out);
                 return;
             case Solver::BarnesHut: {
-                const AdaptiveTree<D> tree(v);
+                AdaptiveTree<D> tree(v);
+                if constexpr (D == 3) tree.ComputeQuadrupoles(v);
                 const std::span<const double> aOld =
                     (sp.mac.kind == MacKind::Relative && m_aOldMag.size() == in.Count())
                         ? std::span<const double>(m_aOldMag)

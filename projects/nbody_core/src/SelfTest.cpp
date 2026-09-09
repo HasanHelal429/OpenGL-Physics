@@ -202,6 +202,61 @@ bool CoreSelfTest3D() {
         Check(ok, "spline-softened orbit energy drift", (Emax - Emin) / std::abs(0.5 * (Emax + Emin)), 1e-4);
     }
 
+    // --- quadrupole Barnes-Hut walk (3D only) -----------------------------
+    {
+        std::printf("[quadrupole barnes-hut 3D]\n");
+        std::mt19937 rng(2024);
+        std::uniform_real_distribution<double> uni(0.0, 1.0), gau(-1.0, 1.0);
+        const int n = 4000;
+        SoA<3> in;
+        in.Resize(n);
+        for (int i = 0; i < n; ++i) {
+            const double r = std::cbrt(uni(rng));
+            const double cosT = 2.0 * uni(rng) - 1.0, sinT = std::sqrt(std::max(0.0, 1.0 - cosT * cosT));
+            const double phi = 2.0 * M_PI * uni(rng);
+            in.x[static_cast<std::size_t>(i)] = r * sinT * std::cos(phi);
+            in.y[static_cast<std::size_t>(i)] = r * sinT * std::sin(phi);
+            in.z[static_cast<std::size_t>(i)] = r * cosT;
+            in.m[static_cast<std::size_t>(i)] = 1.0 / n;
+        }
+        const PosMassView<3> v = ViewOf(in);
+        StepParams sp;
+        sp.G = 1.0;
+        sp.soft = Softening::Plummer(0.01);
+        sp.mac.theta = 0.5;
+
+        SoA<3> aDirect;
+        ComputeAccelDirect<3>(v, sp, aDirect);
+
+        AdaptiveTree<3> treeMono(v); // no ComputeQuadrupoles() -> monopole-only walk
+        SoA<3> aMono;
+        ComputeAccelBarnesHut<3>(v, sp, treeMono, {}, aMono);
+
+        AdaptiveTree<3> treeQuad(v);
+        treeQuad.ComputeQuadrupoles(v);
+        SoA<3> aQuad;
+        ComputeAccelBarnesHut<3>(v, sp, treeQuad, {}, aQuad);
+
+        auto maxRelErr = [&](const SoA<3>& test) {
+            double m = 0.0;
+            for (int i = 0; i < n; ++i) {
+                const std::size_t ii = static_cast<std::size_t>(i);
+                const double rx = aDirect.ax[ii], ry = aDirect.ay[ii], rz = aDirect.az[ii];
+                const double ex = test.ax[ii] - rx, ey = test.ay[ii] - ry, ez = test.az[ii] - rz;
+                m = std::max(m, std::sqrt(ex * ex + ey * ey + ez * ez) /
+                                    std::max(std::sqrt(rx * rx + ry * ry + rz * rz), 1e-30));
+            }
+            return m;
+        };
+        const double maxMono = maxRelErr(aMono);
+        const double maxQuad = maxRelErr(aQuad);
+        std::printf("  theta=0.5: monopole-only max err=%.3e   mono+quad max err=%.3e   improvement=%.2fx\n", maxMono,
+                    maxQuad, maxMono / std::max(maxQuad, 1e-30));
+        // max(0, 3 - ratio) <= 0 encodes "ratio >= 3" via Check's abs<=tol form.
+        Check(ok, "quadrupole gives >=3x lower max force err at theta=0.5", std::max(0.0, 3.0 - maxMono / maxQuad),
+              0.0);
+    }
+
     return ok;
 }
 

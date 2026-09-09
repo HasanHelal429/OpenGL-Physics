@@ -358,7 +358,29 @@ renders (libx264 + PNG-fallback path exercised).
       on the same IC (`decks/plummer_2k_spline.toml` vs `plummer_2k.toml`).
       Deck-only for now (no app-UI toggle -- not called for by this phase;
       P3's adaptive-dt slider was the one with an explicit app-UI bullet).
-- [ ] Phase 5 -- quadrupole BH + relative MAC
+- [x] Phase 5 -- quadrupole Barnes-Hut walk (3D) + relative/acceleration MAC.
+      `AdaptiveTree::ComputeQuadrupoles` (already built in Phase 1) is now
+      actually consumed: `AddQuadrupole` in the accepted-node branch of
+      `WalkBH`, an independently re-derived traceless-quadrupole correction
+      (cross-checked two ways: algebraically via the AdaptiveFmm.cpp sign
+      convention, and from scratch via phi(x) = -G[M/r + Q_ij x_i x_j/2r^5])
+      -- both derivations agree. `Mac::Relative` (GADGET-2/Springel 2005 eq.
+      18 acceleration criterion) now actually wired into `WalkBH`'s accept
+      test, alongside the existing geometric one; deck `[solver].mac =
+      "geometric" | "relative"`, `alpha`. `tools/plot_force_error.py`.
+      **Gate met**: theta=0.5 on 4000-body Plummer, max rel force err drops
+      **5.2x** (monopole 4.2e-2 -> mono+quad 8.1e-3; gate was >=3x) --
+      permanent regression check in `--selftest`. Relative MAC (alpha
+      bisected to match the geometric MAC's mean error) visits **1.33x**
+      fewer node interactions on a 4000-body Plummer sphere (gate >=1.3x).
+      theta=0 exactness (<=1e-12 vs Direct) unaffected -- quadrupole and
+      relative-MAC code paths are both gated behind the accept branch, never
+      reached when nothing is ever accepted. Decks:
+      `plummer_2k_relative_mac.toml`; `plummer_2k.toml`'s energy drift
+      tightened from 0.005% (Phase 2 baseline, monopole-only) to 0.001% now
+      that Barnes-Hut defaults to mono+quad.
+      2D unaffected (its higher-accuracy path is the arbitrary-order
+      complex-Laurent FMM, not a Cartesian quadrupole).
 - [ ] Phase 6 -- mutual dual-tree FMM + retire AdaptiveFmm
 - [ ] Phase 7 -- SphericalFmm speedup
 - [ ] Phase 8 -- group BH walk + OpenMP tasks
