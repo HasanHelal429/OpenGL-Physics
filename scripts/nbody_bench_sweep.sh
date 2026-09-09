@@ -22,6 +22,7 @@ NS="1000,2000,4000,8000,16000,32000,64000,128000,256000,512000"
 THETA=0.5
 BUDGET=90        # seconds; a point slower than this retires its solver
 LABEL=""         # free-text tag copied into every row (e.g. cpu-node)
+REPS=0           # 0 = pick from N (below); >0 = force this many reps
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
         --ns)      NS="$2"; shift 2 ;;
         --theta)   THETA="$2"; shift 2 ;;
         --budget)  BUDGET="$2"; shift 2 ;;
+        --reps)    REPS="$2"; shift 2 ;;
         --label)   LABEL="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -56,7 +58,9 @@ for solver in "${SOLVER_ARR[@]}"; do
     # Repetition count comes down as N grows: enough samples to average at
     # small N without spending minutes per point at the top of the ladder.
     for n in "${N_ARR[@]}"; do
-        if   [ "$n" -le 8000 ];  then reps=10
+        if [ "$REPS" -gt 0 ]; then
+            reps=$REPS
+        elif [ "$n" -le 8000 ];  then reps=10
         elif [ "$n" -le 64000 ]; then reps=5
         else                          reps=3
         fi
