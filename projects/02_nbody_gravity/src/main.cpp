@@ -22,6 +22,7 @@
 #include <glm/glm.hpp>
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,7 +53,16 @@ struct Args {
     int benchN = 10000;
     double benchTheta = 0.5;
     int benchReps = 5;
-    int benchOrder = 5; // spherical_fmm expansion order
+    int benchOrder = 5;         // spherical_fmm expansion order
+    double benchEps = 0.02;     // Plummer softening length (0 -> near-unsoftened, for the
+                                // open-source reference comparison where the reference is 1/r)
+
+    // --dump-ic <path>: write the exact Plummer sphere that `--bench --bench-n N`
+    // uses to <path> as raw float32 (x,y,z,mass,vx,vy,vz per particle -- the
+    // repo's ic_file / make_ic.py interchange format), then exit. Lets an
+    // external reference solver (scripts/nbody_bench_reference.py) benchmark
+    // the byte-identical problem. Prints `# dump-ic N=.. eps=.. G=..` to stderr.
+    std::string dumpIc;
 };
 
 Args ParseArgs(int argc, char** argv) {
@@ -76,6 +86,8 @@ Args ParseArgs(int argc, char** argv) {
         else if (s == "--bench-theta") a.benchTheta = std::atof(next());
         else if (s == "--bench-reps") a.benchReps = std::atoi(next());
         else if (s == "--bench-order") a.benchOrder = std::atoi(next());
+        else if (s == "--bench-eps") a.benchEps = std::atof(next());
+        else if (s == "--dump-ic") a.dumpIc = next();
         else if (s == "--render-check") a.renderCheck = next();
         else std::fprintf(stderr, "warning: unknown arg '%s'\n", s.c_str());
     }
@@ -226,6 +238,47 @@ bool GpuSelftest() {
     return ok;
 }
 
+// The fixed parameters --bench (and --dump-ic) use for its Plummer sphere.
+// Kept here so RunBench and DumpIc can't drift apart. Softening length is
+// --bench-eps (default 0.02).
+namespace bench_ic {
+constexpr double kG = 1.0;
+constexpr std::uint32_t kSeed = 1;
+} // namespace bench_ic
+
+// --dump-ic: write the exact Plummer sphere `--bench --bench-n N` uses to a
+// raw float32 file (x,y,z,mass,vx,vy,vz per particle -- the repo's ic_file
+// format), so an external reference solver benchmarks the byte-identical
+// problem. Returns 0 on success, 1 on write failure.
+int DumpIc(const Args& a) {
+    ngrav::ic::PlummerParams pp;
+    pp.n = a.benchN;
+    pp.seed = bench_ic::kSeed;
+    const ngrav::SoA<3> s = ngrav::ic::Plummer<3>(pp);
+
+    std::FILE* f = std::fopen(a.dumpIc.c_str(), "wb");
+    if (!f) {
+        std::fprintf(stderr, "dump-ic: cannot open '%s' for writing\n", a.dumpIc.c_str());
+        return 1;
+    }
+    std::vector<float> rec(7);
+    for (int i = 0; i < a.benchN; ++i) {
+        const std::size_t ii = static_cast<std::size_t>(i);
+        rec[0] = static_cast<float>(s.x[ii]);
+        rec[1] = static_cast<float>(s.y[ii]);
+        rec[2] = static_cast<float>(s.z[ii]);
+        rec[3] = static_cast<float>(s.m[ii]);
+        rec[4] = static_cast<float>(s.vx[ii]);
+        rec[5] = static_cast<float>(s.vy[ii]);
+        rec[6] = static_cast<float>(s.vz[ii]);
+        std::fwrite(rec.data(), sizeof(float), 7, f);
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "# dump-ic path=%s N=%d eps=%.5g G=%.4f seed=%u format=raw-f32-x,y,z,m,vx,vy,vz\n",
+                 a.dumpIc.c_str(), a.benchN, a.benchEps, bench_ic::kG, bench_ic::kSeed);
+    return 0;
+}
+
 // --bench: time one solver's force evaluation on an N-body Plummer sphere
 // and report its mean per-eval wall time + mean relative force error vs the
 // exact Direct sum. One CSV line to stdout (header printed to stderr), for
@@ -234,13 +287,13 @@ bool GpuSelftest() {
 int RunBench(const Args& a) {
     ngrav::ic::PlummerParams pp;
     pp.n = a.benchN;
-    pp.seed = 1;
+    pp.seed = bench_ic::kSeed;
     ngrav::SoA<3> s = ngrav::ic::Plummer<3>(pp);
     const ngrav::PosMassView<3> v = ngrav::ViewOf(s);
 
     ngrav::StepParams sp;
-    sp.G = 1.0;
-    sp.soft = ngrav::Softening::Plummer(0.02);
+    sp.G = bench_ic::kG;
+    sp.soft = ngrav::Softening::Plummer(a.benchEps);
     sp.mac.theta = a.benchTheta;
 
     // The GPU solvers are standalone entry points that need a live GL context
@@ -384,6 +437,7 @@ int main(int argc, char** argv) {
         std::printf("\ngpu-selftest: %s\n", ok ? "PASS" : "FAIL");
         return ok ? 0 : 1;
     }
+    if (!a.dumpIc.empty()) return DumpIc(a);
     if (!a.bench.empty()) return RunBench(a);
 
     // Interactive comparison tool: bare invocation or explicit --interactive
@@ -452,7 +506,9 @@ int main(int argc, char** argv) {
                      "  02_nbody_gravity --deck <f.toml> --out <dir> [--frames N] [--substeps N]\n"
                      "  02_nbody_gravity --deck <f.toml> --render-check <out.png>\n"
                      "  02_nbody_gravity --selftest | --dt-selftest | --fmm-selftest | --spherical-selftest |\n"
-                     "                   --gpu-selftest | --rung-selftest\n");
+                     "                   --gpu-selftest | --rung-selftest\n"
+                     "  02_nbody_gravity --bench <solver> --bench-n N [--bench-theta T] [--bench-reps R]\n"
+                     "  02_nbody_gravity --dump-ic <file.bin> --bench-n N   (raw f32 x,y,z,m,vx,vy,vz)\n");
         return 2;
     }
 

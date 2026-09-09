@@ -19,7 +19,8 @@ BIN=""
 OUT=""
 SOLVERS="direct,barnes_hut,fmm,spherical_fmm"
 NS="1000,2000,4000,8000,16000,32000,64000,128000,256000,512000"
-THETA=0.5
+THETAS=0.5       # comma-separated: each (solver,N) is measured at every theta
+EPS=0.02         # Plummer softening length (--bench-eps); 0 -> ~unsoftened
 BUDGET=90        # seconds; a point slower than this retires its solver
 LABEL=""         # free-text tag copied into every row (e.g. cpu-node)
 REPS=0           # 0 = pick from N (below); >0 = force this many reps
@@ -30,7 +31,9 @@ while [ $# -gt 0 ]; do
         --out)     OUT="$2"; shift 2 ;;
         --solvers) SOLVERS="$2"; shift 2 ;;
         --ns)      NS="$2"; shift 2 ;;
-        --theta)   THETA="$2"; shift 2 ;;
+        --theta)   THETAS="$2"; shift 2 ;;
+        --thetas)  THETAS="$2"; shift 2 ;;
+        --eps)     EPS="$2"; shift 2 ;;
         --budget)  BUDGET="$2"; shift 2 ;;
         --reps)    REPS="$2"; shift 2 ;;
         --label)   LABEL="$2"; shift 2 ;;
@@ -53,6 +56,7 @@ echo "label,threads,solver,n,theta,order,ms_per_eval,mean_rel_err" > "$OUT"
 
 IFS=',' read -r -a SOLVER_ARR <<< "$SOLVERS"
 IFS=',' read -r -a N_ARR <<< "$NS"
+IFS=',' read -r -a THETA_ARR <<< "$THETAS"
 
 for solver in "${SOLVER_ARR[@]}"; do
     # Repetition count comes down as N grows: enough samples to average at
@@ -65,28 +69,33 @@ for solver in "${SOLVER_ARR[@]}"; do
         else                          reps=3
         fi
 
-        start=$(date +%s.%N)
-        line=$("$BIN" --bench "$solver" --bench-n "$n" --bench-theta "$THETA" --bench-reps "$reps" 2>/dev/null)
-        rc=$?
-        end=$(date +%s.%N)
-        elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN{printf "%.1f", b-a}')
+        retire=0
+        for theta in "${THETA_ARR[@]}"; do
+            start=$(date +%s.%N)
+            line=$("$BIN" --bench "$solver" --bench-n "$n" --bench-theta "$theta" \
+                          --bench-eps "$EPS" --bench-reps "$reps" 2>/dev/null)
+            rc=$?
+            end=$(date +%s.%N)
+            elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN{printf "%.1f", b-a}')
 
-        if [ $rc -ne 0 ] || [ -z "$line" ]; then
-            echo "  $solver N=$n -> FAILED (rc=$rc) after ${elapsed}s" >&2
-            break
-        fi
+            if [ $rc -ne 0 ] || [ -z "$line" ]; then
+                echo "  $solver N=$n theta=$theta -> FAILED (rc=$rc) after ${elapsed}s" >&2
+                retire=1; break
+            fi
 
-        echo "$LABEL,$THREADS,$line" >> "$OUT"
-        ms=$(echo "$line" | cut -d, -f5)
-        err=$(echo "$line" | cut -d, -f6)
-        printf "  %-14s N=%-7s reps=%-3s %12s ms  err=%-12s (%ss wall)\n" \
-            "$solver" "$n" "$reps" "$ms" "$err" "$elapsed" >&2
+            echo "$LABEL,$THREADS,$line" >> "$OUT"
+            ms=$(echo "$line" | cut -d, -f5)
+            err=$(echo "$line" | cut -d, -f6)
+            printf "  %-14s N=%-7s th=%-4s reps=%-3s %12s ms  err=%-12s (%ss wall)\n" \
+                "$solver" "$n" "$theta" "$reps" "$ms" "$err" "$elapsed" >&2
 
-        over=$(awk -v e="$elapsed" -v b="$BUDGET" 'BEGIN{print (e>b)?1:0}')
-        if [ "$over" = "1" ]; then
-            echo "  $solver retired above N=$n (${elapsed}s > ${BUDGET}s budget)" >&2
-            break
-        fi
+            over=$(awk -v e="$elapsed" -v b="$BUDGET" 'BEGIN{print (e>b)?1:0}')
+            if [ "$over" = "1" ]; then
+                echo "  $solver retired above N=$n (${elapsed}s > ${BUDGET}s budget)" >&2
+                retire=1; break
+            fi
+        done
+        [ "$retire" = 1 ] && break
     done
 done
 
