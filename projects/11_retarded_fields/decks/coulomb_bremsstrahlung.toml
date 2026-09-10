@@ -1,0 +1,49 @@
+title = "Coulomb bremsstrahlung -- a scattering encounter, not a bound orbit"
+
+# The self-consistent solver's UNBOUND regime: a light charge (m=1) on a
+# straight-line approach deflects off a fixed heavy like charge (m=1e6,
+# seed_orbit="static") instead of orbiting it -- the same physics as
+# --brems-selftest (which sweeps the impact parameter b and confirms the
+# radiated energy scales as b^-3), just at a size meant to be watched
+# rather than measured. v=0.5, b=4 (impact parameter, the charge's initial
+# y-offset). Same solver as two_body_inspiral.toml (mode=self_consistent),
+# a genuinely different trajectory: hyperbolic scattering instead of a
+# bound, decaying orbit.
+[domain]
+nx = 460
+ny = 320
+lx = 60.0
+ly = 40.0
+c = 1.0
+eps0 = 1.0
+
+[mode]
+type = "self_consistent"
+
+[history]
+buffer_span = 220.0
+
+[time]
+dt = 0.04
+steps = 2600
+substeps_per_frame = 8
+
+[[charge]]
+q = 1.0
+m = 1000000.0
+seed_orbit = "static"
+x0 = [0.0, 0.0, 0.0]
+
+[[charge]]
+q = 1.0
+m = 1.0
+seed_orbit = "uniform"
+x0 = [-25.0, 4.0, 0.0]
+v0 = [0.5, 0.0, 0.0]
+
+[render]
+field = "E_mag"
+r_weight = true
+
+[render_check]
+warm_steps = 1300

@@ -1,0 +1,35 @@
+title = "Uniformly moving charge -- relativistic field contraction"
+
+# A charge on a straight-line, constant-velocity path (beta=0.9, gamma~2.29).
+# No acceleration, so no radiation -- pure velocity term. Unlike the
+# electrostatic Coulomb field (static_charge.toml), the field of a uniformly
+# moving charge is NOT isotropic: it is squashed into a transverse "pancake",
+# stronger perpendicular to the velocity and weaker fore/aft, by a factor
+# related to gamma. Validated by --selftest ("uniform motion" case, matches
+# the closed form to 5e-16); this deck is the visual, not a new check.
+[domain]
+nx = 420
+ny = 420
+lx = 40.0
+ly = 40.0
+c = 1.0
+eps0 = 1.0
+
+[time]
+dt = 0.05
+steps = 200
+substeps_per_frame = 4
+
+[[charge]]
+q = 1.0
+path = "uniform"
+center = [0.0, 0.0, 0.0]
+v0 = [0.9, 0.0, 0.0]
+
+[render_check]
+warm_steps = 40
+
+[render]
+field = "E_mag"
+r_weight = false
+log_scale = true
