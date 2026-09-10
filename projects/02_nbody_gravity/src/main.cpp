@@ -512,7 +512,11 @@ int main(int argc, char** argv) {
         return 2;
     }
 
-    fw::GLContext ctx = fw::GLContext::CreateHidden(4, 6);
+    // No GL context here: fw::RunHeadless only steps the sim and writes
+    // .npy / .csv, and every deck-driven solver is CPU. Creating a hidden
+    // GLFW context we never use just flashes a window on Windows mid-run
+    // (the --render-check path above does need one). GPU solvers are
+    // --bench-only entry points and make their own context.
     ngrav::DeckSim<3> sim = MakeSim();
     sim.Configure(deck);
     fw::HeadlessOptions opts;

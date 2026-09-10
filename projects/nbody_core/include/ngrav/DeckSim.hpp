@@ -10,6 +10,7 @@
 #include "framework/Simulation.hpp"
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,7 +56,11 @@ private:
     double m_deckG = 1.0, m_deckEps = 0.05, m_deckDt = 1e-3;
     SofteningKind m_deckSoftKind = SofteningKind::Plummer;
 
-    fw::ParticleCloud m_cloud;
+    // Built lazily on the first Render() -- its shader compile needs a
+    // current GL context, which the headless batch path deliberately never
+    // creates (see fw::RunHeadless). Interactive / --render-check paths
+    // call Render() with a live context, so the emplace there is safe.
+    std::optional<fw::ParticleCloud> m_cloud;
     fw::Camera m_camera;
     std::vector<fw::ParticleInstance> m_scratch;
     double m_cameraScale = 4.0;

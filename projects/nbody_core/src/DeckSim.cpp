@@ -183,6 +183,7 @@ fw::SimInfo DeckSim<D>::Info() const {
 template <int D>
 void DeckSim<D>::Render(int fbWidth, int fbHeight) {
     if (!m_haveGL) return;
+    if (!m_cloud) m_cloud.emplace(); // first Render only; needs a live GL context
     const SoA<D>& st = m_sys.State();
     const int n = static_cast<int>(st.Count());
     m_scratch.resize(static_cast<std::size_t>(n));
@@ -208,10 +209,10 @@ void DeckSim<D>::Render(int fbWidth, int fbHeight) {
         m_scratch[ii].color = glm::vec4(col, 0.9f);
         m_scratch[ii].size = baseSize;
     }
-    m_cloud.SetParticles(m_scratch);
+    m_cloud->SetParticles(m_scratch);
 
     const float aspect = static_cast<float>(fbWidth) / static_cast<float>(std::max(fbHeight, 1));
-    m_cloud.Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), static_cast<float>(fbHeight));
+    m_cloud->Draw(m_camera.ViewMatrix(), m_camera.ProjectionMatrix(aspect), static_cast<float>(fbHeight));
 }
 
 template class DeckSim<2>;
